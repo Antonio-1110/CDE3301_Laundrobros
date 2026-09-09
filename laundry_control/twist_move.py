@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-import math
 import argparse
+import math
 
 import rclpy
+
 from geometry_msgs.msg import Pose
 from moveit_msgs.srv import GetCartesianPath
 from moveit_msgs.action import ExecuteTrajectory
@@ -13,94 +14,56 @@ from move_linear import XArm7LinearMove
 
 class XArm7TwistMove(XArm7LinearMove):
     """
-    Adds a screw/auger-style twist to the base linear move:
-    the flange still translates along its local Z axis
-    (inherited TF lookup / tool-Z math from
-    move_linear.XArm7LinearMove), but can now also rotate
-    about that SAME local Z axis at the same time. Since
-    the rotation axis passes through the flange origin,
-    this changes only orientation, not position.
+    Linear motion along the current tool +Z axis, with an additional
+    deliberate rotation applied specifically to joint7.
 
-    move_linear.py itself is left completely untouched -
-    this subclass overrides move_along_tool_z() rather than
-    modifying the parent.
+    Method
+    ------
+    1. Ask MoveIt for a normal straight Cartesian trajectory while
+       keeping the flange orientation fixed.
+
+    2. Keep the COMPLETE MoveIt solution as the baseline:
+           q1_moveit(t) ... q7_moveit(t)
+
+       In particular, q7_moveit(t) may contain compensation required
+       by MoveIt to maintain the fixed flange orientation.
+
+    3. Add the desired process rotation ON TOP of MoveIt's joint7:
+
+           q7_final(t)
+               = q7_moveit(t) + q7_twist(t)
+
+    4. Execute the resulting trajectory as ONE 7-joint trajectory.
+
+    This avoids running two controllers simultaneously.
     """
 
-    # ======================================================
-    # Quaternion helpers (not needed by the plain linear
-    # move, so they live here rather than in the parent)
-    # ======================================================
+    # ==========================================================
+    # Helpers
+    # ==========================================================
 
     @staticmethod
-    def _quat_from_axis_angle(axis, angle_rad):
-        """
-        Quaternion representing a rotation of angle_rad
-        about a LOCAL (tool-frame) axis: "x", "y", or "z".
+    def _duration_to_seconds(duration):
+        return (
+            float(duration.sec)
+            + float(duration.nanosec) * 1e-9
+        )
 
-        Returned as (x, y, z, w).
-        """
+    # ==========================================================
+    # Plan pure Cartesian translation
+    # ==========================================================
 
-        half = angle_rad / 2.0
-        s = math.sin(half)
-        c = math.cos(half)
-
-        if axis == "x":
-            return (s, 0.0, 0.0, c)
-        elif axis == "y":
-            return (0.0, s, 0.0, c)
-        elif axis == "z":
-            return (0.0, 0.0, s, c)
-        else:
-            raise ValueError(
-                f"axis must be 'x', 'y', or 'z', got "
-                f"{axis!r}"
-            )
-
-    @staticmethod
-    def _quat_multiply(q_world, q_local):
-        """
-        Hamilton product: q_world * q_local.
-
-        Post-multiplying applies q_local in the flange's
-        OWN (body) frame - i.e. "rotate the last link about
-        its own axis" rather than about a world axis.
-
-        Each quaternion is (x, y, z, w).
-        """
-
-        x1, y1, z1, w1 = q_world
-        x2, y2, z2, w2 = q_local
-
-        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-
-        return (x, y, z, w)
-
-    @staticmethod
-    def _normalize_quat(q):
-
-        x, y, z, w = q
-
-        n = math.sqrt(x * x + y * y + z * z + w * w)
-
-        return (x / n, y / n, z / n, w / n)
-
-    def _send_cartesian_waypoints(
+    def _plan_linear_waypoint(
         self,
-        waypoints,
+        target_pose,
         max_step,
         velocity,
         acceleration,
-        log_label="Cartesian path",
     ):
         """
-        The "ask MoveIt, check fraction, execute" sequence
-        from the parent's move_along_tool_z, factored out
-        so both this class's twist move and scan_move.py's
-        oscillating move (which subclasses this class) can
-        reuse it instead of duplicating it.
+        Generate the orientation-preserving Cartesian baseline.
+
+        This intentionally DOES NOT contain the desired twist.
         """
 
         request = GetCartesianPath.Request()
@@ -109,23 +72,21 @@ class XArm7TwistMove(XArm7LinearMove):
         request.group_name = self.group_name
         request.link_name = self.flange_link
 
-        request.waypoints = waypoints
+        request.waypoints = [target_pose]
 
         request.max_step = max_step
-
         request.jump_threshold = 0.0
 
         request.avoid_collisions = True
+
         request.max_velocity_scaling_factor = velocity
         request.max_acceleration_scaling_factor = acceleration
 
         self.get_logger().info(
-            f"Computing collision-aware {log_label}..."
+            "Computing fixed-orientation Cartesian baseline..."
         )
 
-        future = self.cartesian_client.call_async(
-            request
-        )
+        future = self.cartesian_client.call_async(request)
 
         rclpy.spin_until_future_complete(
             self,
@@ -138,37 +99,274 @@ class XArm7TwistMove(XArm7LinearMove):
             self.get_logger().error(
                 "No response from MoveIt."
             )
-            return False
-
-        fraction = response.fraction
+            return None
 
         self.get_logger().info(
             f"Cartesian path fraction: "
-            f"{fraction * 100:.1f}%"
+            f"{response.fraction * 100.0:.1f}%"
         )
 
-        if fraction < 0.999:
+        if response.fraction < 0.999:
             self.get_logger().error(
                 "MoveIt could not generate the complete "
-                "collision-free path."
+                "Cartesian path."
             )
 
             self.get_logger().error(
                 "Trajectory will NOT be executed."
             )
 
+            return None
+
+        trajectory = response.solution
+
+        if not trajectory.joint_trajectory.points:
+            self.get_logger().error(
+                "MoveIt returned an empty joint trajectory."
+            )
+            return None
+
+        return trajectory
+
+    # ==========================================================
+    # Add J7 process rotation
+    # ==========================================================
+
+    def _add_joint7_twist(
+        self,
+        robot_trajectory,
+        twist_deg,
+        joint7_name="joint7",
+    ):
+        """
+        Add the desired rotation to MoveIt's existing J7 solution.
+
+        IMPORTANT:
+
+            q7_final(t)
+                = q7_moveit(t)
+                + desired_twist(t)
+
+        MoveIt's J7 is therefore NOT discarded.
+
+        The twist progress is tied to trajectory progress from
+        start to finish.
+
+        Because this Cartesian path is a straight line generated
+        by GetCartesianPath, normalized path progress corresponds
+        to normalized translation progress for the requested move.
+        """
+
+        traj = robot_trajectory.joint_trajectory
+
+        if not traj.points:
+            self.get_logger().error(
+                "Cannot modify an empty trajectory."
+            )
             return False
+
+        joint_names = list(traj.joint_names)
+
+        if joint7_name not in joint_names:
+            self.get_logger().error(
+                f"{joint7_name!r} not found."
+            )
+
+            self.get_logger().error(
+                f"Trajectory joints: {joint_names}"
+            )
+
+            return False
+
+        j7_index = joint_names.index(joint7_name)
+
+        twist_rad = math.radians(twist_deg)
+
+        # ------------------------------------------------------
+        # Save the ORIGINAL MoveIt J7 baseline for diagnostics
+        # ------------------------------------------------------
+
+        q7_moveit_start = (
+            traj.points[0].positions[j7_index]
+        )
+
+        q7_moveit_end = (
+            traj.points[-1].positions[j7_index]
+        )
+
+        q7_moveit_delta = (
+            q7_moveit_end - q7_moveit_start
+        )
+
+        total_time = self._duration_to_seconds(
+            traj.points[-1].time_from_start
+        )
+
+        if total_time <= 0.0:
+            self.get_logger().error(
+                "Trajectory duration is zero or invalid."
+            )
+            return False
+
+        self.get_logger().info(
+            "MoveIt J7 baseline:"
+        )
+
+        self.get_logger().info(
+            f"  start       = "
+            f"{math.degrees(q7_moveit_start):+.2f} deg"
+        )
+
+        self.get_logger().info(
+            f"  end         = "
+            f"{math.degrees(q7_moveit_end):+.2f} deg"
+        )
+
+        self.get_logger().info(
+            f"  compensation= "
+            f"{math.degrees(q7_moveit_delta):+.2f} deg"
+        )
+
+        self.get_logger().info(
+            "Desired additional J7 rotation:"
+        )
+
+        self.get_logger().info(
+            f"  process twist = {twist_deg:+.2f} deg"
+        )
+
+        self.get_logger().info(
+            "Expected final J7:"
+        )
+
+        self.get_logger().info(
+            f"  {math.degrees(q7_moveit_end):+.2f} "
+            f"+ {twist_deg:+.2f} "
+            f"= "
+            f"{math.degrees(q7_moveit_end + twist_rad):+.2f} deg"
+        )
+
+        # ------------------------------------------------------
+        # Add desired twist to each trajectory point
+        # ------------------------------------------------------
+        #
+        # We use normalized trajectory time here:
+        #
+        #       progress = t / T
+        #
+        # Because GetCartesianPath generates the straight-line
+        # Cartesian path and MoveIt time-parameterizes that path,
+        # this preserves the same start/end synchronization.
+        #
+        # q7_final =
+        #       q7_moveit
+        #       + twist_total * progress
+        #
+        # ------------------------------------------------------
+
+        for point in traj.points:
+
+            t = self._duration_to_seconds(
+                point.time_from_start
+            )
+
+            progress = t / total_time
+
+            progress = max(
+                0.0,
+                min(1.0, progress),
+            )
+
+            # ----------------------------------------------
+            # Position
+            # ----------------------------------------------
+
+            positions = list(point.positions)
+
+            q7_moveit = positions[j7_index]
+
+            q7_twist = (
+                twist_rad * progress
+            )
+
+            q7_final = (
+                q7_moveit + q7_twist
+            )
+
+            positions[j7_index] = q7_final
+
+            point.positions = positions
+
+            # ----------------------------------------------
+            # Velocity
+            #
+            # q_twist = twist_rad * t/T
+            #
+            # therefore:
+            #
+            # dq_twist/dt = twist_rad/T
+            # ----------------------------------------------
+
+            if len(point.velocities) == len(joint_names):
+
+                velocities = list(
+                    point.velocities
+                )
+
+                moveit_velocity = (
+                    velocities[j7_index]
+                )
+
+                twist_velocity = (
+                    twist_rad / total_time
+                )
+
+                velocities[j7_index] = (
+                    moveit_velocity
+                    + twist_velocity
+                )
+
+                point.velocities = velocities
+
+            # ----------------------------------------------
+            # Acceleration
+            #
+            # Linear twist vs time has zero additional
+            # acceleration between trajectory points.
+            #
+            # Therefore MoveIt's original J7 acceleration
+            # remains untouched.
+            # ----------------------------------------------
+
+        return True
+
+    # ==========================================================
+    # Execute trajectory
+    # ==========================================================
+
+    def _execute_trajectory(
+        self,
+        trajectory,
+    ):
 
         goal = ExecuteTrajectory.Goal()
 
-        goal.trajectory = response.solution
+        goal.trajectory = trajectory
 
         self.get_logger().info(
-            f"Full {log_label} found. Executing..."
+            "Executing combined trajectory:"
         )
 
-        send_future = self.execute_client.send_goal_async(
-            goal
+        self.get_logger().info(
+            "  J1-J6 = MoveIt Cartesian solution"
+        )
+
+        self.get_logger().info(
+            "  J7    = MoveIt baseline + process twist"
+        )
+
+        send_future = (
+            self.execute_client.send_goal_async(goal)
         )
 
         rclpy.spin_until_future_complete(
@@ -187,11 +385,13 @@ class XArm7TwistMove(XArm7LinearMove):
 
         if not goal_handle.accepted:
             self.get_logger().error(
-                "Trajectory execution was rejected."
+                "Trajectory execution rejected."
             )
             return False
 
-        result_future = goal_handle.get_result_async()
+        result_future = (
+            goal_handle.get_result_async()
+        )
 
         rclpy.spin_until_future_complete(
             self,
@@ -210,7 +410,7 @@ class XArm7TwistMove(XArm7LinearMove):
 
         if result.error_code.val == 1:
             self.get_logger().info(
-                f"{log_label} completed successfully."
+                "Linear + J7 twist completed successfully."
             )
             return True
 
@@ -222,10 +422,9 @@ class XArm7TwistMove(XArm7LinearMove):
 
         return False
 
-    # ======================================================
-    # Override: translate along tool Z, optionally twisting
-    # about that same local Z axis at the same time.
-    # ======================================================
+    # ==========================================================
+    # Main public function
+    # ==========================================================
 
     def move_along_tool_z(
         self,
@@ -234,32 +433,34 @@ class XArm7TwistMove(XArm7LinearMove):
         twist_per_meter=0.0,
         max_step=0.005,
         velocity=0.1,
-        acceleration=0.1
+        acceleration=0.1,
     ):
         """
-        Same translation behaviour as
-        XArm7LinearMove.move_along_tool_z, plus an optional
-        simultaneous twist about the local tool Z axis.
+        Translate along the current flange local +Z axis while
+        adding an explicit J7 rotation.
 
-        distance:
-            meters. +0.25 -> 25 cm along tool +Z.
-                    -0.25 -> 25 cm along tool -Z.
+        Example:
 
-        twist_deg:
-            If given, this exact twist (degrees) is applied
-            about the local tool Z axis for this call,
-            regardless of distance.
+            distance  = 0.05 m
+            twist_deg = 150 deg
 
-        twist_per_meter:
-            If twist_deg is NOT given, the twist is derived
-            from distance travelled:
-                twist_deg = distance * twist_per_meter
-            Example: "150 deg every 5 cm" -> 150/0.05=3000.
-            Default 0.0 -> no twist.
+        produces approximately:
 
-        max_step:
-            Cartesian interpolation resolution (meters).
+            translation progress     added J7 twist
+
+                  0%                       0 deg
+                 20%                      30 deg
+                 40%                      60 deg
+                 60%                      90 deg
+                 80%                     120 deg
+                100%                     150 deg
+
+        ON TOP OF MoveIt's own J7 compensation.
         """
+
+        # ------------------------------------------------------
+        # 1. Current flange transform
+        # ------------------------------------------------------
 
         tf = self._get_flange_transform()
 
@@ -270,50 +471,77 @@ class XArm7TwistMove(XArm7LinearMove):
         start_y = translation.y
         start_z = translation.z
 
-        zx, zy, zz = self._tool_z_from_quaternion(
-            rotation
+        # ------------------------------------------------------
+        # 2. Tool +Z
+        #
+        # Reuse parent implementation from move_linear.py.
+        # ------------------------------------------------------
+
+        zx, zy, zz = (
+            self._tool_z_from_quaternion(rotation)
         )
 
-        target_x = start_x + distance * zx
-        target_y = start_y + distance * zy
-        target_z = start_z + distance * zz
+        # ------------------------------------------------------
+        # 3. Translation target
+        # ------------------------------------------------------
+
+        target_x = (
+            start_x + distance * zx
+        )
+
+        target_y = (
+            start_y + distance * zy
+        )
+
+        target_z = (
+            start_z + distance * zz
+        )
+
+        # ------------------------------------------------------
+        # 4. Desired process rotation
+        # ------------------------------------------------------
 
         if twist_deg is None:
-            twist_deg = distance * twist_per_meter
-
-        twist_rad = math.radians(twist_deg)
-
-        self.get_logger().info(
-            "Linear + twist Cartesian movement:"
-        )
+            twist_deg = (
+                distance * twist_per_meter
+            )
 
         self.get_logger().info(
-            f"  distance: {distance:+.3f} m"
+            "Requested synchronized movement:"
         )
 
         self.get_logger().info(
-            f"  twist:    {twist_deg:+.2f} deg about "
-            f"local tool Z"
+            f"  translation = {distance:+.4f} m"
         )
 
-        current_q = (
-            rotation.x,
-            rotation.y,
-            rotation.z,
-            rotation.w,
+        self.get_logger().info(
+            f"  added J7    = {twist_deg:+.2f} deg"
         )
 
-        twist_q = self._quat_from_axis_angle(
-            "z",
-            twist_rad,
-        )
+        if abs(distance) > 1e-9:
 
-        target_q = self._quat_multiply(
-            current_q,
-            twist_q,
-        )
+            ratio = twist_deg / distance
 
-        target_q = self._normalize_quat(target_q)
+            self.get_logger().info(
+                f"  ratio       = "
+                f"{ratio:+.2f} deg/m"
+            )
+
+            self.get_logger().info(
+                f"              = "
+                f"{ratio / 100.0:+.2f} deg/cm"
+            )
+
+        # ------------------------------------------------------
+        # 5. PURE Cartesian target
+        #
+        # CRITICAL:
+        #
+        # Orientation is copied exactly.
+        #
+        # MoveIt therefore calculates whatever J7 compensation
+        # it thinks is necessary to maintain orientation.
+        # ------------------------------------------------------
 
         target_pose = Pose()
 
@@ -321,31 +549,56 @@ class XArm7TwistMove(XArm7LinearMove):
         target_pose.position.y = target_y
         target_pose.position.z = target_z
 
-        target_pose.orientation.x = target_q[0]
-        target_pose.orientation.y = target_q[1]
-        target_pose.orientation.z = target_q[2]
-        target_pose.orientation.w = target_q[3]
+        target_pose.orientation.x = rotation.x
+        target_pose.orientation.y = rotation.y
+        target_pose.orientation.z = rotation.z
+        target_pose.orientation.w = rotation.w
 
-        return self._send_cartesian_waypoints(
-            waypoints=[target_pose],
+        # ------------------------------------------------------
+        # 6. Generate baseline
+        # ------------------------------------------------------
+
+        trajectory = self._plan_linear_waypoint(
+            target_pose=target_pose,
             max_step=max_step,
             velocity=velocity,
             acceleration=acceleration,
-            log_label="linear+twist path",
+        )
+
+        if trajectory is None:
+            return False
+
+        # ------------------------------------------------------
+        # 7. Add J7 process rotation ON TOP of baseline
+        # ------------------------------------------------------
+
+        success = self._add_joint7_twist(
+            trajectory=trajectory,
+            twist_deg=twist_deg,
+        )
+
+        if not success:
+            return False
+
+        # ------------------------------------------------------
+        # 8. Execute ONE combined trajectory
+        # ------------------------------------------------------
+
+        return self._execute_trajectory(
+            trajectory
         )
 
 
-# ==========================================================
-# Terminal interface
-# ==========================================================
+# ==============================================================
+# CLI
+# ==============================================================
 
 def main():
 
     parser = argparse.ArgumentParser(
         description=(
-            "Move xArm7 linearly along the flange's local "
-            "Z axis, twisting the last link about that "
-            "same axis (a screw motion)."
+            "Move xArm7 along the flange local Z axis "
+            "while adding an explicit synchronized J7 rotation."
         )
     )
 
@@ -363,9 +616,8 @@ def main():
         type=float,
         default=None,
         help=(
-            "Exact twist in degrees about the local tool "
-            "Z axis for this move. Overrides "
-            "--twist-per-meter if given."
+            "Additional J7 rotation in degrees. "
+            "Overrides --twist-per-meter."
         ),
     )
 
@@ -374,9 +626,8 @@ def main():
         type=float,
         default=0.0,
         help=(
-            "Twist in degrees, scaled by distance moved. "
-            "Example: for '150 deg every 5 cm', pass "
-            "3000 (i.e. 150 / 0.05). Default: 0.0."
+            "Additional J7 rotation per meter. "
+            "For 150 deg per 5 cm: 3000."
         ),
     )
 
@@ -384,6 +635,9 @@ def main():
         "--step",
         type=float,
         default=0.005,
+        help=(
+            "Cartesian interpolation step in meters."
+        ),
     )
 
     parser.add_argument(
@@ -404,9 +658,12 @@ def main():
 
     twister = XArm7TwistMove()
 
+    success = False
+
     try:
+
         success = twister.move_along_tool_z(
-            args.distance,
+            distance=args.distance,
             twist_deg=args.twist,
             twist_per_meter=args.twist_per_meter,
             max_step=args.step,
@@ -415,10 +672,13 @@ def main():
         )
 
     finally:
+
         twister.destroy_node()
         rclpy.shutdown()
 
-    raise SystemExit(0 if success else 1)
+    raise SystemExit(
+        0 if success else 1
+    )
 
 
 if __name__ == "__main__":
