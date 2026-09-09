@@ -3,7 +3,7 @@
 import rclpy
 
 from laundry_control.arm_position import ZERO
-from laundry_control.move import XArm7MoveGroup
+from laundry_control.move import XArm7Controller
 
 
 def move_to_inter(arm=None):
@@ -16,7 +16,7 @@ def move_to_inter(arm=None):
     # Otherwise this script is responsible for ROS.
     rclpy.init()
 
-    arm = XArm7MoveGroup()
+    arm = XArm7Controller()
 
     try:
         return arm.move_joints(ZERO)
