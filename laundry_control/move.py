@@ -433,8 +433,92 @@ class XArm7Controller(Node):
         return False
 
     # =========================================================
-    # RELATIVE J7-ONLY MOVEMENT
+    # RELATIVE SINGLE-JOINT MOVEMENT
     # =========================================================
+
+    def _rotate_joint_relative(
+        self,
+        joint_index,
+        delta_deg,
+        velocity=0.3,
+        acceleration=0.3,
+    ):
+        """
+        Rotate ONLY the joint at joint_index relative to its
+        current position.
+
+        All other joints are read from the current robot state
+        and used unchanged as the MoveIt target.
+        """
+
+        current = self.get_current_joints()
+
+        if current is None:
+            return False
+
+        target = list(current)
+
+        joint_name = self.JOINT_NAMES[joint_index]
+
+        old_angle = target[joint_index]
+
+        target[joint_index] += math.radians(
+            delta_deg
+        )
+
+        self.get_logger().info(
+            f"{joint_name}-only relative movement:"
+        )
+
+        self.get_logger().info(
+            f"  current: "
+            f"{math.degrees(old_angle):+.2f} deg"
+        )
+
+        self.get_logger().info(
+            f"  delta:   "
+            f"{delta_deg:+.2f} deg"
+        )
+
+        self.get_logger().info(
+            f"  target:  "
+            f"{math.degrees(target[joint_index]):+.2f} deg"
+        )
+
+        return self.move_joints(
+            target,
+            velocity=velocity,
+            acceleration=acceleration,
+        )
+
+    def rotate_joint6(
+        self,
+        delta_deg,
+        velocity=0.3,
+        acceleration=0.3,
+    ):
+        """
+        Rotate ONLY J6 relative to its current position.
+
+        Example:
+
+            rotate_joint6(-75)
+
+        means:
+
+            J1 -> current J1
+            ...
+            J5 -> current J5
+            J6 -> current J6 - 75 deg
+            J7 -> current J7
+        """
+
+        return self._rotate_joint_relative(
+            joint_index=5,
+            delta_deg=delta_deg,
+            velocity=velocity,
+            acceleration=acceleration,
+        )
 
     def rotate_joint7(
         self,
@@ -444,9 +528,6 @@ class XArm7Controller(Node):
     ):
         """
         Rotate ONLY J7 relative to its current position.
-
-        J1-J6 are read from the current robot state and used
-        unchanged as the MoveIt target.
 
         Example:
 
@@ -460,40 +541,9 @@ class XArm7Controller(Node):
             J7 -> current J7 - 75 deg
         """
 
-        current = self.get_current_joints()
-
-        if current is None:
-            return False
-
-        target = list(current)
-
-        old_j7 = target[6]
-
-        target[6] += math.radians(
-            delta_deg
-        )
-
-        self.get_logger().info(
-            "J7-only relative movement:"
-        )
-
-        self.get_logger().info(
-            f"  current: "
-            f"{math.degrees(old_j7):+.2f} deg"
-        )
-
-        self.get_logger().info(
-            f"  delta:   "
-            f"{delta_deg:+.2f} deg"
-        )
-
-        self.get_logger().info(
-            f"  target:  "
-            f"{math.degrees(target[6]):+.2f} deg"
-        )
-
-        return self.move_joints(
-            target,
+        return self._rotate_joint_relative(
+            joint_index=6,
+            delta_deg=delta_deg,
             velocity=velocity,
             acceleration=acceleration,
         )
@@ -1014,6 +1064,21 @@ def build_parser():
     )
 
     # ---------------------------------------------------------
+    # joint6
+    # ---------------------------------------------------------
+
+    j6_parser = subparsers.add_parser(
+        "joint6",
+        help="Rotate J6 relative to current position.",
+    )
+
+    j6_parser.add_argument(
+        "angle",
+        type=float,
+        help="Relative J6 rotation in degrees.",
+    )
+
+    # ---------------------------------------------------------
     # joint7
     # ---------------------------------------------------------
 
@@ -1126,6 +1191,30 @@ def main():
 
             success = arm.move_joints(
                 joint_angles,
+                velocity=velocity,
+                acceleration=acceleration,
+            )
+
+        # =====================================================
+        # J6
+        # =====================================================
+
+        elif args.command == "joint6":
+
+            velocity = (
+                args.velocity
+                if args.velocity is not None
+                else 0.3
+            )
+
+            acceleration = (
+                args.acceleration
+                if args.acceleration is not None
+                else 0.3
+            )
+
+            success = arm.rotate_joint6(
+                args.angle,
                 velocity=velocity,
                 acceleration=acceleration,
             )

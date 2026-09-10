@@ -2,7 +2,7 @@
 
 import rclpy
 
-from laundry_control.arm_position import ZERO
+from laundry_control.arm_position import HOME
 from laundry_control.move import XArm7Controller
 
 
@@ -11,7 +11,7 @@ def move_to_inter(arm=None):
     # If an existing arm controller was provided,
     # use it directly.
     if arm is not None:
-        return arm.move_joints(ZERO)
+        return arm.move_joints(HOME)
 
     # Otherwise this script is responsible for ROS.
     rclpy.init()
@@ -19,7 +19,7 @@ def move_to_inter(arm=None):
     arm = XArm7Controller()
 
     try:
-        return arm.move_joints(ZERO)
+        return arm.move_joints(HOME)
 
     finally:
         arm.destroy_node()
@@ -31,10 +31,10 @@ def main():
     success = move_to_inter()
 
     if success:
-        print("Robot reached ZERO.")
+        print("Robot reached HOME.")
         return 0
 
-    print("Failed to reach ZERO.")
+    print("Failed to reach HOME.")
     return 1
 
 
