@@ -13,6 +13,8 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'meshes'), glob('meshes/*')),
+        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -28,6 +30,8 @@ setup(
     entry_points={
         'console_scripts': [
             'run_probe = laundry_control.main:main',
+            'tof_sensor = laundry_control.tof_sensor:main',
+            'scan_replay = laundry_control.scan_replay:main',
         ],
     },
 )

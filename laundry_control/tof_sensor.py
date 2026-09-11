@@ -1,7 +1,7 @@
 """
 tof_sensor.py
 
-Simple VL53L0X interface for Raspberry Pi.
+ROS2 node that publishes VL53L0X time-of-flight distance readings.
 
 Wiring:
     VL53L0X VCC -> RPi 3.3V
@@ -11,13 +11,25 @@ Wiring:
 
 Library:
     pip install adafruit-circuitpython-vl53l0x
-"""
 
-import time
+Usage:
+    ros2 run laundry_control tof_sensor
+"""
 
 import board
 import busio
 import adafruit_vl53l0x
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Range
+
+# VL53L0X datasheet: ~25 degree field of view, usable range ~30mm-2000mm.
+FIELD_OF_VIEW_RAD = 0.436
+MIN_RANGE_M = 0.03
+MAX_RANGE_M = 2.0
+
+PUBLISH_PERIOD_SEC = 0.05
 
 
 class ToFSensor:
@@ -33,12 +45,8 @@ class ToFSensor:
 
         self.offset_cm = offset_cm
 
-        print("Initializing VL53L0X...")
-
         self.i2c = busio.I2C(board.SCL, board.SDA)
         self.sensor = adafruit_vl53l0x.VL53L0X(self.i2c)
-
-        print("VL53L0X ready.")
 
     def get_distance_mm(self):
         """Return current distance in millimeters."""
@@ -54,19 +62,50 @@ class ToFSensor:
         return distance_cm
 
 
-def main():
-    tof = ToFSensor(offset_cm=-1.0)
+class ToFSensorNode(Node):
+    def __init__(self):
+        super().__init__('tof_sensor')
+
+        self.declare_parameter('offset_cm', -1.0)
+        self.declare_parameter('frame_id', 'tof_sensor_link')
+
+        offset_cm = self.get_parameter('offset_cm').value
+        self.frame_id = self.get_parameter('frame_id').value
+
+        self.get_logger().info('Initializing VL53L0X...')
+        self.tof = ToFSensor(offset_cm=offset_cm)
+        self.get_logger().info('VL53L0X ready.')
+
+        self.publisher = self.create_publisher(Range, 'tof_sensor/range', 10)
+        self.timer = self.create_timer(PUBLISH_PERIOD_SEC, self.publish_reading)
+
+    def publish_reading(self):
+        distance_cm = self.tof.get_distance_cm()
+
+        msg = Range()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.frame_id
+        msg.radiation_type = Range.INFRARED
+        msg.field_of_view = FIELD_OF_VIEW_RAD
+        msg.min_range = MIN_RANGE_M
+        msg.max_range = MAX_RANGE_M
+        msg.range = distance_cm / 100.0
+
+        self.publisher.publish(msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+
+    node = ToFSensorNode()
 
     try:
-        while True:
-            distance = tof.get_distance_cm()
-
-            print(f"Distance: {distance:.1f} cm")
-
-            time.sleep(0.2)
-
+        rclpy.spin(node)
     except KeyboardInterrupt:
-        print("\nStopping VL53L0X.")
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

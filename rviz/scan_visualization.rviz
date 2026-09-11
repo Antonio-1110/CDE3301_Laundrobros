@@ -1,0 +1,62 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Description Topic:
+        Value: /robot_description
+      TF Prefix: ""
+      Visual Enabled: true
+      Collision Enabled: false
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Axes: true
+      Marker Scale: 0.1
+    - Class: rviz_default_plugins/PointCloud2
+      Name: ToF Scan Points
+      Enabled: true
+      Topic:
+        Value: /scan_record/points
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Style: Spheres
+      Size (m): 0.01
+      Color Transformer: AxisColor
+      Axis: Z
+      Autocompute Intensity Bounds: true
+  Global Options:
+    Fixed Frame: link_base
+    Background Color: 48; 48; 48
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.5
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0.3
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.5
+      Yaw: 0.8
+Window Geometry:
+  Height: 900
+  Width: 1400
+  X: 50
+  Y: 50

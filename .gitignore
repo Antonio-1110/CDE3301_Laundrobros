@@ -1,2 +1,5 @@
 *.pyc
 __pycache__/*
+
+# lgpio notification FIFOs (created wherever GPIO notify code runs)
+.lgd-nfy*

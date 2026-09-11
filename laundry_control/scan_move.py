@@ -6,7 +6,9 @@ import time
 
 import rclpy
 
+from arm_position import INTER
 from move import XArm7Controller
+from scan_record import TofScanRecorder
 
 
 def scan(
@@ -16,8 +18,11 @@ def scan(
     sweep_deg=150.0,
     velocity=0.1,
     acceleration=0.1,
+    rotation_velocity=0.5,
+    rotation_acceleration=0.5,
     cartesian_step=0.005,
     pause=0.0,
+    recorder=None,
 ):
     """
     Perform the complete xArm7 scanning sequence.
@@ -52,6 +57,23 @@ def scan(
 
     acceleration:
         MoveIt acceleration scaling.
+
+    rotation_velocity:
+        MoveIt velocity scaling used for the two stationary
+        (non-linear) J7 rotations: the initial offset and the
+        turnaround phase shift. Since these involve no
+        simultaneous linear motion they can run faster than
+        the interleaved scan strokes.
+
+        Default:
+            0.5
+
+    rotation_acceleration:
+        MoveIt acceleration scaling for the stationary J7
+        rotations.
+
+        Default:
+            0.5
 
     cartesian_step:
         Cartesian interpolation resolution passed to move.py.
@@ -137,6 +159,18 @@ def scan(
         )
         return False
 
+    if not 0.0 < rotation_velocity <= 1.0:
+        arm.get_logger().error(
+            "rotation_velocity must be in the range (0, 1]."
+        )
+        return False
+
+    if not 0.0 < rotation_acceleration <= 1.0:
+        arm.get_logger().error(
+            "rotation_acceleration must be in the range (0, 1]."
+        )
+        return False
+
     # =========================================================
     # Determine number of strokes
     # =========================================================
@@ -218,9 +252,23 @@ def scan(
     # =========================================================
 
     def wait_between_movements():
+        """
+        Pause between motions.
 
-        if pause > 0.0:
-            time.sleep(pause)
+        Spins the node (rather than a plain time.sleep) so that,
+        if a recorder is attached, ToF readings keep being
+        captured while the arm is stationary too.
+        """
+
+        if pause <= 0.0:
+            return
+
+        deadline = arm.get_clock().now() + rclpy.duration.Duration(
+            seconds=pause
+        )
+
+        while arm.get_clock().now() < deadline:
+            rclpy.spin_once(arm, timeout_sec=0.05)
 
     # =========================================================
     # 1. INITIAL J7 OFFSET
@@ -249,8 +297,8 @@ def scan(
 
     success = arm.rotate_joint7(
         delta_deg=-half_sweep,
-        velocity=velocity,
-        acceleration=acceleration,
+        velocity=rotation_velocity,
+        acceleration=rotation_acceleration,
     )
 
     if not success:
@@ -419,8 +467,8 @@ def scan(
 
     success = arm.rotate_joint7(
         delta_deg=phase_twist,
-        velocity=velocity,
-        acceleration=acceleration,
+        velocity=rotation_velocity,
+        acceleration=rotation_acceleration,
     )
 
     if not success:
@@ -523,7 +571,27 @@ def scan(
         wait_between_movements()
 
     # =========================================================
-    # 5. COMPLETE
+    # 5. RETURN TO INTER
+    # =========================================================
+
+    arm.get_logger().info(
+        "========== RETURN TO INTER =========="
+    )
+
+    success = arm.move_joints(INTER)
+
+    if not success:
+
+        arm.get_logger().error(
+            "Return to INTER failed."
+        )
+
+        return False
+
+    wait_between_movements()
+
+    # =========================================================
+    # 6. COMPLETE
     # =========================================================
 
     if abs(current_depth) < 1e-9:
@@ -541,6 +609,13 @@ def scan(
         f"Final nominal depth: "
         f"{current_depth:.4f} m"
     )
+
+    if recorder is not None:
+
+        arm.get_logger().info(
+            f"ToF points recorded: "
+            f"{len(recorder.points_base_frame)}"
+        )
 
     arm.get_logger().info(
         "========================================"
@@ -613,6 +688,26 @@ def build_parser():
     )
 
     parser.add_argument(
+        "--rotation-velocity",
+        type=float,
+        default=0.5,
+        help=(
+            "MoveIt velocity scaling for the stationary "
+            "(non-linear) J7 rotations (default: 0.5)."
+        ),
+    )
+
+    parser.add_argument(
+        "--rotation-acceleration",
+        type=float,
+        default=0.5,
+        help=(
+            "MoveIt acceleration scaling for the stationary "
+            "(non-linear) J7 rotations (default: 0.5)."
+        ),
+    )
+
+    parser.add_argument(
         "--cartesian-step",
         type=float,
         default=0.005,
@@ -632,6 +727,16 @@ def build_parser():
         ),
     )
 
+    parser.add_argument(
+        "--save-points",
+        type=str,
+        default=None,
+        help=(
+            "Optional CSV path to save recorded ToF scan "
+            "points (base frame) to after the scan."
+        ),
+    )
+
     return parser
 
 
@@ -642,6 +747,7 @@ def main():
     rclpy.init()
 
     arm = XArm7Controller()
+    recorder = TofScanRecorder(arm)
 
     success = False
 
@@ -654,9 +760,19 @@ def main():
             sweep_deg=args.sweep,
             velocity=args.velocity,
             acceleration=args.acceleration,
+            rotation_velocity=args.rotation_velocity,
+            rotation_acceleration=args.rotation_acceleration,
             cartesian_step=args.cartesian_step,
             pause=args.pause,
+            recorder=recorder,
         )
+
+        if args.save_points:
+            recorder.save_csv(args.save_points)
+
+            arm.get_logger().info(
+                f"Saved scan points to {args.save_points}"
+            )
 
     except KeyboardInterrupt:
 

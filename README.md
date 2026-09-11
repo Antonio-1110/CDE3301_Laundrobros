@@ -112,3 +112,39 @@ git fetch origin
 git rebase origin/jazzy
 git push myfork my-obstacle-changes --force-with-lease   # only after rebasing
 ```
+
+## ToF sensor scanning + visualization
+
+`tof_sensor.py` is a ROS2 node publishing `sensor_msgs/Range` on `tof_sensor/range`. `scan_move.py` drives the arm through a bucket-scanning sweep and (via `TofScanRecorder` in `scan_record.py`) records each reading as a 3D point, transformed through TF into both the TCP frame (`link7`) and the base frame (`link_base`).
+
+The sensor's mounting offset from the TCP (`TOF_SENSOR_OFFSET_*` in `move.py`) is published as a static transform `link7 -> tof_sensor_link`, so it's automatically joint7-correct without extra math. Current values (measured at the `INTER` pose): 2.8 cm along local +X (the sensor's own boresight/forward direction) and 7.75 cm along local +Z (which points straight down at `INTER`, per `check_flange.py`). If a different physical mounting axis turns out to be "front," these are the two constants to flip/adjust.
+
+### Live visualization while scanning
+
+```
+# Terminal 1: bring up the robot model + obstacles (fake controller, no hardware)
+ros2 launch xarm_moveit_config xarm7_moveit_fake.launch.py
+
+# Terminal 2: run the scan (records + live-publishes points)
+ros2 run laundry_control run_probe   # or: python3 laundry_control/scan_move.py --save-points scan1.csv
+
+# Terminal 3: RViz with a pre-built Displays config (robot model + TF + point cloud)
+rviz2 -d install/laundry_control/share/laundry_control/rviz/scan_visualization.rviz
+```
+
+The point cloud publishes with `TRANSIENT_LOCAL` durability, so opening RViz after the scan has already started still shows everything recorded so far.
+
+**Caveat:** the obstacle geometry (bucket/table) shown in RViz is only as accurate as our URDF edits — it is *not* guaranteed to match the real bucket/table's exact size, shape, or pose. Treat the RViz scene as an approximate reference for context, not ground truth, when reasoning about where points fall relative to the model.
+
+### Revisiting a previous scan
+
+`--save-points <file>.csv` (on `scan_move.py`) saves the base-frame points recorded during a run. To view a saved scan again later — with no arm and no hardware required — replay it onto the same topic the live recorder uses:
+
+```
+ros2 run laundry_control scan_replay scan1.csv
+# or: python3 laundry_control/scan_replay.py scan1.csv --topic scan_record/points --frame link_base
+```
+
+Then open RViz with the same `scan_visualization.rviz` config as above (optionally alongside `xarm7_rviz_display.launch.py` if you just want the model/obstacles without MoveIt) to see the replayed points in place.
+
+For deeper offline analysis (e.g. clustering points to locate individual laundry items rather than just "something is closer than the wall"), load the CSV in a plotting/analysis tool of your choice — a `numpy`/`matplotlib` 3D scatter or Open3D + DBSCAN both work well against this file format (`x,y,z` columns, base frame).

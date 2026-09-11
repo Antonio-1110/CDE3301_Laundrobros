@@ -13,62 +13,46 @@ Usage:
 
 import argparse
 import time
-import RPi.GPIO as GPIO
+from gpiozero import AngularServo
 
 
 SERVO_PIN = 18          # BCM GPIO number
-PWM_FREQUENCY = 50      # Standard hobby servo frequency: 50 Hz
 
 MIN_ANGLE = 0
 MAX_ANGLE = 180
 
-# Typical hobby servo pulse widths
-MIN_PULSE_MS = 0.5
-MAX_PULSE_MS = 2.5
-PERIOD_MS = 20.0        # 50 Hz = 20 ms period
+# Typical hobby servo pulse widths, in seconds
+MIN_PULSE_WIDTH = 0.5 / 1000
+MAX_PULSE_WIDTH = 2.5 / 1000
 
 
-def angle_to_duty_cycle(angle):
-    """Convert servo angle to PWM duty cycle."""
+def set_servo_angle(angle):
+    """Move servo to specified angle."""
 
     if not MIN_ANGLE <= angle <= MAX_ANGLE:
         raise ValueError(
             f"Angle must be between {MIN_ANGLE} and {MAX_ANGLE} degrees."
         )
 
-    pulse_ms = MIN_PULSE_MS + (
-        (angle - MIN_ANGLE)
-        / (MAX_ANGLE - MIN_ANGLE)
-        * (MAX_PULSE_MS - MIN_PULSE_MS)
+    servo = AngularServo(
+        SERVO_PIN,
+        min_angle=MIN_ANGLE,
+        max_angle=MAX_ANGLE,
+        min_pulse_width=MIN_PULSE_WIDTH,
+        max_pulse_width=MAX_PULSE_WIDTH,
     )
 
-    return pulse_ms / PERIOD_MS * 100
-
-
-def set_servo_angle(angle):
-    """Move servo to specified angle."""
-
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(SERVO_PIN, GPIO.OUT)
-
-    pwm = GPIO.PWM(SERVO_PIN, PWM_FREQUENCY)
-    pwm.start(0)
-
     try:
-        duty_cycle = angle_to_duty_cycle(angle)
-
         print(f"Moving servo to {angle:.1f} degrees")
-        pwm.ChangeDutyCycle(duty_cycle)
+        servo.angle = angle
 
         # Give servo enough time to reach the target.
         time.sleep(0.7)
 
-        # Stop sending PWM after reaching target.
-        pwm.ChangeDutyCycle(0)
-
     finally:
-        pwm.stop()
-        GPIO.cleanup()
+        # Stop sending PWM after reaching target.
+        servo.detach()
+        servo.close()
 
 
 def main():
