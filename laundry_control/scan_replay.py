@@ -36,6 +36,9 @@ class ScanReplayNode(Node):
         super().__init__("scan_replay")
 
         self.frame_id = frame_id
+        # Loaded as (x, y, z, stamp) tuples; stamp is the original
+        # ToF capture time (unused for the one-shot replay below,
+        # but preserved in the CSV for future timing-accurate replay).
         self.points = load_xyz_csv(csv_path)
 
         self.get_logger().info(
@@ -51,10 +54,12 @@ class ScanReplayNode(Node):
         self.publish_cloud()
 
     def publish_cloud(self):
+        xyz_points = [(x, y, z) for x, y, z, _ in self.points]
+
         cloud = build_cloud(
             frame_id=self.frame_id,
             stamp=self.get_clock().now().to_msg(),
-            xyz_points=self.points,
+            xyz_points=xyz_points,
         )
 
         self.publisher.publish(cloud)

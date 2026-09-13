@@ -2,6 +2,7 @@
 
 import argparse
 import math
+import sys
 
 import rclpy
 from rclpy.node import Node
@@ -10,38 +11,13 @@ from rclpy.action import ActionClient
 import tf2_ros
 
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Pose, TransformStamped
+from geometry_msgs.msg import Pose
 
 from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.msg import Constraints, JointConstraint
 from moveit_msgs.srv import GetCartesianPath
 
-
-# =============================================================
-# TOF SENSOR MOUNTING OFFSET
-#
-# Translation from the TCP frame (link7) to the ToF sensor's
-# frame. Axis-aligned with link7 (no rotation offset) - the
-# sensor's +X (its boresight, per REP 117 / sensor_msgs/Range)
-# points along link7's +X.
-#
-# Measured at the INTER pose, where check_flange.py confirms
-# link7's local +Z points straight down:
-#
-#   - "7.75 cm below the TCP origin"  -> local +Z (down at INTER)
-#   - "2.8 cm in front of the TCP"    -> local +X (the sensor's
-#     own boresight axis - it's mounted looking forward/outward,
-#     offset slightly along the same direction it looks)
-#
-# Because the offset is expressed in link7's own frame, it is
-# joint7-invariant: it stays correct as J7 rotates during a scan.
-# =============================================================
-
-TOF_SENSOR_OFFSET_X = 0.028
-TOF_SENSOR_OFFSET_Y = 0.0
-TOF_SENSOR_OFFSET_Z = 0.0775
-
-TOF_SENSOR_FRAME = "tof_sensor_link"
+import arm_position
 
 
 class XArm7Controller(Node):
@@ -106,13 +82,6 @@ class XArm7Controller(Node):
             self.tf_buffer,
             self,
         )
-
-        # Static offset from the TCP frame (flange_link) to the
-        # ToF sensor's own frame, so any consumer can transform
-        # a raw sensor reading straight to the TCP frame via TF.
-        self.static_tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
-
-        self._broadcast_tof_sensor_static_tf()
 
         # =====================================================
         # MoveGroup action
@@ -241,30 +210,6 @@ class XArm7Controller(Node):
     # =========================================================
     # TF / CARTESIAN HELPERS
     # =========================================================
-
-    def _broadcast_tof_sensor_static_tf(self):
-        """
-        Broadcast the fixed offset: flange_link -> ToF sensor frame.
-
-        Axis-aligned, translation-only (see TOF_SENSOR_OFFSET_*).
-        """
-
-        transform = TransformStamped()
-
-        transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = self.flange_link
-        transform.child_frame_id = TOF_SENSOR_FRAME
-
-        transform.transform.translation.x = TOF_SENSOR_OFFSET_X
-        transform.transform.translation.y = TOF_SENSOR_OFFSET_Y
-        transform.transform.translation.z = TOF_SENSOR_OFFSET_Z
-
-        transform.transform.rotation.x = 0.0
-        transform.transform.rotation.y = 0.0
-        transform.transform.rotation.z = 0.0
-        transform.transform.rotation.w = 1.0
-
-        self.static_tf_broadcaster.sendTransform(transform)
 
     def get_flange_transform(self):
         """
@@ -1071,6 +1016,35 @@ class XArm7Controller(Node):
 # TERMINAL INTERFACE
 # =============================================================
 
+def get_named_position(name):
+    """
+    Look up a named joint configuration in arm_position.py
+    (case-insensitive), e.g. "home" -> arm_position.HOME.
+
+    Returns a list of 7 joint angles in radians.
+    Raises KeyError, listing what IS available, if not found.
+    """
+
+    positions = {
+        attr: value
+        for attr, value in vars(arm_position).items()
+        if attr.isupper() and isinstance(value, (list, tuple))
+    }
+
+    key = name.strip().upper()
+
+    if key not in positions:
+
+        available = ", ".join(sorted(positions)) or "(none defined)"
+
+        raise KeyError(
+            f"Unknown arm position '{name}'. "
+            f"Available positions in arm_position.py: {available}"
+        )
+
+    return list(positions[key])
+
+
 def build_parser():
 
     parser = argparse.ArgumentParser(
@@ -1201,6 +1175,21 @@ def build_parser():
         help="Cartesian interpolation step.",
     )
 
+    # ---------------------------------------------------------
+    # position
+    # ---------------------------------------------------------
+
+    position_parser = subparsers.add_parser(
+        "position",
+        help="Move to a named joint configuration from arm_position.py.",
+    )
+
+    position_parser.add_argument(
+        "name",
+        type=str,
+        help="Position name, e.g. home, inter (case-insensitive).",
+    )
+
     return parser
 
 
@@ -1209,6 +1198,19 @@ def main():
     parser = build_parser()
 
     args = parser.parse_args()
+
+    # Resolve the named position (if any) before touching ROS/MoveIt
+    # at all, so a typo is reported immediately instead of after
+    # waiting on MoveIt interfaces to come up.
+    target_position = None
+
+    if args.command == "position":
+
+        try:
+            target_position = get_named_position(args.name)
+        except KeyError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(1)
 
     rclpy.init()
 
@@ -1348,6 +1350,30 @@ def main():
                 args.distance,
                 args.angle,
                 max_step=args.step,
+                velocity=velocity,
+                acceleration=acceleration,
+            )
+
+        # =====================================================
+        # POSITION
+        # =====================================================
+
+        elif args.command == "position":
+
+            velocity = (
+                args.velocity
+                if args.velocity is not None
+                else 0.3
+            )
+
+            acceleration = (
+                args.acceleration
+                if args.acceleration is not None
+                else 0.3
+            )
+
+            success = arm.move_joints(
+                target_position,
                 velocity=velocity,
                 acceleration=acceleration,
             )

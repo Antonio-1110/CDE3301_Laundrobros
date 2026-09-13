@@ -8,7 +8,7 @@ import rclpy
 
 from arm_position import INTER
 from move import XArm7Controller
-from scan_record import TofScanRecorder
+from scan_record import ScanRecorderClient
 
 
 def scan(
@@ -23,6 +23,7 @@ def scan(
     cartesian_step=0.005,
     pause=0.0,
     recorder=None,
+    save_interval=5.0,
 ):
     """
     Perform the complete xArm7 scanning sequence.
@@ -255,9 +256,11 @@ def scan(
         """
         Pause between motions.
 
-        Spins the node (rather than a plain time.sleep) so that,
-        if a recorder is attached, ToF readings keep being
-        captured while the arm is stationary too.
+        Spins the node (rather than a plain time.sleep) so pending
+        service futures (e.g. recorder.save_async()) get processed
+        even if this stroke happens to be the last one before a
+        long pause. ToF capture itself runs in scan_recorder_node,
+        a separate process, so it needs no help from this spin.
         """
 
         if pause <= 0.0:
@@ -269,6 +272,26 @@ def scan(
 
         while arm.get_clock().now() < deadline:
             rclpy.spin_once(arm, timeout_sec=0.05)
+
+    last_save_time = arm.get_clock().now()
+
+    def maybe_checkpoint_save():
+        """
+        Periodically ask scan_recorder_node to checkpoint its CSV,
+        at a much slower cadence than point capture/publishing, via
+        a fire-and-forget service call (see ScanRecorderClient).
+        """
+
+        nonlocal last_save_time
+
+        if recorder is None or save_interval <= 0.0:
+            return
+
+        now = arm.get_clock().now()
+
+        if (now - last_save_time).nanoseconds * 1e-9 >= save_interval:
+            recorder.save_async()
+            last_save_time = now
 
     # =========================================================
     # 1. INITIAL J7 OFFSET
@@ -382,6 +405,7 @@ def scan(
         inward_direction *= -1.0
 
         wait_between_movements()
+        maybe_checkpoint_save()
 
     # =========================================================
     # Inward endpoint
@@ -569,6 +593,7 @@ def scan(
         outward_direction *= -1.0
 
         wait_between_movements()
+        maybe_checkpoint_save()
 
     # =========================================================
     # 5. RETURN TO INTER
@@ -612,9 +637,13 @@ def scan(
 
     if recorder is not None:
 
+        # Blocking is fine (and necessary) here: the arm is already
+        # stationary, and this is the last chance to persist this
+        # scan's points before the caller shuts the node down.
+        recorder.save_blocking()
+
         arm.get_logger().info(
-            f"ToF points recorded: "
-            f"{len(recorder.points_base_frame)}"
+            "Final scan checkpoint saved."
         )
 
     arm.get_logger().info(
@@ -728,12 +757,15 @@ def build_parser():
     )
 
     parser.add_argument(
-        "--save-points",
-        type=str,
-        default=None,
+        "--save-interval",
+        type=float,
+        default=5.0,
         help=(
-            "Optional CSV path to save recorded ToF scan "
-            "points (base frame) to after the scan."
+            "Seconds between CSV checkpoint saves requested from "
+            "scan_recorder_node during the scan (default: 5.0). "
+            "The CSV destination itself is scan_recorder_node's "
+            "'csv_path' parameter, since recording now happens in "
+            "that separate process/node, not here."
         ),
     )
 
@@ -747,7 +779,13 @@ def main():
     rclpy.init()
 
     arm = XArm7Controller()
-    recorder = TofScanRecorder(arm)
+    recorder = ScanRecorderClient(arm)
+
+    # Blocking is fine (and necessary) here: the arm hasn't started
+    # moving yet, and we need this to actually complete before the
+    # scan begins, or new points could get appended to stale ones
+    # left over from a previous run.
+    recorder.clear_blocking()
 
     success = False
 
@@ -765,14 +803,8 @@ def main():
             cartesian_step=args.cartesian_step,
             pause=args.pause,
             recorder=recorder,
+            save_interval=args.save_interval,
         )
-
-        if args.save_points:
-            recorder.save_csv(args.save_points)
-
-            arm.get_logger().info(
-                f"Saved scan points to {args.save_points}"
-            )
 
     except KeyboardInterrupt:
 

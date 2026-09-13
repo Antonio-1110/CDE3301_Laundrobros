@@ -30,6 +30,8 @@ def generate_launch_description():
 
     rviz_delay = LaunchConfiguration("rviz_delay")
 
+    csv_path = LaunchConfiguration("csv_path")
+
     declare_robot_ip = DeclareLaunchArgument(
         "robot_ip",
         default_value="192.168.1.207",
@@ -42,6 +44,17 @@ def generate_launch_description():
         description=(
             "Seconds to wait before starting RViz, so the robot "
             "description / TF are already available when it opens."
+        ),
+    )
+
+    declare_csv_path = DeclareLaunchArgument(
+        "csv_path",
+        default_value="",
+        description=(
+            "Path scan_recorder_node saves the ToF scan CSV to, on "
+            "save_scan service requests from scan_move.py. Left "
+            "empty (default), it auto-saves under scan_records/ at "
+            "the package root, named with this run's start time."
         ),
     )
 
@@ -65,6 +78,20 @@ def generate_launch_description():
             "robot_ip": robot_ip,
             "show_rviz": "false",
         }.items(),
+    )
+
+    # =========================================================
+    # Scan recorder - a separate node/process from the arm's own
+    # xarm7_controller node, so ToF capture, TF lookups and CSV/
+    # point-cloud work can never stall arm-control's spin loop.
+    # =========================================================
+
+    scan_recorder_node = Node(
+        package="laundry_control",
+        executable="scan_recorder_node",
+        name="scan_recorder_node",
+        output="screen",
+        parameters=[{"csv_path": csv_path}],
     )
 
     # =========================================================
@@ -96,7 +123,9 @@ def generate_launch_description():
         [
             declare_robot_ip,
             declare_rviz_delay,
+            declare_csv_path,
             real_arm_moveit_launch,
+            scan_recorder_node,
             delayed_rviz_node,
         ]
     )
