@@ -28,7 +28,7 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import PointCloud2
 
-from scan_cloud_util import build_cloud, load_xyz_csv, POINT_CLOUD_QOS
+from .scan_cloud_util import build_cloud, load_xyz_csv, POINT_CLOUD_QOS
 
 
 class ScanReplayNode(Node):

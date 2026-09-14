@@ -57,11 +57,20 @@ from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import Range, PointCloud2
 from std_srvs.srv import Trigger
 
-from scan_cloud_util import build_cloud, save_xyz_csv, POINT_CLOUD_QOS
-from tof_sensor import TOF_SENSOR_FRAME
+from .scan_cloud_util import build_cloud, save_xyz_csv, POINT_CLOUD_QOS
+from .tof_sensor import TOF_SENSOR_FRAME
 
 
 def _default_scan_records_dir():
+    """
+    Fallback used only when the `records_dir` parameter is left
+    empty. Derived from this file's own location, so it lands
+    under the *source* package root only when running as a bare
+    script from there - once installed (site-packages), this
+    resolves inside the install tree instead, which gets wiped out
+    by `rm -rf install/...` before a rebuild. Pass `records_dir`
+    explicitly (see real_arm_scan.launch.py) to avoid that.
+    """
     package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(package_root, "scan_records")
 
@@ -77,6 +86,7 @@ class ScanRecorderNode(Node):
         self.declare_parameter("flange_link", "link7")
         self.declare_parameter("publish_rate_hz", 5.0)
         self.declare_parameter("csv_path", "")
+        self.declare_parameter("records_dir", "")
 
         self.base_frame = self.get_parameter("base_frame").value
         self.flange_link = self.get_parameter("flange_link").value
@@ -254,7 +264,10 @@ class ScanRecorderNode(Node):
 
         if self._session_csv_path is None:
 
-            records_dir = _default_scan_records_dir()
+            records_dir = (
+                self.get_parameter("records_dir").value
+                or _default_scan_records_dir()
+            )
             os.makedirs(records_dir, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -271,6 +284,13 @@ class ScanRecorderNode(Node):
 
         self.points_tcp_frame.clear()
         self.points_base_frame.clear()
+
+        # clear_scan marks the boundary between one scan and the
+        # next (scan_move.py calls it before every run). Drop the
+        # cached auto-generated path so the *next* save_scan gets a
+        # fresh timestamped filename instead of silently overwriting
+        # the previous scan's CSV for the lifetime of this node.
+        self._session_csv_path = None
 
         response.success = True
         response.message = f"Cleared {count} points."

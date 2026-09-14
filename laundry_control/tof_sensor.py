@@ -25,7 +25,7 @@ from sensor_msgs.msg import Range
 # VL53L0X datasheet: ~25 degree field of view, usable range ~30mm-2000mm.
 FIELD_OF_VIEW_RAD = 0.436
 MIN_RANGE_M = 0.03
-MAX_RANGE_M = 2.0
+MAX_RANGE_M = 0.26
 
 PUBLISH_PERIOD_SEC = 0.05
 
@@ -64,14 +64,14 @@ TOF_SENSOR_OFFSET_Z = 0.028
 
 
 class ToFSensor:
-    def __init__(self, offset_cm=-1.0):
+    def __init__(self, offset_cm=-10.0):
         """
         Initialize VL53L0X sensor.
 
         Args:
             offset_cm:
                 Calibration offset added to the raw measurement.
-                Default -1.0 cm matches the Arduino code.
+                Default -10.0 cm matches the Arduino code.
         """
 
         import board
@@ -101,7 +101,7 @@ class ToFSensorNode(Node):
     def __init__(self):
         super().__init__('tof_sensor')
 
-        self.declare_parameter('offset_cm', -1.0)
+        self.declare_parameter('offset_cm', -10.0)
         self.declare_parameter('frame_id', TOF_SENSOR_FRAME)
         self.declare_parameter('flange_link', 'link7')
 
