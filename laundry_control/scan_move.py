@@ -6,15 +6,15 @@ import time
 
 import rclpy
 
-from arm_position import INTER
+from arm_position import BOTTOM, INTER
 from move import XArm7Controller
 from scan_record import ScanRecorderClient
 
 
 def scan(
     arm,
-    depth=0.45,
-    step=0.05,
+    depth=0.42,
+    step=0.03,
     sweep_deg=150.0,
     velocity=0.1,
     acceleration=0.1,
@@ -37,13 +37,13 @@ def scan(
         Maximum insertion depth in metres.
 
         Default:
-            0.45 m
+            0.42 m
 
     step:
         Linear distance travelled during each scan stroke.
 
         Default:
-            0.05 m
+            0.03 m
 
     sweep_deg:
         J7 rotation during each scan stroke.
@@ -60,18 +60,18 @@ def scan(
         MoveIt acceleration scaling.
 
     rotation_velocity:
-        MoveIt velocity scaling used for the two stationary
-        (non-linear) J7 rotations: the initial offset and the
-        turnaround phase shift. Since these involve no
-        simultaneous linear motion they can run faster than
-        the interleaved scan strokes.
+        MoveIt velocity scaling used for the non-insertion
+        motions: the initial J7 offset and the BOTTOM detour
+        (entry, stationary sweep, and exit/turnaround). Since
+        none of these involve simultaneous insertion/retraction
+        they can run faster than the interleaved scan strokes.
 
         Default:
             0.5
 
     rotation_acceleration:
-        MoveIt acceleration scaling for the stationary J7
-        rotations.
+        MoveIt acceleration scaling for the same non-insertion
+        motions.
 
         Default:
             0.5
@@ -107,10 +107,33 @@ def scan(
         -75 -> +75     while inserting one step
         ...
 
-    Turnaround:
+    Bottom detour (also performs the turnaround phase shift):
 
-        Perform ONE stationary 150-degree rotation to move
-        J7 to the opposite side of the sweep.
+        At maximum depth, the wrist is mounted such that the
+        end effector keeps the sensor from reaching the very
+        last part of the bucket. To cover that area, the arm
+        raises the TCP angle by moving J1-J6 to the recorded
+        BOTTOM configuration:
+
+            Entry : tilt up to BOTTOM while sweeping J7 to the
+                    side OPPOSITE where the inward scan ended
+                    (relative to BOTTOM's own reference).
+
+            At BOTTOM: one stationary full sweep_deg-wide J7
+                    sweep, back to the side matching where the
+                    inward scan ended (relative to BOTTOM's own
+                    reference).
+
+            Exit  : tilt back down to the pre-detour J1-J6
+                    configuration while landing J7 directly on
+                    the turnaround target -- the side OPPOSITE
+                    where the inward scan ended (relative to
+                    INTER's reference).
+
+        Landing the exit move on the turnaround target performs
+        the phase shift as part of the tilt-down motion, so no
+        separate stationary turnaround rotation is needed
+        afterward.
 
     Outward:
 
@@ -294,7 +317,35 @@ def scan(
             last_save_time = now
 
     # =========================================================
-    # 1. INITIAL J7 OFFSET
+    # 1. MOVE TO INTER
+    #
+    # Establishes the known starting pose (and its nominal J7
+    # orientation of 0 degrees) that the rest of the sequence,
+    # starting with the initial offset below, assumes.
+    # =========================================================
+
+    arm.get_logger().info(
+        "========== MOVE TO INTER =========="
+    )
+
+    success = arm.move_joints(
+        INTER,
+        velocity=velocity,
+        acceleration=acceleration,
+    )
+
+    if not success:
+
+        arm.get_logger().error(
+            "Move to INTER failed."
+        )
+
+        return False
+
+    wait_between_movements()
+
+    # =========================================================
+    # 2. INITIAL J7 OFFSET
     #
     # INTER position is assumed to have the desired nominal
     # wrist orientation of 0 degrees.
@@ -335,7 +386,7 @@ def scan(
     wait_between_movements()
 
     # =========================================================
-    # 2. INWARD SCAN
+    # 3. INWARD SCAN
     #
     # Starting orientation:
     #
@@ -442,40 +493,55 @@ def scan(
     )
 
     # =========================================================
-    # 3. TURNAROUND PHASE SHIFT
+    # 4. BOTTOM DETOUR (also performs the turnaround phase shift)
     #
-    # ONE stationary rotation.
+    # The sensor is mounted at the wrist, and the end effector
+    # keeps the arm from inserting far enough for the sensor to
+    # see the very last part of the bucket. To cover that area,
+    # raise the TCP angle by moving J1-J6 to the recorded BOTTOM
+    # configuration (recorded with the sensor pointing straight
+    # down at this tilt), and sweep J7 throughout:
     #
-    # If inward ended at:
+    #   Entry  : tilt up to BOTTOM while sweeping J7 to the side
+    #            OPPOSITE where the inward scan ended (relative
+    #            to BOTTOM's own reference angle). This alone
+    #            covers most of the sweep width.
     #
-    #       +75
+    #   At BOTTOM: one stationary full sweep_deg-wide J7 sweep,
+    #            back to the side matching where the inward scan
+    #            ended (relative to BOTTOM's own reference).
     #
-    # move:
+    #   Exit   : tilt back down to the pre-detour J1-J6
+    #            configuration while landing J7 directly on the
+    #            turnaround target -- the side OPPOSITE where the
+    #            inward scan ended (relative to INTER's reference).
     #
-    #       +75 -> -75
-    #
-    #       -150 deg
-    #
-    #
-    # If inward ended at:
-    #
-    #       -75
-    #
-    # move:
-    #
-    #       -75 -> +75
-    #
-    #       +150 deg
-    #
-    #
-    # This puts the outward scan on the opposite angular
-    # phase from the inward scan.
+    # Landing the exit move on the turnaround target performs the
+    # phase shift for free as part of the tilt-down motion, so no
+    # separate stationary turnaround rotation is needed afterward:
+    # the outward scan can begin immediately.
     # =========================================================
 
     arm.get_logger().info(
-        "========== TURNAROUND =========="
+        "========== BOTTOM DETOUR =========="
     )
 
+    pre_bottom_joints = arm.get_current_joints()
+
+    if pre_bottom_joints is None:
+
+        arm.get_logger().error(
+            "Could not read joint state before BOTTOM detour."
+        )
+
+        return False
+
+    phase_sign = 1.0 if nominal_end_angle > 0.0 else -1.0
+
+    # Turnaround target: opposite side from where the inward scan
+    # ended, relative to INTER's reference. Computed here (rather
+    # than executed as its own stationary move) because the
+    # detour's exit move performs it directly.
     if nominal_end_angle > 0.0:
 
         phase_twist = -sweep_deg
@@ -485,12 +551,25 @@ def scan(
         phase_twist = +sweep_deg
 
     arm.get_logger().info(
-        f"Stationary phase shift: "
+        f"Turnaround phase shift (folded into detour exit): "
         f"{phase_twist:+.1f} deg"
     )
 
-    success = arm.rotate_joint7(
-        delta_deg=phase_twist,
+    # Entry: sweep to the side OPPOSITE nominal_end_angle,
+    # relative to BOTTOM's own reference angle.
+    entry_joints = list(BOTTOM)
+
+    entry_joints[6] = (
+        BOTTOM[6]
+        + math.radians(-phase_sign * half_sweep)
+    )
+
+    arm.get_logger().info(
+        "Entering BOTTOM configuration (sweeping while tilting)."
+    )
+
+    success = arm.move_joints(
+        entry_joints,
         velocity=rotation_velocity,
         acceleration=rotation_acceleration,
     )
@@ -498,7 +577,63 @@ def scan(
     if not success:
 
         arm.get_logger().error(
-            "Turnaround phase shift failed."
+            "Move to BOTTOM configuration failed."
+        )
+
+        return False
+
+    wait_between_movements()
+
+    # Stationary full-width sweep at BOTTOM, back to the side
+    # matching nominal_end_angle, relative to BOTTOM's reference.
+    bottom_sweep_twist = phase_sign * sweep_deg
+
+    arm.get_logger().info(
+        f"Stationary BOTTOM sweep: "
+        f"{bottom_sweep_twist:+.1f} deg"
+    )
+
+    success = arm.rotate_joint7(
+        delta_deg=bottom_sweep_twist,
+        velocity=rotation_velocity,
+        acceleration=rotation_acceleration,
+    )
+
+    if not success:
+
+        arm.get_logger().error(
+            "Stationary BOTTOM sweep failed."
+        )
+
+        return False
+
+    wait_between_movements()
+
+    # Exit: revert J1-J6 to the pre-detour configuration while
+    # landing J7 on the turnaround target, so the outward scan
+    # can start immediately with no further stationary rotation.
+    exit_joints = list(pre_bottom_joints)
+
+    exit_joints[6] = (
+        pre_bottom_joints[6]
+        + math.radians(phase_twist)
+    )
+
+    arm.get_logger().info(
+        "Reverting to pre-BOTTOM tilt "
+        "(already turned around for the outward scan)."
+    )
+
+    success = arm.move_joints(
+        exit_joints,
+        velocity=rotation_velocity,
+        acceleration=rotation_acceleration,
+    )
+
+    if not success:
+
+        arm.get_logger().error(
+            "Revert from BOTTOM configuration failed."
         )
 
         return False
@@ -506,7 +641,7 @@ def scan(
     wait_between_movements()
 
     # =========================================================
-    # 4. OUTWARD SCAN
+    # 5. OUTWARD SCAN
     #
     # After the phase shift, start by rotating in the
     # OPPOSITE direction.
@@ -596,7 +731,7 @@ def scan(
         maybe_checkpoint_save()
 
     # =========================================================
-    # 5. RETURN TO INTER
+    # 6. RETURN TO INTER
     # =========================================================
 
     arm.get_logger().info(
@@ -616,7 +751,7 @@ def scan(
     wait_between_movements()
 
     # =========================================================
-    # 6. COMPLETE
+    # 7. COMPLETE
     # =========================================================
 
     if abs(current_depth) < 1e-9:
@@ -669,20 +804,20 @@ def build_parser():
     parser.add_argument(
         "--depth",
         type=float,
-        default=0.45,
+        default=0.42,
         help=(
             "Maximum insertion depth in metres "
-            "(default: 0.45)."
+            "(default: 0.42)."
         ),
     )
 
     parser.add_argument(
         "--step",
         type=float,
-        default=0.05,
+        default=0.03,
         help=(
             "Linear distance per scan stroke in metres "
-            "(default: 0.05)."
+            "(default: 0.03)."
         ),
     )
 

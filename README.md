@@ -51,7 +51,7 @@ source install/setup.bash
 ros2 run laundry_control run_probe
 
 # Run an individual script directly (useful while iterating)
-python3 src/CDE3301_Laundrobros/laundry_control/move.py
+python3 src/CDE3301_Laundrobros/laundry_control/move_cli.py
 ```
 
 ## Everyday commands — `xarm_ros2` (manufacturer side, our fork)
