@@ -23,9 +23,14 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import Range
 
 # VL53L0X datasheet: ~25 degree field of view, usable range ~30mm-2000mm.
+# MAX_RANGE_M is deliberately tightened below the sensor's own usable
+# range: readings beyond the bucket's own depth aren't useful (they're
+# outside the bucket entirely) and are dropped here rather than in
+# scan_recorder_node, since that node just filters against whatever
+# min_range/max_range this node reports on each Range message.
 FIELD_OF_VIEW_RAD = 0.436
 MIN_RANGE_M = 0.03
-MAX_RANGE_M = 0.26
+MAX_RANGE_M = 0.25
 
 PUBLISH_PERIOD_SEC = 0.05
 

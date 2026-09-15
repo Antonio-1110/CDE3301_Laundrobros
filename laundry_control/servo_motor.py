@@ -5,6 +5,24 @@ servo_control.py
 
 Control a hobby servo from Raspberry Pi GPIO.
 
+Uses the lgpio pin factory instead of gpiozero's default
+(RPi.GPIO/software) factory: the default factory times PWM pulses
+from a Python thread, which is subject to OS scheduling jitter -
+especially on a Pi also running ROS2/MoveIt under load - and that
+jitter shows up directly as inconsistent servo angles (this is
+exactly what gpiozero's own PWMSoftwareFallback warning is about).
+
+NOTE: this used to use the pigpio pin factory instead, but pigpio
+cannot work at all on a Raspberry Pi 5 - it memory-maps the legacy
+BCM283x GPIO registers directly via /dev/mem, while the Pi 5 moved
+GPIO handling to a separate RP1 chip with a different register
+layout entirely. pigpio's author archived the project before ever
+adding Pi 5 support (which is why it's no longer in Raspberry Pi
+OS/Ubuntu's apt repos - there's no version that would work here).
+lgpio is the actively-maintained replacement, talks to the kernel's
+gpiochip character-device interface (which DOES support the Pi 5),
+and ships as python3-lgpio - no extra daemon/install needed.
+
 Usage:
     python3 servo_control.py 90
     python3 servo_control.py 45
@@ -13,7 +31,11 @@ Usage:
 
 import argparse
 import time
-from gpiozero import AngularServo
+
+from gpiozero import AngularServo, Device
+from gpiozero.pins.lgpio import LGPIOFactory
+
+Device.pin_factory = LGPIOFactory()
 
 
 SERVO_PIN = 18          # BCM GPIO number

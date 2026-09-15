@@ -551,6 +551,145 @@ class XArm7Controller(Node):
     # CARTESIAN PLANNING
     # =========================================================
 
+    def _plan_to_pose(
+        self,
+        target_pose,
+        max_step=0.005,
+        velocity=0.1,
+        acceleration=0.1,
+    ):
+        """
+        Generate but DO NOT execute a straight Cartesian
+        trajectory from the flange's CURRENT actual position to
+        target_pose.
+
+        Returns:
+            (trajectory, fraction)
+
+            trajectory is a RobotTrajectory, or None if planning
+            failed, the path was incomplete (fraction < 0.999), or
+            MoveIt returned an empty trajectory.
+
+            fraction is ALWAYS returned (0.0 if there was no
+            response at all), even when trajectory is None, so
+            callers doing reachability probing can inspect partial
+            feasibility instead of only getting a binary None.
+        """
+
+        request = GetCartesianPath.Request()
+
+        request.header.frame_id = self.base_frame
+        request.group_name = self.group_name
+        request.link_name = self.flange_link
+
+        request.waypoints = [
+            target_pose
+        ]
+
+        request.max_step = max_step
+        request.jump_threshold = 0.0
+
+        request.avoid_collisions = True
+
+        request.max_velocity_scaling_factor = (
+            velocity
+        )
+
+        request.max_acceleration_scaling_factor = (
+            acceleration
+        )
+
+        self.get_logger().info(
+            "Computing Cartesian path..."
+        )
+
+        self.get_logger().info(
+            f"  target: "
+            f"({target_pose.position.x:.4f}, "
+            f"{target_pose.position.y:.4f}, "
+            f"{target_pose.position.z:.4f})"
+        )
+
+        future = self.cartesian_client.call_async(
+            request
+        )
+
+        rclpy.spin_until_future_complete(
+            self,
+            future,
+        )
+
+        response = future.result()
+
+        if response is None:
+
+            self.get_logger().error(
+                "No Cartesian-path response from MoveIt."
+            )
+
+            return None, 0.0
+
+        self.get_logger().info(
+            f"Cartesian path fraction: "
+            f"{response.fraction * 100.0:.1f}%"
+        )
+
+        if response.fraction < 0.999:
+
+            self.get_logger().error(
+                "Complete Cartesian path could not "
+                "be generated."
+            )
+
+            return None, response.fraction
+
+        if not response.solution.joint_trajectory.points:
+
+            self.get_logger().error(
+                "MoveIt returned an empty trajectory."
+            )
+
+            return None, response.fraction
+
+        return response.solution, response.fraction
+
+    def _build_pose(
+        self,
+        x,
+        y,
+        z,
+        orientation=None,
+    ):
+        """
+        Build a Pose at (x, y, z) in base_frame.
+
+        orientation:
+            An object with .x/.y/.z/.w (e.g. a
+            geometry_msgs/Quaternion), or None to reuse the
+            flange's CURRENT orientation (read live via TF).
+
+            None is what callers computing a grasp/approach target
+            should pass, since gripper.py's mounting offsets are
+            only valid while the reference orientation (INTER) is
+            held fixed.
+        """
+
+        if orientation is None:
+            orientation = self.get_flange_transform().transform.rotation
+
+        pose = Pose()
+
+        pose.position.x = x
+        pose.position.y = y
+        pose.position.z = z
+
+        pose.orientation.x = orientation.x
+        pose.orientation.y = orientation.y
+        pose.orientation.z = orientation.z
+        pose.orientation.w = orientation.w
+
+        return pose
+
     def _plan_tool_z(
         self,
         distance,
@@ -587,102 +726,21 @@ class XArm7Controller(Node):
             )
         )
 
-        target_pose = Pose()
-
-        target_pose.position.x = (
-            translation.x
-            + distance * zx
+        target_pose = self._build_pose(
+            x=translation.x + distance * zx,
+            y=translation.y + distance * zy,
+            z=translation.z + distance * zz,
+            orientation=rotation,
         )
 
-        target_pose.position.y = (
-            translation.y
-            + distance * zy
+        trajectory, _fraction = self._plan_to_pose(
+            target_pose,
+            max_step=max_step,
+            velocity=velocity,
+            acceleration=acceleration,
         )
 
-        target_pose.position.z = (
-            translation.z
-            + distance * zz
-        )
-
-        # Maintain current orientation.
-        target_pose.orientation.x = rotation.x
-        target_pose.orientation.y = rotation.y
-        target_pose.orientation.z = rotation.z
-        target_pose.orientation.w = rotation.w
-
-        request = GetCartesianPath.Request()
-
-        request.header.frame_id = self.base_frame
-        request.group_name = self.group_name
-        request.link_name = self.flange_link
-
-        request.waypoints = [
-            target_pose
-        ]
-
-        request.max_step = max_step
-        request.jump_threshold = 0.0
-
-        request.avoid_collisions = True
-
-        request.max_velocity_scaling_factor = (
-            velocity
-        )
-
-        request.max_acceleration_scaling_factor = (
-            acceleration
-        )
-
-        self.get_logger().info(
-            "Computing Cartesian path..."
-        )
-
-        self.get_logger().info(
-            f"  tool-Z distance: {distance:+.4f} m"
-        )
-
-        future = self.cartesian_client.call_async(
-            request
-        )
-
-        rclpy.spin_until_future_complete(
-            self,
-            future,
-        )
-
-        response = future.result()
-
-        if response is None:
-
-            self.get_logger().error(
-                "No Cartesian-path response from MoveIt."
-            )
-
-            return None
-
-        self.get_logger().info(
-            f"Cartesian path fraction: "
-            f"{response.fraction * 100.0:.1f}%"
-        )
-
-        if response.fraction < 0.999:
-
-            self.get_logger().error(
-                "Complete Cartesian path could not "
-                "be generated."
-            )
-
-            return None
-
-        if not response.solution.joint_trajectory.points:
-
-            self.get_logger().error(
-                "MoveIt returned an empty trajectory."
-            )
-
-            return None
-
-        return response.solution
+        return trajectory
 
     # =========================================================
     # TRAJECTORY EXECUTION
@@ -794,6 +852,101 @@ class XArm7Controller(Node):
         return self._execute_trajectory(
             trajectory
         )
+
+    # =========================================================
+    # ARBITRARY-POSE CARTESIAN MOVEMENT
+    #
+    # Unlike move_tool_z() (offset along whatever the CURRENT
+    # local Z happens to be), these accept an absolute (x, y, z)
+    # target in base_frame. Needed for grasp targets whose mount
+    # offset (see gripper.py) has no X/Y component: since that
+    # offset sits on link7's own rotation axis, reaching it
+    # requires genuine XY translation, not just a Z offset plus
+    # J7 rotation the way scanning works.
+    # =========================================================
+
+    def move_to_pose(
+        self,
+        x,
+        y,
+        z,
+        orientation=None,
+        max_step=0.005,
+        velocity=0.1,
+        acceleration=0.1,
+    ):
+        """
+        Straight Cartesian movement of the flange to an absolute
+        (x, y, z) target in base_frame.
+
+        orientation:
+            See _build_pose() - None reuses the flange's CURRENT
+            orientation.
+        """
+
+        target_pose = self._build_pose(
+            x, y, z, orientation
+        )
+
+        trajectory, fraction = self._plan_to_pose(
+            target_pose,
+            max_step=max_step,
+            velocity=velocity,
+            acceleration=acceleration,
+        )
+
+        if trajectory is None:
+
+            self.get_logger().error(
+                f"move_to_pose: infeasible "
+                f"(fraction={fraction:.3f})."
+            )
+
+            return False
+
+        return self._execute_trajectory(
+            trajectory
+        )
+
+    def check_pose_reachable(
+        self,
+        x,
+        y,
+        z,
+        orientation=None,
+        max_step=0.005,
+        velocity=0.1,
+        acceleration=0.1,
+    ):
+        """
+        PLAN-ONLY reachability probe: identical planning to
+        move_to_pose(), but NEVER executes - safe to call
+        repeatedly on candidate targets that may turn out
+        infeasible.
+
+        Returns MoveIt's raw Cartesian fraction in [0, 1].
+        Callers should treat >= 0.999 as "fully reachable" (the
+        same threshold _plan_to_pose applies internally).
+
+        IMPORTANT: GetCartesianPath plans from the arm's actual
+        current live state, not a hypothetical one - callers must
+        have already moved the arm to whatever pose they intend as
+        the real starting point (e.g. INTER) before probing, or
+        the probed fraction will describe the wrong path.
+        """
+
+        target_pose = self._build_pose(
+            x, y, z, orientation
+        )
+
+        _trajectory, fraction = self._plan_to_pose(
+            target_pose,
+            max_step=max_step,
+            velocity=velocity,
+            acceleration=acceleration,
+        )
+
+        return fraction
 
     # =========================================================
     # J7 TWIST MODIFICATION

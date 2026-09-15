@@ -4,8 +4,10 @@ from builtin_interfaces.msg import Time
 
 from laundry_control.laundry_detect import (
     cluster_points,
+    compute_cell_deviation,
     compute_deviation,
     detect_laundry,
+    detect_laundry_by_cell,
     summarize_clusters,
 )
 from laundry_control.scan_cloud_util import save_xyz_csv
@@ -61,6 +63,74 @@ def test_compute_deviation_empty_baseline_raises():
 
     with pytest.raises(ValueError):
         compute_deviation(baseline, candidate)
+
+
+# ---------------------------------------------------------------
+# compute_cell_deviation
+# ---------------------------------------------------------------
+
+def test_compute_cell_deviation_identical_clouds():
+    points = _make_grid()
+
+    result = compute_cell_deviation(points, points, threshold_m=0.02)
+
+    assert not result.mask.any()
+
+
+def test_compute_cell_deviation_flags_consistent_cell_offset():
+    baseline = _make_grid()
+
+    # A tight group of points (well within one 0.03m cell) all
+    # offset by the same amount, simulating a small item raising
+    # every reading in its footprint consistently.
+    injected = _make_tight_cluster(
+        (0.2, 0.2, 0.03), n_points=8, spread=0.002, seed=1
+    )
+
+    # Drop the one baseline point at that exact spot, so the
+    # candidate cloud doesn't also carry an unperturbed floor
+    # reading there (a real scan wouldn't see through the item).
+    keep_mask = np.linalg.norm(baseline[:, :2] - [0.2, 0.2], axis=1) > 0.01
+    candidate = np.concatenate([baseline[keep_mask], injected], axis=0)
+
+    result = compute_cell_deviation(baseline, candidate, threshold_m=0.02)
+
+    assert result.mask[-8:].all()
+    assert not result.mask[:-8].any()
+
+
+def test_compute_cell_deviation_respects_min_points_per_cell():
+    baseline = _make_grid()
+
+    # A single injected point (below min_points_per_cell=2) should
+    # not be flagged, even though its deviation clears the threshold.
+    keep_mask = np.linalg.norm(baseline[:, :2] - [0.2, 0.2], axis=1) > 0.01
+    candidate = np.concatenate(
+        [baseline[keep_mask], [[0.2, 0.2, 0.05]]], axis=0
+    )
+
+    result = compute_cell_deviation(
+        baseline, candidate, threshold_m=0.02, min_points_per_cell=2
+    )
+
+    assert not result.mask[-1]
+
+
+def test_compute_cell_deviation_empty_candidate():
+    baseline = _make_grid()
+
+    result = compute_cell_deviation(baseline, np.empty((0, 3)))
+
+    assert result.mask.shape[0] == 0
+    assert result.cell_deviations.shape[0] == 0
+
+
+def test_compute_cell_deviation_empty_baseline_raises():
+    baseline = np.empty((0, 3))
+    candidate = _make_grid()
+
+    with pytest.raises(ValueError):
+        compute_cell_deviation(baseline, candidate)
 
 
 # ---------------------------------------------------------------
@@ -259,6 +329,75 @@ def test_detect_laundry_all_points_deviate_does_not_crash(tmp_path):
     assert deviation.mask.all()
 
     clusters = detect_laundry(
+        baseline_csv=str(baseline_csv),
+        candidate_csv=str(candidate_csv),
+    )
+
+    assert clusters == []
+
+
+# ---------------------------------------------------------------
+# detect_laundry_by_cell (end-to-end via CSV round-trip)
+# ---------------------------------------------------------------
+
+def test_cell_mode_catches_subtle_blob_point_mode_misses(tmp_path):
+    """
+    The whole point of --mode cell: a small item whose points sit
+    just below the point-wise threshold (each point's own
+    nearest-neighbor distance to baseline is too small to flag
+    alone) should still be caught once those points' shared cell
+    mean is compared against the local baseline instead.
+    """
+
+    baseline_xyz = _make_grid()
+
+    # 3cm offset: comfortably below DEFAULT_THRESHOLD_M (0.04) so
+    # point-wise detection should miss it entirely, but above
+    # DEFAULT_CELL_THRESHOLD_M (0.02) so cell-mean detection should
+    # catch it.
+    keep_mask = np.linalg.norm(baseline_xyz[:, :2] - [0.2, 0.2], axis=1) > 0.01
+    subtle_blob = _make_tight_cluster(
+        (0.2, 0.2, 0.03), n_points=8, spread=0.002, seed=2
+    )
+    candidate_xyz = np.concatenate(
+        [baseline_xyz[keep_mask], subtle_blob], axis=0
+    )
+
+    baseline_csv = tmp_path / "baseline.csv"
+    candidate_csv = tmp_path / "candidate.csv"
+
+    _write_csv(baseline_csv, baseline_xyz)
+    _write_csv(candidate_csv, candidate_xyz)
+
+    point_mode_clusters = detect_laundry(
+        baseline_csv=str(baseline_csv),
+        candidate_csv=str(candidate_csv),
+    )
+
+    cell_mode_clusters = detect_laundry_by_cell(
+        baseline_csv=str(baseline_csv),
+        candidate_csv=str(candidate_csv),
+    )
+
+    assert point_mode_clusters == []
+
+    assert len(cell_mode_clusters) == 1
+    assert cell_mode_clusters[0].size == 8
+    assert np.allclose(
+        cell_mode_clusters[0].centroid, [0.2, 0.2, 0.03], atol=0.005
+    )
+
+
+def test_detect_laundry_by_cell_no_deviations_returns_empty_list(tmp_path):
+    baseline_xyz = _make_grid()
+
+    baseline_csv = tmp_path / "baseline.csv"
+    candidate_csv = tmp_path / "candidate.csv"
+
+    _write_csv(baseline_csv, baseline_xyz)
+    _write_csv(candidate_csv, baseline_xyz)
+
+    clusters = detect_laundry_by_cell(
         baseline_csv=str(baseline_csv),
         candidate_csv=str(candidate_csv),
     )

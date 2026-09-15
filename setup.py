@@ -33,8 +33,10 @@ setup(
             'tof_sensor = laundry_control.tof_sensor:main',
             'scan_replay = laundry_control.scan_replay:main',
             'scan_recorder_node = laundry_control.scan_recorder_node:main',
+            'gripper_node = laundry_control.gripper_node:main',
             'laundry_detect = laundry_control.laundry_detect_cli:main',
             'promote_baseline = laundry_control.promote_baseline:main',
+            'retrieve = laundry_control.retrieve:main',
         ],
     },
 )
