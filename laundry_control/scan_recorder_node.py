@@ -99,6 +99,19 @@ class ScanRecorderNode(Node):
         self.points_tcp_frame = []
         self.points_base_frame = []
 
+        # TF lookup outcomes for the current scan. The fallback path
+        # below substitutes "wherever the arm is NOW" for "where the
+        # arm was when this reading was captured", which during a
+        # moving scan misplaces the point by however far the arm
+        # travelled in between - so a scan that silently took the
+        # fallback for most of its readings is materially less
+        # accurate than one that didn't, with no other visible
+        # symptom. These counters (and the warning on first
+        # fallback) are what make that visible.
+        self._tf_exact_count = 0
+        self._tf_fallback_count = 0
+        self._tf_dropped_count = 0
+
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -166,7 +179,9 @@ class ScanRecorderNode(Node):
                 msg.header.stamp,
             )
 
-        except Exception:
+            self._tf_exact_count += 1
+
+        except Exception as exact_exc:
 
             try:
                 tcp_transform = self.tf_buffer.lookup_transform(
@@ -183,12 +198,40 @@ class ScanRecorderNode(Node):
 
             except Exception as exc:
 
+                self._tf_dropped_count += 1
+
                 self.get_logger().warning(
                     f"Could not transform ToF reading: {exc}",
                     throttle_duration_sec=2.0,
                 )
 
                 return
+
+            self._tf_fallback_count += 1
+
+            # Warn on the very first fallback regardless of the
+            # throttle, so a scan that silently degrades from the
+            # first reading onward (e.g. a sensor whose clock never
+            # got synchronised to this machine's) is obvious
+            # immediately rather than only in the end-of-scan tally.
+            if self._tf_fallback_count == 1:
+
+                self.get_logger().warning(
+                    "ToF reading could not be transformed at its own "
+                    f"capture time ({exact_exc}); falling back to the "
+                    "latest available transform. Points captured this "
+                    "way are placed where the arm is NOW, not where it "
+                    "was when the reading was taken - expect reduced "
+                    "spatial accuracy while the arm is moving."
+                )
+
+            else:
+
+                self.get_logger().warning(
+                    "Still using latest-transform fallback "
+                    f"({self._tf_fallback_count} readings so far).",
+                    throttle_duration_sec=5.0,
+                )
 
         tcp_point = tf2_geometry_msgs.do_transform_point(
             sensor_point, tcp_transform
@@ -247,8 +290,40 @@ class ScanRecorderNode(Node):
             return response
 
         response.success = True
-        response.message = f"Saved {len(points)} points to {csv_path}"
+        response.message = (
+            f"Saved {len(points)} points to {csv_path} "
+            f"({self._tf_summary()})"
+        )
         return response
+
+    def _tf_summary(self):
+        """
+        One-line TF-accuracy tally for the current scan, reported on
+        every save so it lands in the scan log (scan_record.py logs
+        the save response) rather than needing to be dug for.
+        """
+
+        total = (
+            self._tf_exact_count
+            + self._tf_fallback_count
+            + self._tf_dropped_count
+        )
+
+        if total == 0:
+            return "no TF lookups yet"
+
+        fallback_pct = 100.0 * self._tf_fallback_count / total
+
+        summary = (
+            f"TF: {self._tf_exact_count} exact, "
+            f"{self._tf_fallback_count} fallback ({fallback_pct:.1f}%), "
+            f"{self._tf_dropped_count} dropped"
+        )
+
+        if self._tf_fallback_count:
+            summary += " - fallback points are less accurate, see warnings"
+
+        return summary
 
     def _resolve_csv_path(self):
         """
@@ -284,6 +359,13 @@ class ScanRecorderNode(Node):
 
         self.points_tcp_frame.clear()
         self.points_base_frame.clear()
+
+        # clear_scan marks a scan boundary, so the TF tally starts
+        # over with it - otherwise the next scan's accuracy report
+        # would carry the previous scan's failures.
+        self._tf_exact_count = 0
+        self._tf_fallback_count = 0
+        self._tf_dropped_count = 0
 
         # clear_scan marks the boundary between one scan and the
         # next (scan_move.py calls it before every run). Drop the

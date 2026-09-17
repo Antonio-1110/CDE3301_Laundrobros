@@ -15,6 +15,71 @@ from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.msg import Constraints, JointConstraint
 from moveit_msgs.srv import GetCartesianPath
 
+# Planning pipelines for joint-space moves (move_joints).
+#
+# Pilz PTP is preferred: it interpolates straight from the current
+# joint configuration to the target on a trapezoidal velocity
+# profile, so the same start and goal always produce the same
+# trajectory. OMPL's RRTConnect samples randomly and takes a
+# different route every run, which makes motions hard to predict
+# and to review.
+#
+# OMPL remains the automatic fallback because PTP does not route
+# around obstacles - it collision-checks its straight-line
+# interpolation and fails if that is blocked. The bucket and table
+# ARE collision geometry here (URDF links on link_base, see
+# xarm7.urdf.xacro), so that case is real, not theoretical.
+#
+# NOTE: move_group must actually LOAD the pilz pipeline for this to
+# work - check with:
+#
+#     ros2 param get /move_group planning_pipelines
+#
+# If that lists only ['ompl'], every PTP attempt fails and silently
+# falls back, costing a wasted planning attempt per move. See
+# real_arm_scan.launch.py's planning_pipelines argument.
+PILZ_PIPELINE_ID = "pilz_industrial_motion_planner"
+PILZ_PTP_PLANNER_ID = "PTP"
+
+OMPL_PIPELINE_ID = "ompl"
+OMPL_PLANNER_ID = "RRTConnect"
+
+# moveit_msgs/MoveItErrorCodes, for logging a failure as something
+# readable instead of a bare integer. "why did that move fail" is
+# otherwise a trip to the message definition every time.
+MOVEIT_ERROR_CODES = {
+    1: "SUCCESS",
+    -1: "FAILURE",
+    -2: "PLANNING_FAILED",
+    -3: "INVALID_MOTION_PLAN",
+    -4: "MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE",
+    -5: "CONTROL_FAILED",
+    -6: "UNABLE_TO_AQUIRE_SENSOR_DATA",
+    -7: "TIMED_OUT",
+    -8: "PREEMPTED",
+    -10: "START_STATE_IN_COLLISION",
+    -11: "START_STATE_VIOLATES_PATH_CONSTRAINTS",
+    -12: "GOAL_IN_COLLISION",
+    -13: "GOAL_VIOLATES_PATH_CONSTRAINTS",
+    -14: "GOAL_CONSTRAINTS_VIOLATED",
+    -15: "INVALID_GROUP_NAME",
+    -16: "INVALID_GOAL_CONSTRAINTS",
+    -17: "INVALID_ROBOT_STATE",
+    -18: "INVALID_LINK_NAME",
+    -19: "INVALID_OBJECT_NAME",
+    -21: "FRAME_TRANSFORM_FAILURE",
+    -22: "COLLISION_CHECKING_UNAVAILABLE",
+    -23: "ROBOT_STATE_STALE",
+    -24: "SENSOR_INFO_STALE",
+    -25: "COMMUNICATION_FAILURE",
+    -31: "NO_IK_SOLUTION",
+}
+
+
+def describe_moveit_error(code):
+
+    return f"{code} ({MOVEIT_ERROR_CODES.get(code, 'UNKNOWN')})"
+
 
 class XArm7Controller(Node):
     """
@@ -285,12 +350,46 @@ class XArm7Controller(Node):
         tolerance=0.01,
         replan=True,
         replan_attempts=5,
+        pipeline_id=PILZ_PIPELINE_ID,
+        planner_id=PILZ_PTP_PLANNER_ID,
+        fallback_pipeline_id=OMPL_PIPELINE_ID,
+        fallback_planner_id=OMPL_PLANNER_ID,
     ):
         """
         Collision-aware joint-space movement.
 
         joint_angles:
             Seven absolute target angles in RADIANS.
+
+        pipeline_id / planner_id:
+            Which MoveIt planning pipeline and planner to try
+            FIRST. Defaults to Pilz PTP, which interpolates
+            straight from the current joint configuration to the
+            target on a trapezoidal profile: same start and goal
+            always produce the same trajectory, unlike OMPL's
+            RRTConnect, which samples randomly and so takes a
+            different route every run.
+
+        fallback_pipeline_id / fallback_planner_id:
+            Retried once, automatically, if the first attempt
+            fails. Pass fallback_pipeline_id=None to disable.
+
+            The fallback exists because PTP does not route AROUND
+            anything: it collision-checks its straight-line
+            interpolation and reports failure if that hits
+            something, where a sampling planner would search for a
+            way past. That matters here because the bucket and
+            table are real collision geometry (URDF links on
+            link_base - see xarm7.urdf.xacro), so a direct
+            interpolation out of a pose deep inside the bucket can
+            genuinely be blocked. Recorded-pose transitions (INTER,
+            DROP, BOTTOM) are clear direct paths and stay on PTP;
+            only the awkward ones pay for OMPL, and the log says
+            which did, so it's visible rather than guessed at.
+
+            Falling back is safe precisely because Pilz fails
+            rather than degrading: a failure is a clean signal, not
+            a trajectory that half-works.
         """
 
         if len(joint_angles) != 7:
@@ -298,6 +397,74 @@ class XArm7Controller(Node):
             raise ValueError(
                 "xArm7 requires exactly 7 joint angles."
             )
+
+        attempts = [(pipeline_id, planner_id)]
+
+        if fallback_pipeline_id is not None:
+            attempts.append(
+                (fallback_pipeline_id, fallback_planner_id)
+            )
+
+        for attempt_index, (attempt_pipeline, attempt_planner) in enumerate(
+            attempts
+        ):
+
+            if attempt_index > 0:
+
+                self.get_logger().warning(
+                    f"{attempts[0][0]}/{attempts[0][1]} failed "
+                    f"({first_failure_reason}); retrying with "
+                    f"{attempt_pipeline}/{attempt_planner}."
+                )
+
+            succeeded, failure_reason = self._move_joints_once(
+                joint_angles,
+                velocity=velocity,
+                acceleration=acceleration,
+                planning_attempts=planning_attempts,
+                planning_time=planning_time,
+                tolerance=tolerance,
+                replan=replan,
+                replan_attempts=replan_attempts,
+                pipeline_id=attempt_pipeline,
+                planner_id=attempt_planner,
+                quiet_failure=attempt_index < len(attempts) - 1,
+            )
+
+            if succeeded:
+                return True
+
+            if attempt_index == 0:
+                first_failure_reason = failure_reason
+
+        return False
+
+    def _move_joints_once(
+        self,
+        joint_angles,
+        velocity,
+        acceleration,
+        planning_attempts,
+        planning_time,
+        tolerance,
+        replan,
+        replan_attempts,
+        pipeline_id,
+        planner_id,
+        quiet_failure=False,
+    ):
+        """
+        One planning/execution attempt with a specific pipeline.
+
+        Returns (succeeded, reason): reason is None on success, and
+        otherwise a short human-readable description of what went
+        wrong, so move_joints() can say WHY a fallback happened
+        rather than assuming a cause.
+
+        quiet_failure downgrades the failure log to a debug line,
+        so a first attempt that is about to be retried on another
+        pipeline doesn't look like a hard error in the scan log.
+        """
 
         constraints = Constraints()
 
@@ -322,6 +489,9 @@ class XArm7Controller(Node):
         goal = MoveGroup.Goal()
 
         goal.request.group_name = self.group_name
+
+        goal.request.pipeline_id = pipeline_id
+        goal.request.planner_id = planner_id
 
         goal.request.num_planning_attempts = (
             planning_attempts
@@ -351,7 +521,7 @@ class XArm7Controller(Node):
         )
 
         self.get_logger().info(
-            "Joint-space target:"
+            f"Joint-space target ({pipeline_id}/{planner_id}):"
         )
 
         for name, angle in zip(
@@ -377,21 +547,33 @@ class XArm7Controller(Node):
 
         goal_handle = send_future.result()
 
+        def report_failure(message):
+
+            if quiet_failure:
+                self.get_logger().debug(message)
+            else:
+                self.get_logger().error(message)
+
         if goal_handle is None:
 
-            self.get_logger().error(
-                "Failed to communicate with MoveIt."
-            )
+            reason = "no response from MoveIt"
+            report_failure(f"Failed to communicate with MoveIt.")
 
-            return False
+            return False, reason
 
         if not goal_handle.accepted:
 
-            self.get_logger().error(
-                "MoveIt rejected joint-space goal."
+            reason = (
+                f"goal rejected by MoveIt - is the "
+                f"'{pipeline_id}' pipeline loaded? (check: ros2 "
+                f"param get /move_group planning_pipelines)"
+            )
+            report_failure(
+                f"MoveIt rejected joint-space goal "
+                f"({pipeline_id}/{planner_id}): {reason}"
             )
 
-            return False
+            return False, reason
 
         result_future = (
             goal_handle.get_result_async()
@@ -406,11 +588,10 @@ class XArm7Controller(Node):
 
         if wrapped_result is None:
 
-            self.get_logger().error(
-                "MoveIt returned no result."
-            )
+            reason = "MoveIt returned no result"
+            report_failure(reason + ".")
 
-            return False
+            return False, reason
 
         error_code = (
             wrapped_result.result.error_code.val
@@ -422,14 +603,16 @@ class XArm7Controller(Node):
                 "Joint movement completed successfully."
             )
 
-            return True
+            return True, None
 
-        self.get_logger().error(
-            f"Joint movement failed. "
-            f"MoveIt error code: {error_code}"
+        reason = describe_moveit_error(error_code)
+
+        report_failure(
+            f"Joint movement failed with "
+            f"{pipeline_id}/{planner_id}: {reason}"
         )
 
-        return False
+        return False, reason
 
     # =========================================================
     # RELATIVE SINGLE-JOINT MOVEMENT

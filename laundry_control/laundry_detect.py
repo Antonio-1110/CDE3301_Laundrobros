@@ -33,55 +33,56 @@ from scipy.spatial import cKDTree
 from .scan_cloud_util import load_xyz_csv
 
 # Defaults tied to the physical scan geometry (see scan_move.py) and
-# to a real baseline-vs-laundry comparison (14 sept 2026):
+# to a real calibration run (17 sept 2026, calibrate_threshold.py,
+# empty-vs-empty for noise and empty-vs-known-laundry for signal),
+# measured with the CURRENT one-sided signed-z metric:
 #
-#   - Measured nearest-neighbor deviation distances on a real scan
-#     showed baseline noise/repeatability sitting at p90 ~2.7cm,
-#     jumping to p95 ~6.1cm once real laundry points are reached -
-#     i.e. a clear gap between ~3cm and ~6cm. DEFAULT_THRESHOLD_M
-#     sits in that gap, well above sensor noise/xArm7/TF
-#     repeatability and above the normal inter-pass gap from
-#     scan_move.py's 3cm insertion step, so it doesn't flag the
-#     empty-bucket baseline's own sampling gaps as deviations.
+#   - Noise (two empty-bucket scans over the same path) topped out
+#     at 1.86cm, with p95 ~0.9cm and p99 ~1.4cm - far tighter than
+#     the 2.7cm p90 measured before the metric went one-sided,
+#     because the old symmetric/unsigned distance was charging both
+#     tails of registration error against the threshold.
+#
+#   - Signal (known laundry present) only separates from that noise
+#     in its upper tail: p99 ~5.3cm, max ~5.7cm. Most points in a
+#     laundry scan still hit bare bucket, so the bulk of the
+#     distribution legitimately looks like noise.
+#
+#   - DEFAULT_THRESHOLD_M is set from the END-TO-END behaviour
+#     (deviation + clustering), not from the per-point noise
+#     ceiling, because cluster_points()'s min_cluster_size filter
+#     turns out to reject false positives far more effectively than
+#     the threshold does: scattered noise points rarely land within
+#     DEFAULT_CLUSTER_RADIUS_M of three other noise points, while a
+#     real item's flagged points are contiguous by construction.
+#     Sweeping the threshold on the 17 sept scans, the empty-vs-
+#     empty pair produced its first false cluster at 0.010 and was
+#     clean from 0.012 up, while the laundry scan's cluster grew
+#     from 14 points at 0.020 to 18 at 0.012. 0.015 sits between
+#     the two: ~50% more points on a real item than 0.020 gave,
+#     with meaningful margin above the 0.010 breakdown - margin
+#     worth keeping, since "clean" is so far based on a single
+#     empty-vs-empty pair.
+#
+#     Sparse coverage of an item is acceptable here - downstream can
+#     interpolate/hull a partial cluster, but it can't recover an
+#     item that was never flagged.
 #
 #   - DEFAULT_CLUSTER_RADIUS_M must exceed the 3 cm step so that
 #     points hit on the same laundry item across adjacent sweep
 #     passes still link into one cluster, while staying much
 #     smaller than the bucket/scan scale so distinct items don't
 #     get merged together.
-DEFAULT_THRESHOLD_M = 0.04
+DEFAULT_THRESHOLD_M = 0.015
 DEFAULT_CLUSTER_RADIUS_M = 0.04
 DEFAULT_MIN_CLUSTER_SIZE = 4
 
-# compute_cell_deviation()'s defaults. Averaging several points'
-# z within a cell suppresses random per-point sensor noise (it's
-# zero-mean, so it washes out), while a real item - even a subtle
-# one - shifts every point in its footprint the same direction, so
-# the cell mean still moves even when individual points wouldn't
-# have cleared DEFAULT_THRESHOLD_M on their own. That's what lets
-# this mode catch smaller/subtler items the point-wise mode misses.
-#
-#   - DEFAULT_CELL_SIZE_M matches scan_move.py's 3cm insertion step:
-#     fine enough that a genuinely small item still gets its own
-#     cell(s) rather than being averaged together with surrounding
-#     untouched-baseline points (which would wash the signal back
-#     toward zero), coarse enough to actually gather multiple points
-#     per cell given this package's sparse (~1000-1200 point) scans.
-#   - DEFAULT_CELL_THRESHOLD_M is set below DEFAULT_THRESHOLD_M
-#     specifically because cell averaging is expected to suppress
-#     noise variance - start here and tune against real data the
-#     same way DEFAULT_THRESHOLD_M itself was calibrated.
-#   - DEFAULT_CELL_MIN_POINTS requires at least 2 points before
-#     trusting a cell's mean at all (a lone point gets no averaging
-#     benefit - it behaves exactly like the point-wise mode).
-#   - DEFAULT_CELL_BASELINE_K matches grasp_plan.py's
-#     DEFAULT_BASELINE_K for the same reason: averages over roughly
-#     one step-radius patch of the baseline around each cell.
-DEFAULT_CELL_SIZE_M = 0.03
-DEFAULT_CELL_THRESHOLD_M = 0.02
-DEFAULT_CELL_MIN_POINTS = 2
-DEFAULT_CELL_BASELINE_K = 5
-
+# XY radius of the neighbourhood compute_deviation() takes the local
+# baseline surface height from. Matches scan_move.py's 3cm insertion
+# step, so it spans roughly one sweep pass either side: wide enough
+# to always contain baseline samples wherever the scan had coverage,
+# narrow enough not to drag in a wall standing well away laterally.
+DEFAULT_SURFACE_RADIUS_M = 0.03
 
 def load_points_xyz(csv_path: str) -> np.ndarray:
     """
@@ -107,28 +108,63 @@ def load_points_xyz(csv_path: str) -> np.ndarray:
 @dataclass
 class DeviationResult:
     """
-    Per-candidate-point nearest-neighbor distance to the baseline
-    cloud, and the resulting deviation mask.
+    Per-candidate-point height above the local baseline surface,
+    and the resulting deviation mask.
+
+    heights is that height in metres: positive means the candidate
+    point stands proud of the empty bucket's surface at the same
+    lateral position, which is what a laundry item does. Points
+    with no baseline coverage nearby carry -inf (see
+    compute_deviation).
     """
 
-    distances: np.ndarray
+    heights: np.ndarray
     mask: np.ndarray
     threshold_m: float
+    radius_m: float
 
 
 def compute_deviation(
     baseline_xyz: np.ndarray,
     candidate_xyz: np.ndarray,
     threshold_m: float = DEFAULT_THRESHOLD_M,
+    radius_m: float = DEFAULT_SURFACE_RADIUS_M,
 ) -> DeviationResult:
     """
-    For every point in candidate_xyz, find its Euclidean distance
-    to the nearest point in baseline_xyz.
+    For every candidate point, measure how far it stands ABOVE the
+    empty bucket's surface at the same lateral (x, y) position, and
+    flag it when that height reaches threshold_m.
 
-    Vectorized: a single cKDTree is built on baseline_xyz and
-    queried for all candidate points at once (no per-point Python
-    loop), which is trivial at the ~1000-1200 points per scan this
-    package produces.
+    The local surface is taken as the HIGHEST baseline point within
+    radius_m in XY. Not the nearest baseline point's z, and not a
+    mean over neighbours - both of those are wrong on this bucket,
+    for the same underlying reason:
+
+        z is not single-valued over (x, y) here. Measured on a real
+        baseline, 65% of points sit in neighbourhoods spanning more
+        in z than the detector's whole noise ceiling, up to 13cm
+        inside a single 3cm cell, because the bucket walls are
+        steep in base_frame. Comparing a point against the single
+        nearest neighbour therefore compares it against whichever
+        part of the wall happens to be closest in 3D - typically a
+        point LOWER down the same wall. The candidate then reads as
+        "above the baseline" while actually sitting below the
+        wall's local top, and a patch of bare bucket wall gets
+        reported as laundry. That is exactly what produced four
+        spurious clusters (all measuring 2.5-8.7cm BELOW the local
+        surface) on the 17 sept run.
+
+    Taking the local maximum instead asks the question that
+    actually matters - "is this point above everything the empty
+    bucket ever presented here?" - which only a real object resting
+    in the bucket can be true of. It is also one-sided by
+    construction: an item can only intercept the beam early and
+    stand proud of the surface, never sink below it.
+
+    Points with no baseline point within radius_m get -inf and are
+    never flagged: with no local reference there is nothing to
+    judge them against, and guessing from a far-away baseline point
+    is what the old nearest-neighbour metric did wrong.
     """
 
     if baseline_xyz.shape[0] == 0:
@@ -136,139 +172,41 @@ def compute_deviation(
         raise ValueError(
             "baseline_xyz has no points; cannot compute deviation."
         )
-
-    tree = cKDTree(baseline_xyz)
-
-    distances, _indices = tree.query(
-        candidate_xyz,
-        k=1,
-        workers=-1,
-    )
-
-    distances = np.atleast_1d(distances)
-
-    mask = distances >= threshold_m
-
-    return DeviationResult(
-        distances=distances,
-        mask=mask,
-        threshold_m=threshold_m,
-    )
-
-
-@dataclass
-class CellDeviationResult:
-    """
-    Per-candidate-point cell-mean deviation and the resulting mask.
-
-    Unlike DeviationResult (one distance per point, computed
-    independently), every point sharing a cell gets the SAME
-    cell_deviations value and the SAME mask outcome - the decision
-    is made once per cell, not once per point.
-    """
-
-    cell_deviations: np.ndarray
-    mask: np.ndarray
-    threshold_m: float
-    cell_size_m: float
-
-
-def compute_cell_deviation(
-    baseline_xyz: np.ndarray,
-    candidate_xyz: np.ndarray,
-    threshold_m: float = DEFAULT_CELL_THRESHOLD_M,
-    cell_size_m: float = DEFAULT_CELL_SIZE_M,
-    min_points_per_cell: int = DEFAULT_CELL_MIN_POINTS,
-    baseline_k: int = DEFAULT_CELL_BASELINE_K,
-) -> CellDeviationResult:
-    """
-    Grid candidate_xyz into cell_size_m x cell_size_m cells over
-    (x, y) (an NDT-style "box each cell" pass, simplified to a mean
-    rather than a full per-cell Gaussian/covariance, since this
-    package's scans are too sparse - often 1-3 points per cell - to
-    estimate a stable variance): for each cell with at least
-    min_points_per_cell candidate points, compare that cell's mean z
-    against a local baseline estimate (mean z of the baseline_k
-    nearest baseline points to the cell's own mean (x, y) - the same
-    local-lookup technique grasp_plan.estimate_baseline_depth()
-    already uses). Every point in a cell whose mean deviates by at
-    least threshold_m is flagged, all with that cell's single shared
-    deviation value.
-
-    Cells with fewer than min_points_per_cell candidate points are
-    left unflagged (not enough of them to trust a cell mean - see
-    the module-level defaults comment for why a lone point is best
-    left to the point-wise compute_deviation() instead).
-    """
 
     n = candidate_xyz.shape[0]
 
-    mask = np.zeros(n, dtype=bool)
-    cell_deviations = np.zeros(n, dtype=np.float64)
+    heights = np.full(n, -np.inf, dtype=np.float64)
 
     if n == 0:
-        return CellDeviationResult(
-            cell_deviations=cell_deviations,
-            mask=mask,
+        return DeviationResult(
+            heights=heights,
+            mask=np.zeros(0, dtype=bool),
             threshold_m=threshold_m,
-            cell_size_m=cell_size_m,
+            radius_m=radius_m,
         )
 
-    if baseline_xyz.shape[0] == 0:
+    tree = cKDTree(baseline_xyz[:, :2])
 
-        raise ValueError(
-            "baseline_xyz has no points; cannot compute deviation."
-        )
-
-    cell_indices = np.floor(
-        candidate_xyz[:, :2] / cell_size_m
-    ).astype(np.int64)
-
-    _unique_cells, inverse, counts = np.unique(
-        cell_indices,
-        axis=0,
-        return_inverse=True,
-        return_counts=True,
+    neighbourhoods = tree.query_ball_point(
+        candidate_xyz[:, :2],
+        r=radius_m,
+        workers=-1,
     )
 
-    baseline_tree = cKDTree(baseline_xyz[:, :2])
-    baseline_k_eff = min(baseline_k, baseline_xyz.shape[0])
+    for i, indices in enumerate(neighbourhoods):
 
-    # inverse.reshape(-1) guards against a numpy version quirk where
-    # return_inverse can come back with an extra trailing dimension.
-    inverse = inverse.reshape(-1)
-
-    for cell_id in range(counts.shape[0]):
-
-        if counts[cell_id] < min_points_per_cell:
+        if not indices:
             continue
 
-        point_mask = inverse == cell_id
+        heights[i] = candidate_xyz[i, 2] - baseline_xyz[indices, 2].max()
 
-        cell_points = candidate_xyz[point_mask]
-        mean_xy = cell_points[:, :2].mean(axis=0)
-        mean_z = cell_points[:, 2].mean()
+    mask = heights >= threshold_m
 
-        _distances, baseline_indices = baseline_tree.query(
-            mean_xy,
-            k=baseline_k_eff,
-        )
-
-        baseline_indices = np.atleast_1d(baseline_indices)
-        baseline_mean_z = baseline_xyz[baseline_indices, 2].mean()
-
-        deviation = abs(mean_z - baseline_mean_z)
-
-        cell_deviations[point_mask] = deviation
-
-        if deviation >= threshold_m:
-            mask[point_mask] = True
-
-    return CellDeviationResult(
-        cell_deviations=cell_deviations,
+    return DeviationResult(
+        heights=heights,
         mask=mask,
         threshold_m=threshold_m,
-        cell_size_m=cell_size_m,
+        radius_m=radius_m,
     )
 
 
@@ -359,7 +297,7 @@ class ClusterSummary:
 def summarize_clusters(
     cluster_indices: List[np.ndarray],
     points_xyz: np.ndarray,
-    deviation_distances: Optional[np.ndarray] = None,
+    deviation_heights: Optional[np.ndarray] = None,
 ) -> List[ClusterSummary]:
     """
     Build a ClusterSummary per cluster.
@@ -368,12 +306,13 @@ def summarize_clusters(
         As returned by cluster_points() - index arrays into
         points_xyz.
 
-    deviation_distances:
-        Nearest-neighbor distances aligned index-for-index with
-        points_xyz (e.g. DeviationResult.distances restricted to
-        the same deviating-point subset that was clustered), used
-        to compute mean_deviation_m per cluster. If omitted,
-        mean_deviation_m is NaN.
+    deviation_heights:
+        Heights above the local baseline surface, aligned
+        index-for-index with points_xyz (e.g.
+        DeviationResult.heights restricted to the same
+        deviating-point subset that was clustered), used to compute
+        mean_deviation_m per cluster. If omitted, mean_deviation_m
+        is NaN.
 
     Order of the input cluster_indices is preserved (cluster_points
     already sorts largest-first).
@@ -392,9 +331,9 @@ def summarize_clusters(
             np.argmax(member_points[:, 2])
         ]
 
-        if deviation_distances is not None:
+        if deviation_heights is not None:
             mean_deviation_m = float(
-                deviation_distances[indices].mean()
+                deviation_heights[indices].mean()
             )
         else:
             mean_deviation_m = float("nan")
@@ -421,6 +360,7 @@ def detect_laundry(
     threshold_m: float = DEFAULT_THRESHOLD_M,
     cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M,
     min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
+    surface_radius_m: float = DEFAULT_SURFACE_RADIUS_M,
 ) -> List[ClusterSummary]:
     """
     End-to-end: load both CSVs, compute per-point deviation from
@@ -441,10 +381,11 @@ def detect_laundry(
         baseline_xyz,
         candidate_xyz,
         threshold_m=threshold_m,
+        radius_m=surface_radius_m,
     )
 
     deviating_xyz = candidate_xyz[deviation.mask]
-    deviating_distances = deviation.distances[deviation.mask]
+    deviating_heights = deviation.heights[deviation.mask]
 
     cluster_indices = cluster_points(
         deviating_xyz,
@@ -455,56 +396,5 @@ def detect_laundry(
     return summarize_clusters(
         cluster_indices,
         deviating_xyz,
-        deviating_distances,
-    )
-
-
-def detect_laundry_by_cell(
-    baseline_csv: str,
-    candidate_csv: str,
-    threshold_m: float = DEFAULT_CELL_THRESHOLD_M,
-    cell_size_m: float = DEFAULT_CELL_SIZE_M,
-    min_points_per_cell: int = DEFAULT_CELL_MIN_POINTS,
-    baseline_k: int = DEFAULT_CELL_BASELINE_K,
-    cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M,
-    min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
-) -> List[ClusterSummary]:
-    """
-    Same end-to-end shape as detect_laundry(), but flags points via
-    compute_cell_deviation() (cell-mean comparison) instead of
-    compute_deviation() (raw point-to-nearest-point comparison) -
-    see compute_cell_deviation()'s docstring for why this can catch
-    smaller/subtler items the point-wise mode misses as noise.
-
-    Clustering and summarization are identical to detect_laundry()
-    (same cluster_points()/summarize_clusters() calls) - only the
-    flagging step differs, so results from the two modes are
-    directly comparable on the same data.
-    """
-
-    baseline_xyz = load_points_xyz(baseline_csv)
-    candidate_xyz = load_points_xyz(candidate_csv)
-
-    deviation = compute_cell_deviation(
-        baseline_xyz,
-        candidate_xyz,
-        threshold_m=threshold_m,
-        cell_size_m=cell_size_m,
-        min_points_per_cell=min_points_per_cell,
-        baseline_k=baseline_k,
-    )
-
-    deviating_xyz = candidate_xyz[deviation.mask]
-    deviating_distances = deviation.cell_deviations[deviation.mask]
-
-    cluster_indices = cluster_points(
-        deviating_xyz,
-        radius_m=cluster_radius_m,
-        min_cluster_size=min_cluster_size,
-    )
-
-    return summarize_clusters(
-        cluster_indices,
-        deviating_xyz,
-        deviating_distances,
+        deviating_heights,
     )

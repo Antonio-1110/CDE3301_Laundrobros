@@ -71,11 +71,46 @@ DEFAULT_MAX_SINK_M = 0.05
 DEFAULT_REACHABILITY_THRESHOLD = 0.999
 
 
-def estimate_baseline_depth(baseline_xyz, xy, k=DEFAULT_BASELINE_K):
+def estimate_baseline_depth(
+    baseline_xyz,
+    xy,
+    k=DEFAULT_BASELINE_K,
+    below_z=None,
+):
     """
-    Estimate the empty-bucket baseline surface's z at lateral
-    position xy=(x, y), via a 2D (XY-only) cKDTree over
-    baseline_xyz and averaging the k nearest baseline points' z.
+    Estimate the empty-bucket baseline surface's z directly beneath
+    lateral position xy=(x, y): take the k nearest baseline points
+    in XY, keep those at or below `below_z`, and return the HIGHEST
+    of those.
+
+    Returns None when `below_z` is given and none of the k
+    neighbours lie below it - see "no surface below" at the end.
+
+    Why not simply average the k neighbours' z (what this did
+    before): z is NOT single-valued over (x, y) on this bucket.
+    Measured on a real baseline scan, 65% of points sit in
+    neighbourhoods spanning more than the detector's whole noise
+    ceiling in z, with up to 13cm of spread inside a single 3cm
+    cell, because the bucket walls are steep in base_frame. Near a
+    wall, the "k nearest in XY" are therefore a mix of floor points
+    and wall points standing above them at almost the same (x, y),
+    and their mean is an average of two unrelated surfaces - a
+    number describing no real surface at all. Feeding that to
+    compute_grasp_target()'s `gap` skews how deep the gripper digs
+    in exactly the places laundry tends to collect.
+
+    Why the highest point below rather than the lowest or the mean:
+    the sink is purely vertical, so what limits it is whatever the
+    gripper would hit FIRST on its way down - the topmost surface
+    under the item, be that the floor or a ledge partway up a wall.
+    Choosing the highest also errs toward a smaller gap and so a
+    shallower sink, which is the safe direction to be wrong in.
+
+    "No surface below" means every nearby baseline point stands
+    above the item's own sensed top, so this neighbourhood cannot
+    describe what is under it. That is reported as None rather than
+    papered over with a number, because the sensible response -
+    don't sink on an estimate this bad - belongs to the caller.
     """
 
     if baseline_xyz.shape[0] == 0:
@@ -94,8 +129,17 @@ def estimate_baseline_depth(baseline_xyz, xy, k=DEFAULT_BASELINE_K):
     )
 
     indices = np.atleast_1d(indices)
+    neighbour_z = baseline_xyz[indices, 2]
 
-    return float(baseline_xyz[indices, 2].mean())
+    if below_z is None:
+        return float(neighbour_z.max())
+
+    below = neighbour_z[neighbour_z <= below_z]
+
+    if below.size == 0:
+        return None
+
+    return float(below.max())
 
 
 @dataclass
@@ -231,9 +275,37 @@ def compute_grasp_target(
         baseline_xyz,
         (x, y),
         k=baseline_k,
+        below_z=sensed_top_z,
     )
 
-    gap = max(0.0, sensed_top_z - baseline_z)
+    if baseline_z is None:
+
+        # No baseline point near this cluster sits below its sensed
+        # top, so there is no trustworthy estimate of how much room
+        # is underneath. Sinking on a guess risks driving the
+        # gripper into the bucket, so fall back to grasping at the
+        # sensed surface itself - the one depth the ToF sensor has
+        # already proved reachable.
+        print(
+            f"WARNING: no baseline surface found below the cluster at "
+            f"({x:.3f}, {y:.3f}, {sensed_top_z:.3f}); grasping at the "
+            f"sensed surface without sinking."
+        )
+
+        gap = 0.0
+
+    else:
+
+        gap = max(0.0, sensed_top_z - baseline_z)
+
+        if gap == 0.0:
+
+            print(
+                f"WARNING: baseline surface at ({x:.3f}, {y:.3f}) "
+                f"estimated at z={baseline_z:.3f}, at or above the "
+                f"cluster's sensed top z={sensed_top_z:.3f}; grasping "
+                f"at the sensed surface without sinking."
+            )
 
     tf = arm.get_flange_transform()
 

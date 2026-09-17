@@ -57,9 +57,9 @@ DEFAULT_BASELINE_PATH = (
 )
 
 
-def select_target_cluster(clusters):
+def rank_clusters(clusters):
     """
-    Pick which detected cluster to retrieve: largest by point
+    Order detected clusters best-target-first: largest by point
     count (cluster.size), ties broken by highest mean_deviation_m.
 
     cluster.size is the most direct, noise-robust proxy for "how
@@ -67,15 +67,58 @@ def select_target_cluster(clusters):
     the scan grid registered something raised off the baseline at
     that spot. mean_deviation_m (how far above baseline, on
     average) breaks ties as a secondary "more/closer" signal.
+
+    Callers should walk this list rather than committing to its
+    first entry: being the biggest cluster does not make a target
+    reachable, and an unreachable one is no reason to abandon a
+    scan that found other candidates.
     """
 
-    if not clusters:
-        return None
-
-    return max(
+    return sorted(
         clusters,
         key=lambda cluster: (cluster.size, cluster.mean_deviation_m),
+        reverse=True,
     )
+
+
+def select_target_cluster(clusters):
+    """
+    The single best-ranked cluster, or None if there are none.
+    """
+
+    ranked = rank_clusters(clusters)
+
+    return ranked[0] if ranked else None
+
+
+def plan_first_reachable(clusters, baseline_xyz, arm, compute_grasp_target):
+    """
+    Walk clusters best-first and return the first
+    (cluster, GraspTarget) whose grasp target the arm can actually
+    reach, or (None, None) if none of them can be.
+
+    compute_grasp_target is injected rather than imported here so
+    this stays unit-testable with a stub.
+    """
+
+    for cluster in rank_clusters(clusters):
+
+        cx, cy, cz = cluster.centroid
+
+        print(
+            f"Trying cluster: size={cluster.size} "
+            f"centroid=({cx:.3f}, {cy:.3f}, {cz:.3f}) "
+            f"mean_dev={cluster.mean_deviation_m:.3f}m"
+        )
+
+        grasp = compute_grasp_target(cluster, baseline_xyz, arm)
+
+        if grasp is not None:
+            return cluster, grasp
+
+        print("  unreachable at every sink depth; trying the next cluster.")
+
+    return None, None
 
 
 def build_parser():
@@ -132,12 +175,7 @@ def main():
         print("No laundry detected; nothing to retrieve.")
         return
 
-    target_cluster = select_target_cluster(clusters)
-
-    print(
-        f"Targeting cluster: size={target_cluster.size} "
-        f"centroid={target_cluster.centroid}"
-    )
+    print(f"{len(clusters)} cluster(s) detected.")
 
     baseline_xyz = load_points_xyz(args.baseline)
 
@@ -156,17 +194,19 @@ def main():
 
             return
 
-        grasp = compute_grasp_target(
-            target_cluster,
+        target_cluster, grasp = plan_first_reachable(
+            clusters,
             baseline_xyz,
             arm,
+            compute_grasp_target,
         )
 
         if grasp is None:
 
             print(
-                "No reachable grasp target found, even at "
-                "sink=0; aborting."
+                f"None of the {len(clusters)} detected cluster(s) "
+                "yielded a reachable grasp target, even at sink=0; "
+                "aborting."
             )
 
             return

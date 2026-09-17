@@ -127,6 +127,58 @@ def test_estimate_baseline_depth_empty_baseline_raises():
         estimate_baseline_depth(np.empty((0, 3)), (0.0, 0.0))
 
 
+def test_estimate_baseline_depth_ignores_wall_points_above_the_item():
+    """
+    The multivalued-z case this function exists to survive: a floor
+    and a wall standing over it at nearly the same (x, y). Averaging
+    both - what this used to do - returns a height describing
+    neither surface.
+    """
+
+    floor = np.array([[0.0, 0.0, 0.0], [0.004, 0.0, 0.0], [0.0, 0.004, 0.0]])
+    wall = np.array([[0.002, 0.002, 0.10], [0.006, 0.002, 0.10]])
+
+    baseline = np.concatenate([floor, wall], axis=0)
+
+    # Item sensed at 5cm, i.e. above the floor but below the wall.
+    depth = estimate_baseline_depth(baseline, (0.002, 0.002), k=5, below_z=0.05)
+
+    assert depth == pytest.approx(0.0, abs=1e-9)
+
+    # Averaging all five would have landed between the two surfaces.
+    assert depth != pytest.approx(baseline[:, 2].mean(), abs=1e-9)
+
+
+def test_estimate_baseline_depth_returns_highest_surface_below():
+    # A ledge partway up is what the gripper meets first on the way
+    # down, so it - not the floor beneath it - bounds the sink.
+    baseline = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.004, 0.0, 0.03],
+            [0.0, 0.004, 0.01],
+        ]
+    )
+
+    depth = estimate_baseline_depth(baseline, (0.0, 0.0), k=3, below_z=0.05)
+
+    assert depth == pytest.approx(0.03, abs=1e-9)
+
+
+def test_estimate_baseline_depth_none_when_nothing_below():
+    baseline = np.array(
+        [
+            [0.0, 0.0, 0.20],
+            [0.004, 0.0, 0.22],
+            [0.0, 0.004, 0.25],
+        ]
+    )
+
+    depth = estimate_baseline_depth(baseline, (0.0, 0.0), k=3, below_z=0.05)
+
+    assert depth is None
+
+
 # ---------------------------------------------------------------
 # look_at_quaternion
 # ---------------------------------------------------------------

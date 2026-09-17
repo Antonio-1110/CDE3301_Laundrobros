@@ -16,7 +16,7 @@ from builtin_interfaces.msg import Time
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 from std_msgs.msg import Header
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 
 # TRANSIENT_LOCAL durability means a late-joining subscriber (e.g.
@@ -39,6 +39,41 @@ def build_cloud(frame_id, stamp, xyz_points):
         header=header,
         points=xyz_points,
     )
+
+
+def build_cloud_with_intensity(frame_id, stamp, xyz_points, intensities):
+    """
+    Like build_cloud(), but with a per-point `intensity` field, so
+    RViz can colour points by group (set the PointCloud2 display's
+    Color Transformer to "Intensity", Channel Name to "intensity").
+
+    Used to tell separate laundry clusters apart in one cloud -
+    otherwise every cluster renders in a single flat colour and a
+    multi-cluster result is unreadable.
+    """
+
+    header = Header()
+    header.frame_id = frame_id
+    header.stamp = stamp
+
+    fields = [
+        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(
+            name="intensity",
+            offset=12,
+            datatype=PointField.FLOAT32,
+            count=1,
+        ),
+    ]
+
+    points = [
+        (float(x), float(y), float(z), float(i))
+        for (x, y, z), i in zip(xyz_points, intensities)
+    ]
+
+    return point_cloud2.create_cloud(header, fields, points)
 
 
 def save_xyz_csv(path, points):

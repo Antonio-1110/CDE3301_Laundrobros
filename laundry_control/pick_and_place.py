@@ -5,8 +5,17 @@ pick_and_place.py
 
 Full pipeline, in one continuous arm connection:
 
-    scan -> detect + compute grasp -> approach + close -> return to
-    INTER -> open (drop)
+    open gripper -> scan -> detect + compute grasp -> approach +
+    close (grasp) -> retract to INTER -> DROP -> open (release)
+    -> INTER
+
+The gripper is open for the whole run except while carrying the
+item, from the grasp until the release at DROP. Scanning open (not
+just idling open) is deliberate: the end effector occludes the
+bucket, so the scan has to be taken in the same gripper state the
+baseline was recorded in. The release happens at
+arm_position.DROP rather than at INTER, with INTER used as the
+known-clear waypoint between the two.
 
 This is a bare script (like scan_move.py/move.py, and NOT
 registered as a console_script), since it needs scan_move.py's
@@ -61,7 +70,7 @@ from scan_record import ScanRecorderClient
 from laundry_control.grasp_plan import compute_grasp_target
 from laundry_control.gripper_client import GripperClient
 from laundry_control.laundry_detect import detect_laundry, load_points_xyz
-from laundry_control.retrieve import select_target_cluster
+from laundry_control.retrieve import plan_first_reachable
 
 DEFAULT_BASELINE_PATH = (
     "/home/cde3301a/ros2_ws/src/CDE3301_Laundrobros/"
@@ -137,7 +146,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description=(
             "Scan the bucket, retrieve the best-detected laundry "
-            "item, and drop it back at INTER."
+            "item, release it at DROP, and return to INTER."
         )
     )
 
@@ -186,6 +195,28 @@ def main():
 
         print("========== SCAN ==========")
 
+        # The gripper stays OPEN for everything except the actual
+        # carry, and this makes that explicit rather than inheriting
+        # whatever state the last run left it in. It matters for
+        # detection, not just tidiness: the sensor is wrist-mounted
+        # and the end effector already occludes part of the bucket
+        # (see scan_move.py's BOTTOM detour), so a closed gripper
+        # occludes differently from an open one - scanning in a
+        # different gripper state than the baseline was recorded in
+        # shifts returns in the affected region by more than
+        # DEFAULT_THRESHOLD_M and shows up as laundry that isn't
+        # there.
+        print("Opening gripper so the scan matches the baseline's geometry...")
+
+        if not gripper.open_blocking():
+
+            print(
+                "WARNING: could not confirm the gripper opened. If it "
+                "is closed, this scan's end-effector occlusion differs "
+                "from the baseline's and may produce phantom "
+                "detections."
+            )
+
         recorder.clear_blocking()
 
         if not scan(arm=arm, recorder=recorder):
@@ -207,12 +238,7 @@ def main():
 
             return
 
-        target_cluster = select_target_cluster(clusters)
-
-        print(
-            f"Targeting cluster: size={target_cluster.size} "
-            f"centroid={target_cluster.centroid}"
-        )
+        print(f"{len(clusters)} cluster(s) detected.")
 
         baseline_xyz = load_points_xyz(args.baseline)
 
@@ -228,13 +254,19 @@ def main():
 
             return
 
-        grasp = compute_grasp_target(target_cluster, baseline_xyz, arm)
+        target_cluster, grasp = plan_first_reachable(
+            clusters,
+            baseline_xyz,
+            arm,
+            compute_grasp_target,
+        )
 
         if grasp is None:
 
             print(
-                "No reachable grasp target found, even at "
-                "sink=0; aborting."
+                f"None of the {len(clusters)} detected cluster(s) "
+                "yielded a reachable grasp target, even at sink=0; "
+                "aborting."
             )
 
             return
@@ -265,15 +297,37 @@ def main():
 
         gripper.close_blocking()
 
+        print("========== DROP ==========")
+
+        # Retract to INTER before traversing to DROP. The grasp pose
+        # is deep inside the bucket at an arbitrary computed
+        # position, so going straight to DROP would sweep the arm
+        # (and whatever it is now holding) sideways through the
+        # bucket wall. INTER is the withdrawn pose the scan itself
+        # starts and ends at, so it is a known-clear waypoint out.
+        print("Retracting to INTER...")
+
+        if not arm.move_joints(arm_position.INTER):
+
+            print("Failed to retract to INTER; aborting.")
+
+            return
+
+        print("Moving to DROP...")
+
+        if not arm.move_joints(arm_position.DROP):
+
+            print("Failed to reach DROP; aborting.")
+
+            return
+
+        print("Opening gripper to release the item...")
+
+        gripper.open_blocking()
+
         print("Returning to INTER...")
 
         arm.move_joints(arm_position.INTER)
-
-        print("========== DROP ==========")
-
-        print("Opening gripper to drop the item at INTER...")
-
-        gripper.open_blocking()
 
     finally:
 
