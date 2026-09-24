@@ -230,8 +230,10 @@ def compute_grasp_target(
     `cluster`, sunk below the sensed top by a dynamic amount,
     verified reachable via a plan-only dry-run against `arm`.
 
-    x, y, and the sensed-top z all come from cluster.centroid (one
-    consistent point), rather than e.g. pairing centroid xy with
+    x, y, and the sensed-top z all come from cluster.target_point -
+    the mean of its top-quartile-intrusion points, falling back to
+    the centroid (see perception.detect.GRASP_POINT_QUANTILE): one
+    consistent point, rather than e.g. pairing centroid xy with
     highest_point's z, which could describe two different points.
     The sink itself stays purely vertical (digging into the pile is
     a gravity-down notion, independent of approach angle) - only
@@ -246,9 +248,11 @@ def compute_grasp_target(
     is unreachable - that indicates a genuine reach/collision
     problem unrelated to sink depth, which sinking less cannot fix.
     """
-    x = float(cluster.centroid[0])
-    y = float(cluster.centroid[1])
-    sensed_top_z = float(cluster.centroid[2])
+    target = getattr(cluster, 'target_point', cluster.centroid)
+
+    x = float(target[0])
+    y = float(target[1])
+    sensed_top_z = float(target[2])
 
     floor_z = estimate_surface_depth_below(
         surface,

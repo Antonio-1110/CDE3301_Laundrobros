@@ -74,11 +74,11 @@ def plan_first_reachable(clusters, surface, arm, compute_grasp_target):
     """
     for cluster in rank_clusters(clusters):
 
-        cx, cy, cz = cluster.centroid
+        cx, cy, cz = getattr(cluster, 'target_point', cluster.centroid)
 
         print(
             f'Trying cluster: size={cluster.size} '
-            f'centroid=({cx:.3f}, {cy:.3f}, {cz:.3f}) '
+            f'target=({cx:.3f}, {cy:.3f}, {cz:.3f}) '
             f'mean_dev={cluster.mean_deviation_m:.3f}m'
         )
 

@@ -99,10 +99,13 @@ def print_report(candidate_csv, candidate_count, clusters, params):
 
         confidence = '' if cluster.confident else '  [LOW CONFIDENCE]'
 
+        gx, gy, gz = cluster.target_point
+
         print(
             f'  #{i}  size={cluster.size}  '
             f'vol={cluster.volume_m3 * 1e6:.1f}cm3  '
-            f'centroid=({cx:.3f}, {cy:.3f}, {cz:.3f}){confidence}'
+            f'peak={cluster.peak_sigma:.1f}sigma  '
+            f'grasp=({gx:.3f}, {gy:.3f}, {gz:.3f}){confidence}'
         )
 
         print(
@@ -110,6 +113,8 @@ def print_report(candidate_csv, candidate_count, clusters, params):
             f'max={cluster.max_intrusion_m:.3f}m  '
             f'wall_extent={cluster.surface_extent_m:.3f}m'
         )
+
+        print(f'      centroid=({cx:.3f}, {cy:.3f}, {cz:.3f})')
 
         print(
             f'      bbox=({ex:.3f}, {ey:.3f}, {ez:.3f})  '

@@ -74,10 +74,10 @@ def cluster_to_dict(cluster):
                  'surface_extent_m'):
         data[name] = _json_float(getattr(cluster, name))
 
-    # Optional extras added by newer detectors (confidence score,
-    # grasp point) are carried through if present.
-    for name in ('score', 'grasp_point'):
-        value = getattr(cluster, name, None)
+    data['peak_sigma'] = _json_float(cluster.peak_sigma)
+
+    for name in ('grasp_point', 'point_intrusion_m'):
+        value = getattr(cluster, name)
 
         if value is not None:
             data[name] = np.asarray(value, dtype=float).tolist()
@@ -102,20 +102,14 @@ def cluster_from_dict(data):
         else:
             kwargs[name] = float('nan') if value is None else float(value)
 
-    cluster = ClusterSummary(**kwargs)
+    peak = data.get('peak_sigma')
+    kwargs['peak_sigma'] = float('nan') if peak is None else float(peak)
 
-    for name in ('score', 'grasp_point'):
-        if name in data and hasattr(cluster, name):
-            value = data[name]
-            setattr(
-                cluster,
-                name,
-                np.asarray(value, dtype=np.float64)
-                if isinstance(value, list)
-                else float(value),
-            )
+    for name in ('grasp_point', 'point_intrusion_m'):
+        if data.get(name) is not None:
+            kwargs[name] = np.asarray(data[name], dtype=np.float64)
 
-    return cluster
+    return ClusterSummary(**kwargs)
 
 
 def save_targets(path, clusters, scan, baseline, detector_params):

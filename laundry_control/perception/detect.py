@@ -142,6 +142,37 @@ DEFAULT_MIN_CLUSTER_SIZE = 3
 DEFAULT_MIN_EXTENT_M = 0.025
 DEFAULT_MIN_VOLUME_M3 = 1.0e-5
 
+# Hysteresis: clusters are SEEDED by points clearing the thresholds
+# above, then GROWN through connected points that clear this lower
+# bar. Measured with synthetic injection over the 8 real baselines
+# (`laundry evaluate --synthetic`): socks were almost always seeded -
+# a median of 7 flagged points - but then thrown out by the
+# min-size/min-extent gates because only the item's tallest part
+# cleared 4 sigma. Growing to 2.5 sigma lifted observable recall from
+# 78% to 86% (socks 69% -> 88%, flat cloth 29% -> 51%) at the cost of
+# weak evidence joining real clusters; the gate below handles what
+# that costs in false positives.
+DEFAULT_GROW_K_SIGMA = 2.5
+DEFAULT_GROW_FLOOR_M = 0.004
+
+# A cluster living mostly in thinly-sampled (low-confidence) cells
+# must peak at least this many local sigmas to be reported. Both
+# false clusters the grown detector produced on the empty baselines
+# (leave-one-out) were low-confidence with peaks of 4.2 and 6.5
+# sigma, while true clusters peak at a median of 20 sigma. This gate
+# removed both, and 93% of stray clusters in injected scans, while
+# keeping 98.4% of true detections. Confident clusters are not
+# gated: their sigma is measured, not a pooled fallback.
+DEFAULT_LOW_CONFIDENCE_MIN_PEAK_SIGMA = 7.0
+
+# Grasp point = mean of the cluster's top-quartile-intrusion points.
+# On synthetic items its median distance to the item's apex was 1.5cm
+# against 2.6cm for the plain centroid (which is dragged toward the
+# item's thin edges and toward wherever the scan sampled densest);
+# within the claw's ~3cm lateral tolerance either way, but the
+# margin is what a noisy real item eats into.
+GRASP_POINT_QUANTILE = 75.0
+
 
 def load_points_xyz(csv_path: str) -> np.ndarray:
     """
@@ -555,6 +586,26 @@ class ClusterSummary:
     surface_extent_m: float = float('nan')
     confident: bool = True
 
+    # Per-member intrusion (aligned with `points`), kept so grasp-point
+    # selection and evaluation can weigh members by how far they stand
+    # proud of the wall. None when summarize_clusters() had no
+    # intrusion to give.
+    point_intrusion_m: Optional[np.ndarray] = None
+
+    # Highest per-point intrusion in units of local sigma: how far
+    # the strongest evidence clears the noise. The confidence figure
+    # reported with every detection.
+    peak_sigma: float = float('nan')
+
+    # Where the grasp stage should aim (see GRASP_POINT_QUANTILE).
+    # None falls back to the centroid.
+    grasp_point: Optional[np.ndarray] = None
+
+    @property
+    def target_point(self):
+        """Return grasp_point if known, else the centroid."""
+        return self.centroid if self.grasp_point is None else self.grasp_point
+
 
 def summarize_clusters(
     cluster_indices: List[np.ndarray],
@@ -564,6 +615,7 @@ def summarize_clusters(
     theta: Optional[np.ndarray] = None,
     surface: Optional[BaselineSurface] = None,
     confident: Optional[np.ndarray] = None,
+    sigma_m: Optional[np.ndarray] = None,
 ) -> List[ClusterSummary]:
     """
     Build a ClusterSummary per cluster.
@@ -633,6 +685,17 @@ def summarize_clusters(
                 surface,
             )
 
+        peak_sigma = float('nan')
+        grasp_point = None
+
+        if member_intrusion is not None:
+            cut = np.percentile(member_intrusion, GRASP_POINT_QUANTILE)
+            grasp_point = member_points[member_intrusion >= cut].mean(axis=0)
+
+            if sigma_m is not None:
+                member_sigma = np.maximum(sigma_m[indices], 1e-9)
+                peak_sigma = float((member_intrusion / member_sigma).max())
+
         if confident is not None:
             is_confident = bool(confident[indices].mean() >= 0.5)
         else:
@@ -652,6 +715,9 @@ def summarize_clusters(
                 max_intrusion_m=max_intrusion_m,
                 surface_extent_m=surface_extent_m,
                 confident=is_confident,
+                point_intrusion_m=member_intrusion,
+                peak_sigma=peak_sigma,
+                grasp_point=grasp_point,
             )
         )
 
@@ -667,6 +733,11 @@ def detect_on_points(
     min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
     min_extent_m: float = DEFAULT_MIN_EXTENT_M,
     min_volume_m3: float = DEFAULT_MIN_VOLUME_M3,
+    grow_k_sigma: Optional[float] = DEFAULT_GROW_K_SIGMA,
+    grow_floor_m: float = DEFAULT_GROW_FLOOR_M,
+    low_confidence_min_peak_sigma: float = (
+        DEFAULT_LOW_CONFIDENCE_MIN_PEAK_SIGMA
+    ),
 ):
     """
     Run the detector over an already-loaded point array.
@@ -674,6 +745,14 @@ def detect_on_points(
     Returns (clusters, intrusion_result): clusters sorted by
     descending volume, and the per-point IntrusionResult they came
     from (evaluation needs both).
+
+    Seed points are those clearing k_sigma/abs_floor_m
+    (IntrusionResult.mask). With grow_k_sigma set, clusters are
+    formed over the larger set of points clearing
+    grow_k_sigma/grow_floor_m and kept only if they contain a seed
+    (hysteresis); grow_k_sigma=None reproduces the pre-hysteresis
+    detector exactly. Low-confidence clusters must also peak at
+    low_confidence_min_peak_sigma (0 disables the gate).
 
     This is the one implementation of the detector; detect_laundry()
     wraps it for CSV input. Evaluation calls it directly because it
@@ -690,22 +769,38 @@ def detect_on_points(
     if not result.mask.any():
         return [], result
 
-    flagged_xyz = candidate_xyz[result.mask]
+    seed = result.mask
 
-    cluster_indices = cluster_points(
-        flagged_xyz,
-        radius_m=cluster_radius_m,
-        min_cluster_size=min_cluster_size,
-    )
+    if grow_k_sigma is None:
+        member = seed
+    else:
+        grow_threshold = np.maximum(grow_k_sigma * result.sigma_m, grow_floor_m)
+        member = seed | (
+            result.in_bounds & (result.intrusion_m >= grow_threshold)
+        )
+
+    member_xyz = candidate_xyz[member]
+    member_is_seed = seed[member]
+
+    cluster_indices = [
+        indices
+        for indices in cluster_points(
+            member_xyz,
+            radius_m=cluster_radius_m,
+            min_cluster_size=min_cluster_size,
+        )
+        if member_is_seed[indices].any()
+    ]
 
     summaries = summarize_clusters(
         cluster_indices,
-        flagged_xyz,
-        result.intrusion_m[result.mask],
-        u=result.u[result.mask],
-        theta=result.theta[result.mask],
+        member_xyz,
+        result.intrusion_m[member],
+        u=result.u[member],
+        theta=result.theta[member],
         surface=surface,
-        confident=result.confident[result.mask],
+        confident=result.confident[member],
+        sigma_m=result.sigma_m[member],
     )
 
     kept = [
@@ -713,6 +808,10 @@ def detect_on_points(
         for summary in summaries
         if summary.surface_extent_m >= min_extent_m
         and summary.volume_m3 >= min_volume_m3
+        and (
+            summary.confident
+            or not summary.peak_sigma < low_confidence_min_peak_sigma
+        )
     ]
 
     kept.sort(key=lambda summary: summary.volume_m3, reverse=True)
