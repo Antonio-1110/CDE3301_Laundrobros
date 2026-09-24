@@ -1164,6 +1164,21 @@ class XArm7Controller(Node):
             twist_deg
         )
 
+        # The twist bypasses MoveIt's time parameterisation (see
+        # config.JOINT7_MAX_VELOCITY_RAD_S), so say so when it asks
+        # J7 for more than its configured limit.
+        twist_rate = abs(twist_rad) / total_time
+
+        if twist_rate > config.JOINT7_MAX_VELOCITY_RAD_S:
+            self.get_logger().warning(
+                f'J7 twist runs at {math.degrees(twist_rate):.0f} deg/s, '
+                f'above the configured '
+                f'{math.degrees(config.JOINT7_MAX_VELOCITY_RAD_S):.0f} '
+                'deg/s limit (MoveIt does not check added twist). '
+                'Lower --velocity or --sweep for margin.',
+                throttle_duration_sec=30.0,
+            )
+
         # Diagnostic baseline
         q7_start = (
             traj.points[0].positions[j7_index]

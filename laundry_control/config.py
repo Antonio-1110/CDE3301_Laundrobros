@@ -214,6 +214,14 @@ PILZ_PTP_PLANNER_ID = 'PTP'
 OMPL_PIPELINE_ID = 'ompl'
 OMPL_PLANNER_ID = 'RRTConnect'
 
+# J7's velocity limit from xarm_moveit_config/config/xarm7/
+# joint_limits.yaml (2.14 rad/s = 123 deg/s). The scan's J7 twist is
+# added to trajectory POSITIONS after MoveIt time-parameterises the
+# stroke, so MoveIt never enforces this on it: at the default scan
+# velocity (0.1) a 150 deg twist over a 0.95s stroke already runs at
+# ~157 deg/s. The controller logs a warning when a twist exceeds it.
+JOINT7_MAX_VELOCITY_RAD_S = 2.14
+
 # =============================================================
 # TOF SENSOR (VL53L0X)
 # =============================================================
