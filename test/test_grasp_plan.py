@@ -4,19 +4,19 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from laundry_control.bucket_model import (
+from laundry_control.perception.bucket_model import (
     _axis_basis,
     build_baseline_surface,
     seed_cone,
 )
-from laundry_control.grasp_plan import (
+from laundry_control.grasp.plan import (
     DEFAULT_MAX_SINK_M,
     compute_grasp_target,
     estimate_surface_depth_below,
     look_at_quaternion,
 )
-from laundry_control.gripper import GRIPPER_OFFSET_Z
-from laundry_control.laundry_detect import ClusterSummary
+from laundry_control.config import GRIPPER_OFFSET_Z
+from laundry_control.perception.detect import ClusterSummary
 
 CONE = seed_cone()
 E1, E2 = _axis_basis(CONE.axis_dir)

@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='cde3301a',
     maintainer_email='cde3301a@todo.todo',
-    description='TODO: Package description',
+    description='xArm7 laundry retrieval: ToF bucket scan, laundry detection and grasping.',
     license='TODO: License declaration',
     extras_require={
         'test': [
@@ -29,16 +29,13 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'tof_sensor = laundry_control.tof_sensor:main',
-            'scan_replay = laundry_control.scan_replay:main',
-            'scan_recorder_node = laundry_control.scan_recorder_node:main',
-            'gripper_node = laundry_control.gripper_node:main',
-            'gripper_cli = laundry_control.gripper_cli:main',
-            'laundry_detect = laundry_control.laundry_detect_cli:main',
-            'calibrate_threshold = laundry_control.calibrate_threshold:main',
-            'validate_detector = laundry_control.validate_detector:main',
-            'promote_baseline = laundry_control.promote_baseline:main',
-            'retrieve = laundry_control.retrieve:main',
+            # The one user-facing command (see laundry_control/cli.py).
+            'laundry = laundry_control.cli:main',
+            # Long-running nodes, started by laundry_bringup.launch.py.
+            'tof_sensor = laundry_control.hardware.tof_sensor:main',
+            'gripper_node = laundry_control.hardware.gripper_node:main',
+            'scan_recorder_node = laundry_control.scan.recorder_node:main',
+            'scan_replay = laundry_control.scan.replay:main',
         ],
     },
 )

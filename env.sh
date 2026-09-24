@@ -55,6 +55,24 @@ fi
 
 
 # -------------------------------------------------------
+# 4. Put `laundry` (and the node executables) on PATH
+#
+# ament_python installs console scripts under lib/<package>/, where
+# only `ros2 run` looks. Adding it here means `laundry scan` works
+# as well as `ros2 run laundry_control laundry scan`.
+# -------------------------------------------------------
+
+LAUNDRY_BIN="$WS_DIR/install/laundry_control/lib/laundry_control"
+
+if [ -d "$LAUNDRY_BIN" ]; then
+    case ":$PATH:" in
+        *":$LAUNDRY_BIN:"*) ;;
+        *) export PATH="$LAUNDRY_BIN:$PATH" ;;
+    esac
+fi
+
+
+# -------------------------------------------------------
 # Information
 # -------------------------------------------------------
 

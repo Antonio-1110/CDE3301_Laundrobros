@@ -9,7 +9,7 @@ than against another estimate. No ROS, no hardware, no CSVs.
 import numpy as np
 import pytest
 
-from laundry_control.bucket_model import (
+from laundry_control.perception.bucket_model import (
     ConeModel,
     _axis_basis,
     build_baseline_surface,
