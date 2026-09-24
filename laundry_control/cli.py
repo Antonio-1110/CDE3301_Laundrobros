@@ -155,7 +155,22 @@ def _baseline_path(args):
     return args.baseline or config.baseline_dir()
 
 
+def _add_observed_state_argument(parser):
+    parser.add_argument(
+        '--observed-start-state',
+        action='store_true',
+        help=(
+            'Plan Cartesian strokes from the observed /joint_states '
+            'instead of MoveIt\'s planning-scene state (always on with '
+            '--fake-hardware; see HARDWARE_TESTS.md before using it on '
+            'the real rig).'
+        ),
+    )
+
+
 def _add_fake_arguments(parser, with_scan_from=False):
+    _add_observed_state_argument(parser)
+
     parser.add_argument(
         '--fake-hardware',
         action='store_true',
@@ -186,10 +201,20 @@ def _add_fake_arguments(parser, with_scan_from=False):
 class _RosSession:
     """rclpy.init() + an XArm7Controller, shut down cleanly on exit."""
 
-    def __init__(self, need_arm=True, node_name='laundry'):
+    def __init__(self, need_arm=True, node_name='laundry', args=None):
         self.need_arm = need_arm
         self.node_name = node_name
         self.node = None
+
+        # See XArm7Controller's plan_from_observed_state: required on
+        # the fake controller, opt-in on the real rig until tested.
+        self.plan_from_observed_state = bool(
+            args is not None
+            and (
+                getattr(args, 'fake_hardware', False)
+                or getattr(args, 'observed_start_state', False)
+            )
+        )
 
     def __enter__(self):
         import rclpy
@@ -199,7 +224,9 @@ class _RosSession:
         if self.need_arm:
             from .arm.controller import XArm7Controller
 
-            self.node = XArm7Controller()
+            self.node = XArm7Controller(
+                plan_from_observed_state=self.plan_from_observed_state
+            )
         else:
             from rclpy.node import Node
 
@@ -279,7 +306,7 @@ def cmd_move(args):
     elif kind in config.named_poses():
         target = config.get_named_pose(kind)
 
-    with _RosSession() as arm:
+    with _RosSession(args=args) as arm:
         if kind == 'joint6':
             velocity, acceleration = joint_speed
             ok = arm.rotate_joint6(
@@ -327,7 +354,7 @@ def cmd_scan(args):
 
     csv_path = args.save or timestamped_scan_path('scan')
 
-    with _RosSession() as arm:
+    with _RosSession(args=args) as arm:
         recorder = _make_recorder(arm, args)
 
         ok = run_scan(arm, recorder, csv_path, scan_kwargs_from_args(args))
@@ -392,7 +419,7 @@ def cmd_grasp(args):
 
     surface = build_baseline_surface(load_baseline_scans(baseline))
 
-    with _RosSession() as arm:
+    with _RosSession(args=args) as arm:
         gripper = _make_gripper(arm, args.fake_hardware)
 
         ok = grasp_best(
@@ -494,7 +521,7 @@ def cmd_run(args):
 
     csv_path = args.save or timestamped_scan_path('run')
 
-    with _RosSession() as arm:
+    with _RosSession(args=args) as arm:
         recorder = _make_recorder(arm, args)
         gripper = _make_gripper(arm, args.fake_hardware)
 
@@ -516,7 +543,7 @@ def cmd_preplanned(args):
     """Run `laundry preplanned`."""
     from .pipeline import run_preplanned
 
-    with _RosSession() as arm:
+    with _RosSession(args=args) as arm:
         ok = run_preplanned(arm, _make_gripper(arm, args.fake_hardware))
 
     return 0 if ok else 1
@@ -548,6 +575,8 @@ def _build_move_parser(subparsers):
         default=None,
         help='MoveIt acceleration scaling (default 0.3 joint, 0.1 Cartesian).',
     )
+
+    _add_observed_state_argument(move)
 
     kinds = move.add_subparsers(dest='move_kind', required=True)
 

@@ -94,8 +94,29 @@ class XArm7Controller(Node):
         base_frame=config.BASE_FRAME,
         flange_link=config.FLANGE_LINK,
         joint_state_topic=config.JOINT_STATE_TOPIC,
+        plan_from_observed_state=False,
     ):
+        """
+        Connect to MoveIt (blocks until its interfaces are up).
+
+        plan_from_observed_state:
+            Give every Cartesian plan an explicit start state - the
+            latest /joint_states this node has seen - instead of
+            leaving it empty, which makes MoveIt plan from its own
+            planning-scene copy of the robot state.
+
+            That copy can lag behind the stroke that just finished.
+            On the MoveIt fake controller this reliably breaks the
+            scan: back-to-back twisted strokes are rejected with
+            "start point deviates from current robot state more than
+            0.01 at joint 'joint7'" (measured: 3/3 full scans failed
+            with it off, 2/2 completed with it on). Off by default
+            because the real rig has not been tested with it yet -
+            see HARDWARE_TESTS.md.
+        """
         super().__init__("xarm7_controller")
+
+        self.plan_from_observed_state = plan_from_observed_state
 
         self.group_name = group_name
         self.base_frame = base_frame
@@ -722,6 +743,16 @@ class XArm7Controller(Node):
         request.jump_threshold = 0.0
 
         request.avoid_collisions = True
+
+        if self.plan_from_observed_state:
+
+            joints = self.get_current_joints()
+
+            if joints is not None:
+                request.start_state.joint_state = JointState(
+                    name=list(self.JOINT_NAMES),
+                    position=list(joints),
+                )
 
         request.max_velocity_scaling_factor = (
             velocity
