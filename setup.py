@@ -29,7 +29,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'run_probe = laundry_control.main:main',
             'tof_sensor = laundry_control.tof_sensor:main',
             'scan_replay = laundry_control.scan_replay:main',
             'scan_recorder_node = laundry_control.scan_recorder_node:main',

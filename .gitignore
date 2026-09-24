@@ -6,3 +6,5 @@ __pycache__/*
 
 # ToF scan CSVs auto-saved by scan_recorder_node.py
 scan_records/
+# macOS Finder metadata
+.DS_Store
