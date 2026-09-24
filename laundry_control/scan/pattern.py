@@ -531,8 +531,9 @@ def scan(
     # keeps the arm from inserting far enough for the sensor to
     # see the very last part of the bucket. To cover that area,
     # raise the TCP angle by moving J1-J6 to the recorded BOTTOM
-    # configuration (recorded with the sensor pointing straight
-    # down at this tilt), and sweep J7 throughout:
+    # configuration (at BOTTOM's own J7 the boresight points down
+    # and toward the closed end, ~48 deg below horizontal - see
+    # config.BOTTOM), and sweep J7 throughout:
     #
     #   Entry  : tilt up to BOTTOM while sweeping J7 to the side
     #            OPPOSITE where the inward scan ended (relative

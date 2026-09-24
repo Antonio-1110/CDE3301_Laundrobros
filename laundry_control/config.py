@@ -37,10 +37,20 @@ HOME = [
 
 # The reference pose everything else is measured from: the scan
 # starts and ends here, and the ToF/gripper offsets below were
-# measured here. At INTER, link7's local +Z points horizontally
-# along -Y in link_base (measured on the MoveIt fake controller:
-# tool Z = (-0.001, -0.999, +0.002)), i.e. straight into the
-# bucket's mouth along its axis - NOT straight down.
+# measured here. Forward kinematics at INTER (MoveIt fake
+# controller, same URDF as the real arm):
+#
+#   link7 local +Z = (0.01, -1.00, -0.01)  horizontal, along -Y:
+#                                           straight into the bucket
+#                                           along its axis
+#   link7 local +X = (-0.01, 0.01, -1.00)  straight DOWN - this is
+#                                           the ToF boresight, so at
+#                                           INTER's J7 the sensor
+#                                           looks at the bucket floor
+#
+# Older comments said "+Z points straight down at INTER"; it is the
+# sensor's +X that does. The scan's +/-75 deg J7 sweep is therefore
+# centred on the floor, which is why the ceiling is never seen.
 INTER = [
     1.5105054378509521,
     1.5552058219909668,
@@ -53,7 +63,9 @@ INTER = [
 
 # Tilted-up pose used at maximum insertion depth so the wrist-
 # mounted sensor can see the closed end past the end effector (see
-# scan.pattern's BOTTOM detour).
+# scan.pattern's BOTTOM detour). FK: local +Z tilts 42 deg up from
+# horizontal, and the boresight (+X) points down and toward the
+# closed end, ~48 deg below horizontal.
 BOTTOM = [
     -0.6021117568016052,
     1.1247814893722534,
@@ -236,7 +248,8 @@ TOF_DEFAULT_OFFSET_CM = -10.0
 #
 #   - 7.75 cm along local +X - the sensor's own boresight axis. It
 #     looks radially outward from the insertion axis at the bucket
-#     wall, offset slightly along the same direction it looks.
+#     wall (straight down at INTER's J7), offset slightly along the
+#     same direction it looks.
 #   - 2.8 cm along local +Z - forward, further into the bucket.
 #
 # Because the offset is expressed in link7's own frame, it is
