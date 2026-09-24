@@ -416,6 +416,84 @@ def report_point_separation(surface, repeat_csv, laundry_csv=None):
             )
 
 
+# Detector keyword arguments that reproduce the pre-hysteresis
+# detector exactly (see perception.detect.detect_on_points).
+LEGACY_DETECTOR = {
+    'grow_k_sigma': None,
+    'low_confidence_min_peak_sigma': 0.0,
+}
+
+
+def report_synthetic(baseline_scans, detect_kwargs, args):
+    """Run and print the synthetic-injection campaign."""
+    from . import synthetic_eval
+
+    print('=' * 64)
+    print(
+        f'SYNTHETIC LAUNDRY - {args.sensor_model} sensor model, '
+        f'reflectivity {args.reflectivity:g}, leave-one-out'
+    )
+    print('=' * 64)
+
+    trials = synthetic_eval.run_campaign(
+        baseline_scans,
+        detect_kwargs=detect_kwargs,
+        per_region=args.per_region,
+        model=args.sensor_model,
+        reflectivity=args.reflectivity,
+        seed=args.seed,
+    )
+
+    synthetic_eval.print_tables(trials)
+
+    if args.csv:
+        synthetic_eval.write_csv(args.csv, trials)
+        print(f'  per-trial results: {args.csv}')
+
+    print()
+
+
+def report_coverage(surface, baseline_scans):
+    """Print measured vs simulated coverage, and candidate scan paths."""
+    from ..scan import coverage
+    from .synthetic import reconstruct_rays
+
+    def line(label, result, seconds=None):
+        cells = '  '.join(
+            f'{name}={100 * value:3.0f}%' for name, value in result.items()
+        )
+        tail = f'  ~{seconds:.0f}s' if seconds else ''
+        print(f'  {label:30s} {cells}{tail}')
+
+    print('=' * 64)
+    print('SCAN COVERAGE - share of the bucket surface inside a beam footprint')
+    print('=' * 64)
+
+    line(
+        'measured, one scan',
+        coverage.coverage_by_region(
+            surface.profile, reconstruct_rays(baseline_scans[0])
+        ),
+    )
+    line(
+        f'measured, {len(baseline_scans)} scans pooled',
+        coverage.measured_coverage(surface.profile, baseline_scans),
+    )
+
+    print()
+    print('  Simulated (validate: "current" should match "one scan" above):')
+
+    for label, path in coverage.CANDIDATE_PATHS.items():
+        rays = coverage.simulate_path(path, surface.profile)
+        line(
+            label,
+            coverage.coverage_by_region(surface.profile, rays),
+            coverage.estimated_duration_s(path),
+        )
+
+    print()
+
+
 def add_evaluate_arguments(parser):
     """Add `laundry evaluate` options to a parser."""
     parser.add_argument(
@@ -453,6 +531,74 @@ def add_evaluate_arguments(parser):
         help=(
             'A FURTHER empty-bucket scan, not among the baselines: '
             'prints the per-point noise-vs-signal separation.'
+        ),
+    )
+
+    parser.add_argument(
+        '--synthetic',
+        action='store_true',
+        help=(
+            'Inject synthetic laundry into the held-out empty scans and '
+            'report detection rate / localisation by size and region.'
+        ),
+    )
+
+    parser.add_argument(
+        '--per-region',
+        type=int,
+        default=6,
+        help='Synthetic placements per size, region and fold (default: 6).',
+    )
+
+    parser.add_argument(
+        '--sensor-model',
+        choices=('mixed', 'nearest'),
+        default='mixed',
+        help=(
+            "Synthetic ToF model: 'mixed' (return-weighted over the cone, "
+            "default) or 'nearest' (optimistic bound)."
+        ),
+    )
+
+    parser.add_argument(
+        '--reflectivity',
+        type=float,
+        default=1.0,
+        help=(
+            'Synthetic item brightness relative to the bucket wall '
+            '(default 1.0; ~0.3 for dark fabric).'
+        ),
+    )
+
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=0,
+        help='Random seed for synthetic placements (default: 0).',
+    )
+
+    parser.add_argument(
+        '--csv',
+        type=str,
+        default=None,
+        help='With --synthetic: write one row per trial to this CSV.',
+    )
+
+    parser.add_argument(
+        '--coverage',
+        action='store_true',
+        help=(
+            'Report measured bucket coverage, the simulated current scan '
+            'path next to it, and candidate path changes.'
+        ),
+    )
+
+    parser.add_argument(
+        '--legacy',
+        action='store_true',
+        help=(
+            'Evaluate the detector as it was before hysteresis and the '
+            'low-confidence gate, for before/after comparisons.'
         ),
     )
 
@@ -537,6 +683,11 @@ def run_evaluate(args):
         'min_extent_m': args.min_extent,
     }
 
+    if args.legacy:
+        detect_kwargs.update(LEGACY_DETECTOR)
+        print('Evaluating the LEGACY detector (no hysteresis, no gate).')
+        print()
+
     if args.sweep:
         sweep(baseline_scans, args.laundry, detect_kwargs)
 
@@ -558,6 +709,14 @@ def run_evaluate(args):
             'scans alone is only half-validated: it says nothing '
             'about what the detector can still find.'
         )
+
+    if args.synthetic:
+        print()
+        report_synthetic(baseline_scans, dict(detect_kwargs, k_sigma=args.k_sigma), args)
+
+    if args.coverage:
+        print()
+        report_coverage(full_surface, baseline_scans)
 
     if args.repeat:
         print()
