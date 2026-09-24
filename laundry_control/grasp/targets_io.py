@@ -55,7 +55,7 @@ _SCALAR_FIELDS = (
 
 
 def _json_float(value):
-    """NaN is not valid JSON; store it as null."""
+    """Return value as a float, or None for NaN (not valid JSON)."""
     value = float(value)
     return None if math.isnan(value) else value
 

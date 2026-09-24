@@ -19,8 +19,8 @@ difference shows up as laundry that isn't there.
 Also here: the sensorless `laundry preplanned` sweep.
 """
 
-import os
 from datetime import datetime
+import os
 
 from . import config
 from .grasp.execute import grasp_best

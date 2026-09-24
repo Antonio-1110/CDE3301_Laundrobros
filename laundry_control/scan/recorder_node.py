@@ -42,24 +42,22 @@ Usage:
     ros2 run laundry_control scan_recorder_node --ros-args -p csv_path:=/tmp/scan.csv
 """
 
-import os
 from datetime import datetime
+import os
 
+from geometry_msgs.msg import PointStamped
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-
-import tf2_ros
-import tf2_geometry_msgs
-
-from geometry_msgs.msg import PointStamped
-from sensor_msgs.msg import Range, PointCloud2, JointState
+from sensor_msgs.msg import JointState, PointCloud2, Range
 from std_srvs.srv import Trigger
+import tf2_geometry_msgs
+import tf2_ros
 
+from .cloud_io import build_cloud, POINT_CLOUD_QOS, save_xyz_csv
 from .. import config
 from ..config import TOF_SENSOR_FRAME
-from .cloud_io import build_cloud, POINT_CLOUD_QOS, save_xyz_csv
 
 # The joint the ToF sensor sweeps with during a scan (see
 # scan.pattern's helical strokes). Recorded per point so
@@ -67,25 +65,25 @@ from .cloud_io import build_cloud, POINT_CLOUD_QOS, save_xyz_csv
 # the empty-bucket residual, which is what distinguishes a
 # mis-measured sensor mounting from a mis-placed bucket - the cone
 # fit alone cannot tell those apart (see bucket_model.fit_report).
-SWEEP_JOINT_NAME = "joint7"
+SWEEP_JOINT_NAME = 'joint7'
 
 
 class ScanRecorderNode(Node):
 
     def __init__(self):
-        super().__init__("scan_recorder_node")
+        super().__init__('scan_recorder_node')
 
-        self.declare_parameter("range_topic", config.TOF_RANGE_TOPIC)
-        self.declare_parameter("point_cloud_topic", "scan_record/points")
-        self.declare_parameter("base_frame", config.BASE_FRAME)
-        self.declare_parameter("flange_link", config.FLANGE_LINK)
-        self.declare_parameter("publish_rate_hz", 5.0)
-        self.declare_parameter("csv_path", "")
-        self.declare_parameter("records_dir", "")
-        self.declare_parameter("joint_state_topic", config.JOINT_STATE_TOPIC)
+        self.declare_parameter('range_topic', config.TOF_RANGE_TOPIC)
+        self.declare_parameter('point_cloud_topic', 'scan_record/points')
+        self.declare_parameter('base_frame', config.BASE_FRAME)
+        self.declare_parameter('flange_link', config.FLANGE_LINK)
+        self.declare_parameter('publish_rate_hz', 5.0)
+        self.declare_parameter('csv_path', '')
+        self.declare_parameter('records_dir', '')
+        self.declare_parameter('joint_state_topic', config.JOINT_STATE_TOPIC)
 
-        self.base_frame = self.get_parameter("base_frame").value
-        self.flange_link = self.get_parameter("flange_link").value
+        self.base_frame = self.get_parameter('base_frame').value
+        self.flange_link = self.get_parameter('flange_link').value
 
         # Lazily-created, cached path used when csv_path is left at
         # its default (""), so repeated save_scan calls in one run
@@ -105,7 +103,7 @@ class ScanRecorderNode(Node):
         # until the first message arrives, so a scan recorded
         # without joint states is visibly missing the column rather
         # than quietly full of zeros.
-        self._latest_sweep_angle = float("nan")
+        self._latest_sweep_angle = float('nan')
 
         # TF lookup outcomes for the current scan. The fallback path
         # below substitutes "wherever the arm is NOW" for "where the
@@ -125,25 +123,25 @@ class ScanRecorderNode(Node):
 
         self._point_cloud_pub = self.create_publisher(
             PointCloud2,
-            self.get_parameter("point_cloud_topic").value,
+            self.get_parameter('point_cloud_topic').value,
             POINT_CLOUD_QOS,
         )
 
         self._range_sub = self.create_subscription(
             Range,
-            self.get_parameter("range_topic").value,
+            self.get_parameter('range_topic').value,
             self._range_callback,
             qos_profile_sensor_data,
         )
 
         self._joint_state_sub = self.create_subscription(
             JointState,
-            self.get_parameter("joint_state_topic").value,
+            self.get_parameter('joint_state_topic').value,
             self._joint_state_callback,
             10,
         )
 
-        publish_rate_hz = self.get_parameter("publish_rate_hz").value
+        publish_rate_hz = self.get_parameter('publish_rate_hz').value
 
         self._publish_timer = self.create_timer(
             1.0 / publish_rate_hz,
@@ -151,14 +149,14 @@ class ScanRecorderNode(Node):
         )
 
         self._save_srv = self.create_service(
-            Trigger, "save_scan", self._save_scan_callback
+            Trigger, 'save_scan', self._save_scan_callback
         )
 
         self._clear_srv = self.create_service(
-            Trigger, "clear_scan", self._clear_scan_callback
+            Trigger, 'clear_scan', self._clear_scan_callback
         )
 
-        self.get_logger().info("scan_recorder_node ready.")
+        self.get_logger().info('scan_recorder_node ready.')
 
     def _joint_state_callback(self, msg):
         """
@@ -171,7 +169,6 @@ class ScanRecorderNode(Node):
         fitted phase of a J7 sinusoid slightly and changes nothing
         about the scan geometry.
         """
-
         if SWEEP_JOINT_NAME not in msg.name:
             return
 
@@ -236,7 +233,7 @@ class ScanRecorderNode(Node):
                 self._tf_dropped_count += 1
 
                 self.get_logger().warning(
-                    f"Could not transform ToF reading: {exc}",
+                    f'Could not transform ToF reading: {exc}',
                     throttle_duration_sec=2.0,
                 )
 
@@ -252,19 +249,19 @@ class ScanRecorderNode(Node):
             if self._tf_fallback_count == 1:
 
                 self.get_logger().warning(
-                    "ToF reading could not be transformed at its own "
-                    f"capture time ({exact_exc}); falling back to the "
-                    "latest available transform. Points captured this "
-                    "way are placed where the arm is NOW, not where it "
-                    "was when the reading was taken - expect reduced "
-                    "spatial accuracy while the arm is moving."
+                    'ToF reading could not be transformed at its own '
+                    f'capture time ({exact_exc}); falling back to the '
+                    'latest available transform. Points captured this '
+                    'way are placed where the arm is NOW, not where it '
+                    'was when the reading was taken - expect reduced '
+                    'spatial accuracy while the arm is moving.'
                 )
 
             else:
 
                 self.get_logger().warning(
-                    "Still using latest-transform fallback "
-                    f"({self._tf_fallback_count} readings so far).",
+                    'Still using latest-transform fallback '
+                    f'({self._tf_fallback_count} readings so far).',
                     throttle_duration_sec=5.0,
                 )
 
@@ -332,7 +329,7 @@ class ScanRecorderNode(Node):
 
         if not self.points_base_frame:
             response.success = False
-            response.message = "No points recorded yet."
+            response.message = 'No points recorded yet.'
             return response
 
         csv_path = self._resolve_csv_path()
@@ -346,23 +343,24 @@ class ScanRecorderNode(Node):
             save_xyz_csv(csv_path, points)
         except OSError as exc:
             response.success = False
-            response.message = f"Failed to save to {csv_path}: {exc}"
+            response.message = f'Failed to save to {csv_path}: {exc}'
             return response
 
         response.success = True
         response.message = (
-            f"Saved {len(points)} points to {csv_path} "
-            f"({self._tf_summary()})"
+            f'Saved {len(points)} points to {csv_path} '
+            f'({self._tf_summary()})'
         )
         return response
 
     def _tf_summary(self):
         """
+        Summarise TF lookup accuracy for the current scan in one line.
+
         One-line TF-accuracy tally for the current scan, reported on
         every save so it lands in the scan log (recorder_client.py logs
         the save response) rather than needing to be dug for.
         """
-
         total = (
             self._tf_exact_count
             + self._tf_fallback_count
@@ -370,29 +368,30 @@ class ScanRecorderNode(Node):
         )
 
         if total == 0:
-            return "no TF lookups yet"
+            return 'no TF lookups yet'
 
         fallback_pct = 100.0 * self._tf_fallback_count / total
 
         summary = (
-            f"TF: {self._tf_exact_count} exact, "
-            f"{self._tf_fallback_count} fallback ({fallback_pct:.1f}%), "
-            f"{self._tf_dropped_count} dropped"
+            f'TF: {self._tf_exact_count} exact, '
+            f'{self._tf_fallback_count} fallback ({fallback_pct:.1f}%), '
+            f'{self._tf_dropped_count} dropped'
         )
 
         if self._tf_fallback_count:
-            summary += " - fallback points are less accurate, see warnings"
+            summary += ' - fallback points are less accurate, see warnings'
 
         return summary
 
     def _resolve_csv_path(self):
         """
+        Return the CSV path the next save_scan should write.
+
         Return the configured csv_path, or lazily create one under
         scan_records/ (package root) named after this session's
         start time, kept stable across repeated save_scan calls.
         """
-
-        configured = self.get_parameter("csv_path").value
+        configured = self.get_parameter('csv_path').value
 
         if configured:
             return configured
@@ -400,15 +399,15 @@ class ScanRecorderNode(Node):
         if self._session_csv_path is None:
 
             records_dir = (
-                self.get_parameter("records_dir").value
+                self.get_parameter('records_dir').value
                 or config.scan_records_dir()
             )
             os.makedirs(records_dir, exist_ok=True)
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
             self._session_csv_path = os.path.join(
-                records_dir, f"scan_{timestamp}.csv"
+                records_dir, f'scan_{timestamp}.csv'
             )
 
         return self._session_csv_path
@@ -436,7 +435,7 @@ class ScanRecorderNode(Node):
         self._session_csv_path = None
 
         response.success = True
-        response.message = f"Cleared {count} points."
+        response.message = f'Cleared {count} points.'
         return response
 
 
@@ -454,5 +453,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

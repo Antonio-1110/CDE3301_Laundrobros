@@ -7,10 +7,7 @@ stand in for a laundry item, which is what a real item does to a
 ToF reading: it intercepts the beam before it reaches the wall.
 """
 
-import numpy as np
-import pytest
 from builtin_interfaces.msg import Time
-
 from laundry_control.perception.bucket_model import (
     _axis_basis,
     build_baseline_surface,
@@ -26,6 +23,8 @@ from laundry_control.perception.detect import (
     summarize_clusters,
 )
 from laundry_control.scan.cloud_io import save_xyz_csv
+import numpy as np
+import pytest
 
 CONE = seed_cone()
 E1, E2 = _axis_basis(CONE.axis_dir)
@@ -42,8 +41,7 @@ def _to_xyz(s, theta, r):
 
 
 def empty_scan(n=5000, seed=0, noise_m=0.002, cap_fraction=0.1):
-    """An empty bucket: lateral wall plus the flat closed end."""
-
+    """Sample an empty bucket: lateral wall plus the flat closed end."""
     rng = np.random.default_rng(seed)
 
     n_cap = int(n * cap_fraction)
@@ -66,7 +64,6 @@ def empty_scan(n=5000, seed=0, noise_m=0.002, cap_fraction=0.1):
 
 def plant_on_wall(scan_xyz, s0, theta0, depth_m=0.025, ds=0.035, dtheta=0.22):
     """Push a patch of wall points inward, as a real item would."""
-
     s, theta, r = to_cylindrical(scan_xyz, CONE)
 
     angular_gap = np.abs((theta - theta0 + np.pi) % (2.0 * np.pi) - np.pi)
@@ -82,11 +79,12 @@ def plant_on_wall(scan_xyz, s0, theta0, depth_m=0.025, ds=0.035, dtheta=0.22):
 
 def plant_on_cap(scan_xyz, depth_m=0.03, r_max=0.08):
     """
+    Plant a towel-like item against the closed end.
+
     A towel lying against the CLOSED END. It intercepts the beam
     early, so it reads nearer the mouth - a displacement in s, not
     in r, which is why a purely radial model cannot see it.
     """
-
     s, theta, r = to_cylindrical(scan_xyz, CONE)
 
     hit = (np.abs(s - S_CAP) < 0.01) & (r < r_max)
@@ -97,7 +95,7 @@ def plant_on_cap(scan_xyz, depth_m=0.03, r_max=0.08):
     return _to_xyz(s_new, theta, r), int(hit.sum())
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def surface():
     return build_baseline_surface([empty_scan(seed=i) for i in range(10)])
 
@@ -141,11 +139,11 @@ def test_empty_bucket_produces_no_detections(surface):
 
 
 @pytest.mark.parametrize(
-    "name,theta0",
+    'name,theta0',
     [
-        ("floor", np.pi),
-        ("side wall", 0.5 * np.pi),
-        ("ceiling", 0.0),
+        ('floor', np.pi),
+        ('side wall', 0.5 * np.pi),
+        ('ceiling', 0.0),
     ],
 )
 def test_detects_an_item_anywhere_around_the_bucket(surface, name, theta0):
@@ -158,7 +156,6 @@ def test_detects_an_item_anywhere_around_the_bucket(surface, name, theta0):
     z. Both were structurally invisible. Working perpendicular to
     the fitted surface makes all three the same question.
     """
-
     scan, planted = plant_on_wall(empty_scan(seed=500), s0=0.20, theta0=theta0)
 
     result = compute_intrusion(scan, surface)
@@ -177,7 +174,6 @@ def test_detects_an_item_against_the_closed_end(surface):
     20-fold. Modelling the closed end as its own profile segment is
     what makes this detectable.
     """
-
     assert surface.profile.has_cap
 
     scan, planted = plant_on_cap(empty_scan(seed=501), depth_m=0.03)
@@ -199,7 +195,6 @@ def test_no_blind_band_next_to_the_closed_end(surface):
     the cap has its own cells, so the wall stays at its normal 2mm
     noise floor right up to the corner.
     """
-
     for s0 in (0.035, 0.05, 0.07, 0.10):
 
         scan, planted = plant_on_wall(
@@ -212,8 +207,8 @@ def test_no_blind_band_next_to_the_closed_end(surface):
 
         # The item must come back as one solid cluster, not as a
         # scatter that the gates then throw away.
-        assert len(summaries) == 1, f"s0={s0} gave {len(summaries)} clusters"
-        assert summaries[0].volume_m3 > 5e-5, f"s0={s0} volume too small"
+        assert len(summaries) == 1, f's0={s0} gave {len(summaries)} clusters'
+        assert summaries[0].volume_m3 > 5e-5, f's0={s0} volume too small'
 
         # Point-level recall is checked loosely on purpose. Right in
         # the corner it is genuinely lower - see
@@ -224,13 +219,12 @@ def test_no_blind_band_next_to_the_closed_end(surface):
         # cluster as a whole still carries plenty of signal.
         found = int(result.mask.sum())
         assert found >= 0.6 * planted, (
-            f"only {found}/{planted} found at s0={s0}"
+            f'only {found}/{planted} found at s0={s0}'
         )
 
 
 def test_points_behind_the_wall_are_discarded(surface):
     """Physically impossible, so a stray return rather than laundry."""
-
     s = np.full(20, 0.2)
     theta = np.linspace(0.0, 2.0 * np.pi, 20, endpoint=False)
     outside = _to_xyz(s, theta, CONE.radius_at(s) + 0.10)
@@ -243,7 +237,6 @@ def test_points_behind_the_wall_are_discarded(surface):
 
 def test_points_beyond_the_mouth_are_not_judged(surface):
     """Past the fitted extent the surface is extrapolation."""
-
     s = np.full(20, surface.cone.s_max + 0.15)
     theta = np.linspace(0.0, 2.0 * np.pi, 20, endpoint=False)
     beyond = _to_xyz(s, theta, CONE.radius_at(s) - 0.05)
@@ -256,11 +249,12 @@ def test_points_beyond_the_mouth_are_not_judged(surface):
 
 def test_points_behind_the_closed_end_are_discarded(surface):
     """
+    Points beyond the cap plane must be out of bounds.
+
     Beyond the cap plane is outside the bucket entirely. Without
     the cap the cone alone would happily call such a point "inside
     the wall radius" and flag it.
     """
-
     s = np.full(20, S_CAP - 0.08)
     theta = np.linspace(0.0, 2.0 * np.pi, 20, endpoint=False)
     behind = _to_xyz(s, theta, np.full(20, 0.05))
@@ -339,12 +333,13 @@ def test_cluster_points_all_isolated_dropped_by_min_size():
 
 def test_ceiling_item_is_a_single_cluster(surface):
     """
+    A ceiling item straddling theta = 0 must stay one cluster.
+
     theta = 0 is the top of the bucket. An earlier version clustered
     on the unwrapped surface, whose seam ran exactly there, and
     split every ceiling item in two - each half then at risk of
     failing the volume gate. 3D clustering has no seam to split on.
     """
-
     scan, planted = plant_on_wall(empty_scan(seed=500), s0=0.20, theta0=0.0)
 
     summaries, _result = _summaries(scan, surface)
@@ -355,11 +350,12 @@ def test_ceiling_item_is_a_single_cluster(surface):
 
 def test_extent_is_not_inflated_at_the_ceiling(surface):
     """
+    A ceiling item must not report the whole circumference as extent.
+
     Same seam, different symptom: extent was measured on unwrapped
     coordinates, so a ceiling item reported the bucket's whole
     1.31m circumference for a ~0.12m sock.
     """
-
     scan, _planted = plant_on_wall(empty_scan(seed=500), s0=0.20, theta0=0.0)
 
     summaries, _result = _summaries(scan, surface)
@@ -382,6 +378,8 @@ def test_separate_items_stay_separate(surface):
 
 def test_volume_is_far_less_density_dependent_than_point_count(surface):
     """
+    Volume must depend far less on point density than point count.
+
     The reason the size gate is volume rather than point count: the
     helical scan samples some parts of the bucket several times
     more densely than others, so a point count partly measures
@@ -395,7 +393,6 @@ def test_volume_is_far_less_density_dependent_than_point_count(surface):
     tracks the item across a 4x density change far more tightly
     than the point count does.
     """
-
     volumes = []
     counts = []
 
@@ -426,13 +423,14 @@ def test_volume_is_far_less_density_dependent_than_point_count(surface):
 
 def test_volume_is_stable_once_sampling_is_adequate(surface):
     """
+    Volume must be stable once sampling is adequate.
+
     Above roughly 6000 points per scan the residual density
     dependence has largely gone. Worth pinning separately, because
     it is what makes DEFAULT_MIN_VOLUME_M3 a usable fixed gate at
     the real scan's point count rather than something that has to
     be retuned per scan length.
     """
-
     volumes = []
 
     for n in (6000, 24000):
@@ -509,14 +507,14 @@ def test_cluster_is_low_confidence_when_mostly_unsampled():
 # ---------------------------------------------------------------
 
 def test_detect_laundry_end_to_end(tmp_path):
-    baseline_dir = tmp_path / "baselines"
+    baseline_dir = tmp_path / 'baselines'
     baseline_dir.mkdir()
 
     for i in range(10):
-        _write_csv(baseline_dir / f"empty_{i}.csv", empty_scan(seed=i))
+        _write_csv(baseline_dir / f'empty_{i}.csv', empty_scan(seed=i))
 
     scan, _ = plant_on_wall(empty_scan(seed=500), s0=0.20, theta0=np.pi)
-    candidate = tmp_path / "candidate.csv"
+    candidate = tmp_path / 'candidate.csv'
     _write_csv(candidate, scan)
 
     clusters = detect_laundry(
@@ -530,13 +528,13 @@ def test_detect_laundry_end_to_end(tmp_path):
 
 
 def test_detect_laundry_on_an_empty_bucket_finds_nothing(tmp_path):
-    baseline_dir = tmp_path / "baselines"
+    baseline_dir = tmp_path / 'baselines'
     baseline_dir.mkdir()
 
     for i in range(10):
-        _write_csv(baseline_dir / f"empty_{i}.csv", empty_scan(seed=i))
+        _write_csv(baseline_dir / f'empty_{i}.csv', empty_scan(seed=i))
 
-    candidate = tmp_path / "candidate.csv"
+    candidate = tmp_path / 'candidate.csv'
     _write_csv(candidate, empty_scan(seed=99))
 
     clusters = detect_laundry(
@@ -556,11 +554,11 @@ def test_detect_laundry_sorts_by_volume(tmp_path, surface):
         scan, s0=0.34, theta0=0.5 * np.pi, depth_m=0.05, dtheta=0.30
     )
 
-    candidate = tmp_path / "candidate.csv"
+    candidate = tmp_path / 'candidate.csv'
     _write_csv(candidate, scan)
 
     clusters = detect_laundry(
-        baseline_csv="unused",
+        baseline_csv='unused',
         candidate_csv=str(candidate),
         surface=surface,
     )
@@ -571,20 +569,21 @@ def test_detect_laundry_sorts_by_volume(tmp_path, surface):
 
 def test_volume_gate_rejects_a_speckle(tmp_path, surface):
     """
+    A small speckle of noise points must fail the volume gate.
+
     A handful of adjacent noise points should not survive as a
     detection just because they happened to land near each other.
     """
-
     scan, _ = plant_on_wall(
         empty_scan(seed=500), s0=0.20, theta0=np.pi,
         depth_m=0.02, ds=0.004, dtheta=0.02,
     )
 
-    candidate = tmp_path / "candidate.csv"
+    candidate = tmp_path / 'candidate.csv'
     _write_csv(candidate, scan)
 
     clusters = detect_laundry(
-        baseline_csv="unused",
+        baseline_csv='unused',
         candidate_csv=str(candidate),
         surface=surface,
         min_volume_m3=1e-4,
@@ -599,13 +598,13 @@ def test_volume_gate_rejects_a_speckle(tmp_path, surface):
 
 def test_load_baseline_scans_from_directory(tmp_path):
     for i in range(3):
-        _write_csv(tmp_path / f"empty_{i}.csv", empty_scan(n=100, seed=i))
+        _write_csv(tmp_path / f'empty_{i}.csv', empty_scan(n=100, seed=i))
 
     assert len(load_baseline_scans(str(tmp_path))) == 3
 
 
 def test_load_baseline_scans_from_single_file(tmp_path):
-    path = tmp_path / "one.csv"
+    path = tmp_path / 'one.csv'
     _write_csv(path, empty_scan(n=100))
 
     assert len(load_baseline_scans(str(path))) == 1
@@ -615,7 +614,7 @@ def test_load_baseline_scans_from_list(tmp_path):
     paths = []
 
     for i in range(2):
-        path = tmp_path / f"empty_{i}.csv"
+        path = tmp_path / f'empty_{i}.csv'
         _write_csv(path, empty_scan(n=100, seed=i))
         paths.append(str(path))
 

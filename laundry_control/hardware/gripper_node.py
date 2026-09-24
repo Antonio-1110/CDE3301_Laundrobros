@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""
+r"""
 Standalone node that owns the gripper's servo hardware (see servo.py).
 
 Callers like the grasp stage never need direct GPIO access - the
@@ -29,8 +29,8 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from ..config import GRIPPER_CLOSE_ANGLE_DEG, GRIPPER_OPEN_ANGLE_DEG
 from .gripper_client import CLOSE_SERVICE, OPEN_SERVICE
+from ..config import GRIPPER_CLOSE_ANGLE_DEG, GRIPPER_OPEN_ANGLE_DEG
 
 
 class GripperNode(Node):

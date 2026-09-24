@@ -12,19 +12,17 @@ top of a planned tool-Z stroke.
 
 import math
 
-import rclpy
-from rclpy.node import Node
-from rclpy.action import ActionClient
-
-import tf2_ros
-
-from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Pose
-
-from moveit_msgs.action import MoveGroup, ExecuteTrajectory
+from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint
 from moveit_msgs.srv import GetCartesianPath
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+import tf2_ros
 
+from .geometry import tool_z_from_quaternion
 from .. import config
 from ..config import (
     OMPL_PIPELINE_ID,
@@ -32,37 +30,36 @@ from ..config import (
     PILZ_PIPELINE_ID,
     PILZ_PTP_PLANNER_ID,
 )
-from .geometry import tool_z_from_quaternion
 
 # moveit_msgs/MoveItErrorCodes, for logging a failure as something
 # readable instead of a bare integer. "why did that move fail" is
 # otherwise a trip to the message definition every time.
 MOVEIT_ERROR_CODES = {
-    1: "SUCCESS",
-    -1: "FAILURE",
-    -2: "PLANNING_FAILED",
-    -3: "INVALID_MOTION_PLAN",
-    -4: "MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE",
-    -5: "CONTROL_FAILED",
-    -6: "UNABLE_TO_AQUIRE_SENSOR_DATA",
-    -7: "TIMED_OUT",
-    -8: "PREEMPTED",
-    -10: "START_STATE_IN_COLLISION",
-    -11: "START_STATE_VIOLATES_PATH_CONSTRAINTS",
-    -12: "GOAL_IN_COLLISION",
-    -13: "GOAL_VIOLATES_PATH_CONSTRAINTS",
-    -14: "GOAL_CONSTRAINTS_VIOLATED",
-    -15: "INVALID_GROUP_NAME",
-    -16: "INVALID_GOAL_CONSTRAINTS",
-    -17: "INVALID_ROBOT_STATE",
-    -18: "INVALID_LINK_NAME",
-    -19: "INVALID_OBJECT_NAME",
-    -21: "FRAME_TRANSFORM_FAILURE",
-    -22: "COLLISION_CHECKING_UNAVAILABLE",
-    -23: "ROBOT_STATE_STALE",
-    -24: "SENSOR_INFO_STALE",
-    -25: "COMMUNICATION_FAILURE",
-    -31: "NO_IK_SOLUTION",
+    1: 'SUCCESS',
+    -1: 'FAILURE',
+    -2: 'PLANNING_FAILED',
+    -3: 'INVALID_MOTION_PLAN',
+    -4: 'MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE',
+    -5: 'CONTROL_FAILED',
+    -6: 'UNABLE_TO_AQUIRE_SENSOR_DATA',
+    -7: 'TIMED_OUT',
+    -8: 'PREEMPTED',
+    -10: 'START_STATE_IN_COLLISION',
+    -11: 'START_STATE_VIOLATES_PATH_CONSTRAINTS',
+    -12: 'GOAL_IN_COLLISION',
+    -13: 'GOAL_VIOLATES_PATH_CONSTRAINTS',
+    -14: 'GOAL_CONSTRAINTS_VIOLATED',
+    -15: 'INVALID_GROUP_NAME',
+    -16: 'INVALID_GOAL_CONSTRAINTS',
+    -17: 'INVALID_ROBOT_STATE',
+    -18: 'INVALID_LINK_NAME',
+    -19: 'INVALID_OBJECT_NAME',
+    -21: 'FRAME_TRANSFORM_FAILURE',
+    -22: 'COLLISION_CHECKING_UNAVAILABLE',
+    -23: 'ROBOT_STATE_STALE',
+    -24: 'SENSOR_INFO_STALE',
+    -25: 'COMMUNICATION_FAILURE',
+    -31: 'NO_IK_SOLUTION',
 }
 
 
@@ -114,7 +111,7 @@ class XArm7Controller(Node):
             because the real rig has not been tested with it yet -
             see HARDWARE_TESTS.md.
         """
-        super().__init__("xarm7_controller")
+        super().__init__('xarm7_controller')
 
         self.plan_from_observed_state = plan_from_observed_state
 
@@ -155,7 +152,7 @@ class XArm7Controller(Node):
         self.move_group_client = ActionClient(
             self,
             MoveGroup,
-            "/move_action",
+            '/move_action',
         )
 
         # =====================================================
@@ -164,7 +161,7 @@ class XArm7Controller(Node):
 
         self.cartesian_client = self.create_client(
             GetCartesianPath,
-            "/compute_cartesian_path",
+            '/compute_cartesian_path',
         )
 
         # =====================================================
@@ -174,7 +171,7 @@ class XArm7Controller(Node):
         self.execute_client = ActionClient(
             self,
             ExecuteTrajectory,
-            "/execute_trajectory",
+            '/execute_trajectory',
         )
 
         # =====================================================
@@ -182,7 +179,7 @@ class XArm7Controller(Node):
         # =====================================================
 
         self.get_logger().info(
-            "Waiting for MoveIt interfaces..."
+            'Waiting for MoveIt interfaces...'
         )
 
         self.move_group_client.wait_for_server()
@@ -191,13 +188,13 @@ class XArm7Controller(Node):
             timeout_sec=1.0
         ):
             self.get_logger().info(
-                "Waiting for /compute_cartesian_path..."
+                'Waiting for /compute_cartesian_path...'
             )
 
         self.execute_client.wait_for_server()
 
         self.get_logger().info(
-            "XArm7Controller ready."
+            'XArm7Controller ready.'
         )
 
     # =========================================================
@@ -209,13 +206,12 @@ class XArm7Controller(Node):
 
     def get_current_joints(self, timeout=2.0):
         """
-        Return current joints in JOINT_NAMES order:
+        Return current joints in JOINT_NAMES order.
 
             [J1, J2, J3, J4, J5, J6, J7]
 
         Units: radians.
         """
-
         self._latest_joint_state = None
 
         start_time = self.get_clock().now()
@@ -237,7 +233,7 @@ class XArm7Controller(Node):
             if elapsed >= timeout:
 
                 self.get_logger().error(
-                    "Timed out waiting for joint states."
+                    'Timed out waiting for joint states.'
                 )
 
                 return None
@@ -260,7 +256,7 @@ class XArm7Controller(Node):
         if missing:
 
             self.get_logger().error(
-                f"Missing joints in joint state: {missing}"
+                f'Missing joints in joint state: {missing}'
             )
 
             return None
@@ -276,11 +272,10 @@ class XArm7Controller(Node):
 
     def get_flange_transform(self):
         """
-        Return transform:
+        Return transform.
 
             base_frame -> flange_link
         """
-
         future = self.tf_buffer.wait_for_transform_async(
             self.base_frame,
             self.flange_link,
@@ -361,14 +356,15 @@ class XArm7Controller(Node):
             rather than degrading: a failure is a clean signal, not
             a trajectory that half-works.
         """
-
         if len(joint_angles) != 7:
 
             raise ValueError(
-                "xArm7 requires exactly 7 joint angles."
+                'xArm7 requires exactly 7 joint angles.'
             )
 
         attempts = [(pipeline_id, planner_id)]
+
+        first_failure_reason = None
 
         if fallback_pipeline_id is not None:
             attempts.append(
@@ -382,9 +378,9 @@ class XArm7Controller(Node):
             if attempt_index > 0:
 
                 self.get_logger().warning(
-                    f"{attempts[0][0]}/{attempts[0][1]} failed "
-                    f"({first_failure_reason}); retrying with "
-                    f"{attempt_pipeline}/{attempt_planner}."
+                    f'{attempts[0][0]}/{attempts[0][1]} failed '
+                    f'({first_failure_reason}); retrying with '
+                    f'{attempt_pipeline}/{attempt_planner}.'
                 )
 
             succeeded, failure_reason = self._move_joints_once(
@@ -435,7 +431,6 @@ class XArm7Controller(Node):
         so a first attempt that is about to be retried on another
         pipeline doesn't look like a hard error in the scan log.
         """
-
         constraints = Constraints()
 
         for joint_name, angle in zip(
@@ -491,7 +486,7 @@ class XArm7Controller(Node):
         )
 
         self.get_logger().info(
-            f"Joint-space target ({pipeline_id}/{planner_id}):"
+            f'Joint-space target ({pipeline_id}/{planner_id}):'
         )
 
         for name, angle in zip(
@@ -500,8 +495,8 @@ class XArm7Controller(Node):
         ):
 
             self.get_logger().info(
-                f"  {name}: "
-                f"{math.degrees(angle):+.2f} deg"
+                f'  {name}: '
+                f'{math.degrees(angle):+.2f} deg'
             )
 
         send_future = (
@@ -526,21 +521,21 @@ class XArm7Controller(Node):
 
         if goal_handle is None:
 
-            reason = "no response from MoveIt"
-            report_failure(f"Failed to communicate with MoveIt.")
+            reason = 'no response from MoveIt'
+            report_failure('Failed to communicate with MoveIt.')
 
             return False, reason
 
         if not goal_handle.accepted:
 
             reason = (
-                f"goal rejected by MoveIt - is the "
+                f'goal rejected by MoveIt - is the '
                 f"'{pipeline_id}' pipeline loaded? (check: ros2 "
-                f"param get /move_group planning_pipelines)"
+                f'param get /move_group planning_pipelines)'
             )
             report_failure(
-                f"MoveIt rejected joint-space goal "
-                f"({pipeline_id}/{planner_id}): {reason}"
+                f'MoveIt rejected joint-space goal '
+                f'({pipeline_id}/{planner_id}): {reason}'
             )
 
             return False, reason
@@ -558,8 +553,8 @@ class XArm7Controller(Node):
 
         if wrapped_result is None:
 
-            reason = "MoveIt returned no result"
-            report_failure(reason + ".")
+            reason = 'MoveIt returned no result'
+            report_failure(reason + '.')
 
             return False, reason
 
@@ -570,7 +565,7 @@ class XArm7Controller(Node):
         if error_code == 1:
 
             self.get_logger().info(
-                "Joint movement completed successfully."
+                'Joint movement completed successfully.'
             )
 
             return True, None
@@ -578,8 +573,8 @@ class XArm7Controller(Node):
         reason = describe_moveit_error(error_code)
 
         report_failure(
-            f"Joint movement failed with "
-            f"{pipeline_id}/{planner_id}: {reason}"
+            f'Joint movement failed with '
+            f'{pipeline_id}/{planner_id}: {reason}'
         )
 
         return False, reason
@@ -596,13 +591,11 @@ class XArm7Controller(Node):
         acceleration=0.3,
     ):
         """
-        Rotate ONLY the joint at joint_index relative to its
-        current position.
+        Rotate ONLY the joint at joint_index relative to its current position.
 
         All other joints are read from the current robot state
         and used unchanged as the MoveIt target.
         """
-
         current = self.get_current_joints()
 
         if current is None:
@@ -619,22 +612,22 @@ class XArm7Controller(Node):
         )
 
         self.get_logger().info(
-            f"{joint_name}-only relative movement:"
+            f'{joint_name}-only relative movement:'
         )
 
         self.get_logger().info(
-            f"  current: "
-            f"{math.degrees(old_angle):+.2f} deg"
+            f'  current: '
+            f'{math.degrees(old_angle):+.2f} deg'
         )
 
         self.get_logger().info(
-            f"  delta:   "
-            f"{delta_deg:+.2f} deg"
+            f'  delta:   '
+            f'{delta_deg:+.2f} deg'
         )
 
         self.get_logger().info(
-            f"  target:  "
-            f"{math.degrees(target[joint_index]):+.2f} deg"
+            f'  target:  '
+            f'{math.degrees(target[joint_index]):+.2f} deg'
         )
 
         return self.move_joints(
@@ -652,8 +645,7 @@ class XArm7Controller(Node):
         """
         Rotate ONLY J6 relative to its current position.
 
-        Example:
-
+        For example,
             rotate_joint6(-75)
 
         means:
@@ -664,7 +656,6 @@ class XArm7Controller(Node):
             J6 -> current J6 - 75 deg
             J7 -> current J7
         """
-
         return self._rotate_joint_relative(
             joint_index=5,
             delta_deg=delta_deg,
@@ -681,8 +672,7 @@ class XArm7Controller(Node):
         """
         Rotate ONLY J7 relative to its current position.
 
-        Example:
-
+        For example,
             rotate_joint7(-75)
 
         means:
@@ -692,7 +682,6 @@ class XArm7Controller(Node):
             J6 -> current J6
             J7 -> current J7 - 75 deg
         """
-
         return self._rotate_joint_relative(
             joint_index=6,
             delta_deg=delta_deg,
@@ -712,11 +701,13 @@ class XArm7Controller(Node):
         acceleration=0.1,
     ):
         """
+        Plan (without executing) a straight Cartesian path to target_pose.
+
         Generate but DO NOT execute a straight Cartesian
         trajectory from the flange's CURRENT actual position to
         target_pose.
 
-        Returns:
+        Return value:
             (trajectory, fraction)
 
             trajectory is a RobotTrajectory, or None if planning
@@ -728,7 +719,6 @@ class XArm7Controller(Node):
             callers doing reachability probing can inspect partial
             feasibility instead of only getting a binary None.
         """
-
         request = GetCartesianPath.Request()
 
         request.header.frame_id = self.base_frame
@@ -763,14 +753,14 @@ class XArm7Controller(Node):
         )
 
         self.get_logger().info(
-            "Computing Cartesian path..."
+            'Computing Cartesian path...'
         )
 
         self.get_logger().info(
-            f"  target: "
-            f"({target_pose.position.x:.4f}, "
-            f"{target_pose.position.y:.4f}, "
-            f"{target_pose.position.z:.4f})"
+            f'  target: '
+            f'({target_pose.position.x:.4f}, '
+            f'{target_pose.position.y:.4f}, '
+            f'{target_pose.position.z:.4f})'
         )
 
         future = self.cartesian_client.call_async(
@@ -787,21 +777,21 @@ class XArm7Controller(Node):
         if response is None:
 
             self.get_logger().error(
-                "No Cartesian-path response from MoveIt."
+                'No Cartesian-path response from MoveIt.'
             )
 
             return None, 0.0
 
         self.get_logger().info(
-            f"Cartesian path fraction: "
-            f"{response.fraction * 100.0:.1f}%"
+            f'Cartesian path fraction: '
+            f'{response.fraction * 100.0:.1f}%'
         )
 
         if response.fraction < 0.999:
 
             self.get_logger().error(
-                "Complete Cartesian path could not "
-                "be generated."
+                'Complete Cartesian path could not '
+                'be generated.'
             )
 
             return None, response.fraction
@@ -809,7 +799,7 @@ class XArm7Controller(Node):
         if not response.solution.joint_trajectory.points:
 
             self.get_logger().error(
-                "MoveIt returned an empty trajectory."
+                'MoveIt returned an empty trajectory.'
             )
 
             return None, response.fraction
@@ -836,7 +826,6 @@ class XArm7Controller(Node):
             are only valid while the reference orientation (INTER)
             is held fixed.
         """
-
         if orientation is None:
             orientation = self.get_flange_transform().transform.rotation
 
@@ -861,19 +850,20 @@ class XArm7Controller(Node):
         acceleration=0.1,
     ):
         """
+        Plan (without executing) a straight stroke along current tool Z.
+
         Generate but DO NOT execute a straight Cartesian
         trajectory along the flange's current local Z axis.
 
         Orientation is kept fixed.
 
-        Returns:
+        Return value:
             RobotTrajectory or None
         """
-
         if abs(distance) <= 1e-12:
 
             self.get_logger().error(
-                "_plan_tool_z() requires non-zero distance."
+                '_plan_tool_z() requires non-zero distance.'
             )
 
             return None
@@ -930,8 +920,8 @@ class XArm7Controller(Node):
         if goal_handle is None:
 
             self.get_logger().error(
-                "Failed to communicate with "
-                "/execute_trajectory."
+                'Failed to communicate with '
+                '/execute_trajectory.'
             )
 
             return False
@@ -939,7 +929,7 @@ class XArm7Controller(Node):
         if not goal_handle.accepted:
 
             self.get_logger().error(
-                "Trajectory execution rejected."
+                'Trajectory execution rejected.'
             )
 
             return False
@@ -958,7 +948,7 @@ class XArm7Controller(Node):
         if wrapped_result is None:
 
             self.get_logger().error(
-                "No trajectory execution result."
+                'No trajectory execution result.'
             )
 
             return False
@@ -970,14 +960,14 @@ class XArm7Controller(Node):
         if error_code == 1:
 
             self.get_logger().info(
-                "Trajectory completed successfully."
+                'Trajectory completed successfully.'
             )
 
             return True
 
         self.get_logger().error(
-            f"Trajectory execution failed. "
-            f"MoveIt error code: {error_code}"
+            f'Trajectory execution failed. '
+            f'MoveIt error code: {error_code}'
         )
 
         return False
@@ -993,11 +983,7 @@ class XArm7Controller(Node):
         velocity=0.1,
         acceleration=0.1,
     ):
-        """
-        Straight Cartesian movement along current tool Z,
-        maintaining flange orientation.
-        """
-
+        """Move straight along current tool Z, keeping flange orientation."""
         trajectory = self._plan_tool_z(
             distance=distance,
             max_step=max_step,
@@ -1035,14 +1021,12 @@ class XArm7Controller(Node):
         acceleration=0.1,
     ):
         """
-        Straight Cartesian movement of the flange to an absolute
-        (x, y, z) target in base_frame.
+        Straight Cartesian movement of the flange to an absolute (x, y, z) target in base_frame.
 
         orientation:
             See _build_pose() - None reuses the flange's CURRENT
             orientation.
         """
-
         target_pose = self._build_pose(
             x, y, z, orientation
         )
@@ -1057,8 +1041,8 @@ class XArm7Controller(Node):
         if trajectory is None:
 
             self.get_logger().error(
-                f"move_to_pose: infeasible "
-                f"(fraction={fraction:.3f})."
+                f'move_to_pose: infeasible '
+                f'(fraction={fraction:.3f}).'
             )
 
             return False
@@ -1078,6 +1062,8 @@ class XArm7Controller(Node):
         acceleration=0.1,
     ):
         """
+        Probe whether a pose is reachable, planning only.
+
         PLAN-ONLY reachability probe: identical planning to
         move_to_pose(), but NEVER executes - safe to call
         repeatedly on candidate targets that may turn out
@@ -1093,7 +1079,6 @@ class XArm7Controller(Node):
         the real starting point (e.g. INTER) before probing, or
         the probed fraction will describe the wrong path.
         """
-
         target_pose = self._build_pose(
             x, y, z, orientation
         )
@@ -1117,10 +1102,9 @@ class XArm7Controller(Node):
         twist_deg,
     ):
         """
-        Add deliberate J7 rotation ON TOP OF MoveIt's
-        orientation-preserving J7 trajectory.
+        Add deliberate J7 rotation ON TOP OF MoveIt's orientation-preserving J7 trajectory.
 
-        IMPORTANT:
+        IMPORTANT - the final J7 trajectory is
 
             q7_final(t)
                 =
@@ -1136,13 +1120,12 @@ class XArm7Controller(Node):
         Therefore MoveIt's velocity/acceleration fields are
         left untouched.
         """
-
         traj = trajectory.joint_trajectory
 
         if not traj.points:
 
             self.get_logger().error(
-                "Cannot twist an empty trajectory."
+                'Cannot twist an empty trajectory.'
             )
 
             return False
@@ -1151,16 +1134,16 @@ class XArm7Controller(Node):
             traj.joint_names
         )
 
-        if "joint7" not in joint_names:
+        if 'joint7' not in joint_names:
 
             self.get_logger().error(
-                "joint7 not present in trajectory."
+                'joint7 not present in trajectory.'
             )
 
             return False
 
         j7_index = joint_names.index(
-            "joint7"
+            'joint7'
         )
 
         total_time = (
@@ -1172,7 +1155,7 @@ class XArm7Controller(Node):
         if total_time <= 0.0:
 
             self.get_logger().error(
-                "Trajectory duration is zero or invalid."
+                'Trajectory duration is zero or invalid.'
             )
 
             return False
@@ -1191,23 +1174,23 @@ class XArm7Controller(Node):
         )
 
         self.get_logger().info(
-            "J7 synchronized twist:"
+            'J7 synchronized twist:'
         )
 
         self.get_logger().info(
-            f"  MoveIt baseline: "
-            f"{math.degrees(q7_start):+.2f} -> "
-            f"{math.degrees(q7_end):+.2f} deg"
+            f'  MoveIt baseline: '
+            f'{math.degrees(q7_start):+.2f} -> '
+            f'{math.degrees(q7_end):+.2f} deg'
         )
 
         self.get_logger().info(
-            f"  Added twist: "
-            f"{twist_deg:+.2f} deg"
+            f'  Added twist: '
+            f'{twist_deg:+.2f} deg'
         )
 
         self.get_logger().info(
-            f"  Final target: "
-            f"{math.degrees(q7_end + twist_rad):+.2f} deg"
+            f'  Final target: '
+            f'{math.degrees(q7_end + twist_rad):+.2f} deg'
         )
 
         # -----------------------------------------------------
@@ -1270,8 +1253,7 @@ class XArm7Controller(Node):
         """
         Straight tool-Z translation + explicit J7 rotation.
 
-        Example:
-
+        For example,
             move_tool_z_with_twist(
                 0.05,
                 150,
@@ -1288,11 +1270,10 @@ class XArm7Controller(Node):
         MoveIt's original J7 trajectory is preserved as a
         baseline and the requested rotation is added to it.
         """
-
         if abs(distance) <= 1e-12:
 
             self.get_logger().error(
-                "For J7-only movement use rotate_joint7()."
+                'For J7-only movement use rotate_joint7().'
             )
 
             return False

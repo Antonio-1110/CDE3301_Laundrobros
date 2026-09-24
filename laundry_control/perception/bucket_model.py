@@ -163,13 +163,14 @@ EMPTY_CELL_SIGMA_INFLATION = 1.5
 
 def seed_axis_direction() -> np.ndarray:
     """
+    Return the bucket's seed axis direction in link_base.
+
     The bucket's axis direction in link_base, from the URDF joint's
     rpy applied to the mesh's local +Z.
 
     Points from the closed end toward the mouth (i.e. toward the
     robot), so s increases as you come out of the bucket.
     """
-
     roll, pitch, yaw = URDF_BUCKET_RPY
 
     cr, sr = np.cos(roll), np.sin(roll)
@@ -191,6 +192,8 @@ def seed_axis_direction() -> np.ndarray:
 
 def _axis_basis(axis_dir: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
+    Return the (e1, e2) basis perpendicular to the axis, e1 = "up".
+
     An orthonormal basis (e1, e2) spanning the plane perpendicular
     to axis_dir, used as the zero reference for theta.
 
@@ -205,7 +208,6 @@ def _axis_basis(axis_dir: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     parallel to world Z (not this bucket, which lies on its side,
     but the fallback keeps the function total).
     """
-
     reference = np.array([0.0, 0.0, 1.0])
 
     if abs(float(np.dot(reference, axis_dir))) > 0.95:
@@ -262,15 +264,13 @@ class ConeModel:
 
 def seed_cone() -> ConeModel:
     """
-    The starting guess for fit_cone(), straight from the URDF joint
-    and the mesh extents.
+    Return the starting guess for fit_cone(), from the URDF and the mesh.
 
     This is a strong seed - it is already within centimetres and a
     couple of degrees of the truth - which is why fit_cone() can use
     a plain robust least-squares refinement instead of needing
     RANSAC to find the cone from scratch.
     """
-
     axis_dir = seed_axis_direction()
 
     taper = (MESH_RADIUS_MOUTH_M - MESH_RADIUS_CLOSED_M) / MESH_DEPTH_M
@@ -301,7 +301,6 @@ def to_cylindrical(
     This is the whole point of the module: unlike z over (x, y),
     r over (s, theta) is single-valued everywhere on the bucket.
     """
-
     points_xyz = np.asarray(points_xyz, dtype=np.float64)
 
     if points_xyz.size == 0:
@@ -329,6 +328,8 @@ def surface_residual(
     model: ConeModel,
 ) -> np.ndarray:
     """
+    Return each point's signed perpendicular distance to the cone.
+
     Signed perpendicular distance from each point to the cone
     surface. Positive means outside the cone (further from the axis
     than the model wall), negative means inside it.
@@ -338,7 +339,6 @@ def surface_residual(
     0.5% correction on this bucket, but it keeps the fit residual
     an honest metric distance rather than a radial one.
     """
-
     s, _theta, r = to_cylindrical(points_xyz, model)
 
     return (r - model.radius_at(s)) * np.cos(model.half_angle_rad)
@@ -363,7 +363,6 @@ def _unpack_params(params, seed: ConeModel) -> ConeModel:
 
       - r0 and taper are absolute (2 DOF).
     """
-
     a, b, c, d, r0, taper = params
 
     e1, e2 = _axis_basis(seed.axis_dir)
@@ -407,18 +406,17 @@ def fit_cone(
     (the end effector blocks the far end; see scan.pattern's BOTTOM
     detour).
     """
-
     points_xyz = np.asarray(points_xyz, dtype=np.float64)
 
     if points_xyz.ndim != 2 or points_xyz.shape[1] != 3:
         raise ValueError(
-            f"points_xyz must be (N, 3); got {points_xyz.shape}."
+            f'points_xyz must be (N, 3); got {points_xyz.shape}.'
         )
 
     if points_xyz.shape[0] < 6:
         raise ValueError(
-            f"Need at least 6 points to fit 6 cone parameters; "
-            f"got {points_xyz.shape[0]}."
+            f'Need at least 6 points to fit 6 cone parameters; '
+            f'got {points_xyz.shape[0]}.'
         )
 
     if seed is None:
@@ -432,7 +430,7 @@ def fit_cone(
     solution = least_squares(
         residuals,
         initial,
-        loss="huber",
+        loss='huber',
         f_scale=huber_scale_m,
     )
 
@@ -480,7 +478,6 @@ def fit_report(model: ConeModel, seed: Optional[ConeModel] = None) -> str:
         matters when you want to trust axis_point as the bucket's
         true physical pose.
     """
-
     if seed is None:
         seed = seed_cone()
 
@@ -495,26 +492,28 @@ def fit_report(model: ConeModel, seed: Optional[ConeModel] = None) -> str:
     r_closed = float(model.radius_at(model.s_min))
 
     return (
-        "Cone fit vs. URDF/mesh seed:\n"
-        f"  axis point   : {np.round(model.axis_point, 4)} "
-        f"(moved {axis_shift * 100:.2f} cm)\n"
-        f"  axis dir     : {np.round(model.axis_dir, 4)} "
-        f"(tilted {axis_tilt_deg:.2f} deg)\n"
-        f"  r0           : {model.r0:.4f} m "
-        f"(seed {seed.r0:.4f} m)\n"
-        f"  taper        : {model.taper:.4f} "
-        f"(seed {seed.taper:.4f}, half-angle "
-        f"{np.degrees(model.half_angle_rad):.2f} deg)\n"
-        f"  wall extent  : s = {model.s_min:.4f} .. {model.s_max:.4f} m "
-        f"(mesh depth {MESH_DEPTH_M:.3f} m)\n"
-        f"  radius range : {r_closed:.4f} .. {r_mouth:.4f} m "
-        f"(mesh {MESH_RADIUS_CLOSED_M:.3f} .. "
-        f"{MESH_RADIUS_MOUTH_M:.3f} m)"
+        'Cone fit vs. URDF/mesh seed:\n'
+        f'  axis point   : {np.round(model.axis_point, 4)} '
+        f'(moved {axis_shift * 100:.2f} cm)\n'
+        f'  axis dir     : {np.round(model.axis_dir, 4)} '
+        f'(tilted {axis_tilt_deg:.2f} deg)\n'
+        f'  r0           : {model.r0:.4f} m '
+        f'(seed {seed.r0:.4f} m)\n'
+        f'  taper        : {model.taper:.4f} '
+        f'(seed {seed.taper:.4f}, half-angle '
+        f'{np.degrees(model.half_angle_rad):.2f} deg)\n'
+        f'  wall extent  : s = {model.s_min:.4f} .. {model.s_max:.4f} m '
+        f'(mesh depth {MESH_DEPTH_M:.3f} m)\n'
+        f'  radius range : {r_closed:.4f} .. {r_mouth:.4f} m '
+        f'(mesh {MESH_RADIUS_CLOSED_M:.3f} .. '
+        f'{MESH_RADIUS_MOUTH_M:.3f} m)'
     )
 
 
 def _robust_sigma(values: np.ndarray) -> float:
     """
+    Estimate sigma robustly from the median absolute deviation.
+
     Median-absolute-deviation estimate of the standard deviation,
     scaled to match sigma for a Gaussian.
 
@@ -523,7 +522,6 @@ def _robust_sigma(values: np.ndarray) -> float:
     on - so it must not itself be inflated by the handful of
     outliers robust fitting already decided to discount.
     """
-
     if values.size == 0:
         return 0.0
 
@@ -555,8 +553,7 @@ DEFAULT_CORNER_MARGIN_M = 0.02
 @dataclass
 class BucketProfile:
     """
-    The bucket as its MERIDIAN PROFILE: a polyline in (s, r) that is
-    swept around the axis.
+    The bucket as its MERIDIAN PROFILE: a polyline in (s, r) that is swept around the axis.
 
     WHY NOT JUST THE CONE
     ---------------------
@@ -607,7 +604,6 @@ class BucketProfile:
     @property
     def u_breaks(self) -> np.ndarray:
         """Cumulative arc length at each vertex."""
-
         segments = np.linalg.norm(np.diff(self.vertices, axis=0), axis=1)
 
         return np.concatenate([[0.0], np.cumsum(segments)])
@@ -625,7 +621,6 @@ class BucketProfile:
         zero at the centre of the closed end, where a whole ring of
         theta collapses to a single point.
         """
-
         return np.interp(
             np.asarray(u, dtype=np.float64),
             self.u_breaks,
@@ -662,7 +657,6 @@ class BucketProfile:
         few centimetres clear are flagged in full. The cluster is
         still found comfortably; this only trims its edges.
         """
-
         s = np.asarray(s, dtype=np.float64)
         r = np.asarray(r, dtype=np.float64)
 
@@ -715,6 +709,8 @@ def fit_bucket_profile(
     corner_margin_m: float = DEFAULT_CORNER_MARGIN_M,
 ) -> BucketProfile:
     """
+    Fit the bucket profile: lateral cone plus the closed end if seen.
+
     Fit the full bucket profile: the lateral cone, plus the flat
     closed end if the scan actually reached it.
 
@@ -730,7 +726,6 @@ def fit_bucket_profile(
     the right answer for a scan that stopped short of the closed
     end.
     """
-
     points_xyz = np.asarray(points_xyz, dtype=np.float64)
 
     if cone is None:
@@ -825,6 +820,8 @@ def fit_bucket_profile(
 @dataclass
 class BaselineSurface:
     """
+    The full detection reference: bucket profile plus per-cell noise.
+
     The full detection reference: a fitted bucket profile plus
     per-cell learned offset and noise, on a (u, theta) grid.
 
@@ -869,7 +866,7 @@ class BaselineSurface:
 
     @property
     def cone(self) -> ConeModel:
-        """The lateral wall model, for callers that only need it."""
+        """Return the lateral wall model, for callers that only need it."""
         return self.profile.cone
 
     @property
@@ -891,7 +888,6 @@ class BaselineSurface:
 
         theta wraps, since it is periodic by nature.
         """
-
         u = np.asarray(u, dtype=np.float64)
         theta = np.asarray(theta, dtype=np.float64)
 
@@ -905,13 +901,14 @@ class BaselineSurface:
 
     def expected_offset(self, u, theta):
         """
+        Look up expected offset, noise sigma and confidence per point.
+
         The expected signed distance from the bare profile, its
         local noise sigma, and whether the cell is well-sampled.
 
         Returns (offset, sigma, confident), all aligned with the
         inputs.
         """
-
         i, j = self.cell_indices(u, theta)
 
         return (
@@ -922,6 +919,8 @@ class BaselineSurface:
 
     def cell_area(self):
         """
+        Return the surface area of each grid cell, per arc row.
+
         Area of each grid cell on the bucket surface, as an
         (n_arc, 1) column broadcastable over theta.
 
@@ -931,7 +930,6 @@ class BaselineSurface:
         whole ring of theta really does collapse to a point, so
         those cells genuinely carry almost no area.
         """
-
         u_centre = (np.arange(self.n_arc) + 0.5) * self.arc_bin_m
 
         return (
@@ -946,8 +944,7 @@ def _fill_empty_cells(
     count: np.ndarray,
 ) -> np.ndarray:
     """
-    Give empty cells the mean offset of their occupied immediate
-    neighbours, wrapping in theta.
+    Give empty cells the mean offset of their occupied immediate neighbours, wrapping in theta.
 
     A cell with no baseline coverage still has to be judged - the
     alternative is the old -inf blind spot, where a gap in the scan
@@ -960,7 +957,6 @@ def _fill_empty_cells(
     profile (offset 0). Every filled cell is marked low-confidence
     by the caller regardless of which branch it took.
     """
-
     occupied = count > 0
 
     if occupied.all() or not occupied.any():
@@ -1038,9 +1034,8 @@ def build_baseline_surface(
     min_cell_samples, widen the bins rather than relying on sigma
     estimated from two or three points.
     """
-
     if len(baseline_scans) == 0:
-        raise ValueError("Need at least one baseline scan.")
+        raise ValueError('Need at least one baseline scan.')
 
     pooled_points = np.concatenate(
         [np.asarray(scan, dtype=np.float64) for scan in baseline_scans],
@@ -1079,7 +1074,7 @@ def build_baseline_surface(
         flat, weights=offset[inside] ** 2, minlength=n_cells
     )
 
-    with np.errstate(invalid="ignore", divide="ignore"):
+    with np.errstate(invalid='ignore', divide='ignore'):
         mean = np.where(count > 0, total / np.maximum(count, 1), 0.0)
         variance = np.where(
             count > 1,
@@ -1139,7 +1134,6 @@ def occupancy_summary(surface: BaselineSurface) -> str:
     fallback wearing a per-cell costume, and the bins should be
     widened instead.
     """
-
     counts = surface.count.ravel()
     occupied = counts[counts > 0]
 
@@ -1147,29 +1141,29 @@ def occupancy_summary(surface: BaselineSurface) -> str:
     confident_pct = 100.0 * surface.confident.sum() / surface.confident.size
 
     if occupied.size == 0:
-        return "Occupancy: grid is entirely empty - check the cone fit."
+        return 'Occupancy: grid is entirely empty - check the cone fit.'
 
     cap_note = (
-        "  closed end     : modelled as a flat cap\n"
+        '  closed end     : modelled as a flat cap\n'
         if surface.profile.has_cap
-        else "  closed end     : NOT modelled - the scan never reached it\n"
+        else '  closed end     : NOT modelled - the scan never reached it\n'
     )
 
     header = (
-        f"Occupancy over {surface.n_arc} x {surface.n_angular} "
-        f"= {counts.size} cells:\n"
+        f'Occupancy over {surface.n_arc} x {surface.n_angular} '
+        f'= {counts.size} cells:\n'
     )
 
     body = (
-        f"  empty cells    : {empty_pct:.1f}%\n"
-        f"  confident cells: {confident_pct:.1f}% "
-        f"(>= {surface.min_cell_samples} samples)\n"
-        f"  count per cell : "
-        f"min {occupied.min():.0f}, "
-        f"median {np.median(occupied):.0f}, "
-        f"mean {occupied.mean():.1f}, "
-        f"max {occupied.max():.0f}\n"
-        f"  pooled sigma   : {surface.pooled_sigma_m * 1000:.2f} mm"
+        f'  empty cells    : {empty_pct:.1f}%\n'
+        f'  confident cells: {confident_pct:.1f}% '
+        f'(>= {surface.min_cell_samples} samples)\n'
+        f'  count per cell : '
+        f'min {occupied.min():.0f}, '
+        f'median {np.median(occupied):.0f}, '
+        f'mean {occupied.mean():.1f}, '
+        f'max {occupied.max():.0f}\n'
+        f'  pooled sigma   : {surface.pooled_sigma_m * 1000:.2f} mm'
     )
 
     return header + cap_note + body

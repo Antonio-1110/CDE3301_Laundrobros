@@ -104,9 +104,19 @@ def scan(
     pause:
         Optional pause between motions in seconds.
 
+    recorder:
+        ScanRecorderClient (or hardware.fake.FakeRecorder) used to
+        checkpoint and finally save scan_recorder_node's CSV, or
+        None to only move the arm.
 
-    Scan pattern
-    ------------
+    save_interval:
+        Seconds between fire-and-forget checkpoint saves during the
+        scan; <= 0 disables them.
+
+
+    Notes
+    -----
+    The scan pattern:
 
     Assuming:
 
@@ -163,57 +173,57 @@ def scan(
         one step at a time.
 
     No further stationary rotations occur on the way out.
-    """
 
+    """
     # =========================================================
     # Validate input
     # =========================================================
 
     if depth <= 0.0:
         arm.get_logger().error(
-            "depth must be greater than zero."
+            'depth must be greater than zero.'
         )
         return False
 
     if step <= 0.0:
         arm.get_logger().error(
-            "step must be greater than zero."
+            'step must be greater than zero.'
         )
         return False
 
     if step > depth:
         arm.get_logger().error(
-            "step cannot be greater than depth."
+            'step cannot be greater than depth.'
         )
         return False
 
     if sweep_deg <= 0.0:
         arm.get_logger().error(
-            "sweep_deg must be greater than zero."
+            'sweep_deg must be greater than zero.'
         )
         return False
 
     if not 0.0 < velocity <= 1.0:
         arm.get_logger().error(
-            "velocity must be in the range (0, 1]."
+            'velocity must be in the range (0, 1].'
         )
         return False
 
     if not 0.0 < acceleration <= 1.0:
         arm.get_logger().error(
-            "acceleration must be in the range (0, 1]."
+            'acceleration must be in the range (0, 1].'
         )
         return False
 
     if not 0.0 < rotation_velocity <= 1.0:
         arm.get_logger().error(
-            "rotation_velocity must be in the range (0, 1]."
+            'rotation_velocity must be in the range (0, 1].'
         )
         return False
 
     if not 0.0 < rotation_acceleration <= 1.0:
         arm.get_logger().error(
-            "rotation_acceleration must be in the range (0, 1]."
+            'rotation_acceleration must be in the range (0, 1].'
         )
         return False
 
@@ -234,16 +244,16 @@ def scan(
         abs_tol=1e-6,
     ):
         arm.get_logger().error(
-            "depth must currently be an exact multiple "
-            "of step."
+            'depth must currently be an exact multiple '
+            'of step.'
         )
 
         arm.get_logger().error(
-            f"depth = {depth:.4f} m"
+            f'depth = {depth:.4f} m'
         )
 
         arm.get_logger().error(
-            f"step  = {step:.4f} m"
+            f'step  = {step:.4f} m'
         )
 
         return False
@@ -262,35 +272,35 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        "========================================"
+        '========================================'
     )
 
     arm.get_logger().info(
-        "XARM7 SCAN SEQUENCE"
+        'XARM7 SCAN SEQUENCE'
     )
 
     arm.get_logger().info(
-        f"Depth            : {depth:.3f} m"
+        f'Depth            : {depth:.3f} m'
     )
 
     arm.get_logger().info(
-        f"Linear step      : {step:.3f} m"
+        f'Linear step      : {step:.3f} m'
     )
 
     arm.get_logger().info(
-        f"Number of strokes: {number_of_steps}"
+        f'Number of strokes: {number_of_steps}'
     )
 
     arm.get_logger().info(
-        f"Wrist sweep      : {sweep_deg:.1f} deg"
+        f'Wrist sweep      : {sweep_deg:.1f} deg'
     )
 
     arm.get_logger().info(
-        f"Initial offset   : {-half_sweep:+.1f} deg"
+        f'Initial offset   : {-half_sweep:+.1f} deg'
     )
 
     arm.get_logger().info(
-        "========================================"
+        '========================================'
     )
 
     # =========================================================
@@ -307,7 +317,6 @@ def scan(
         long pause. ToF capture itself runs in scan_recorder_node,
         a separate process, so it needs no help from this spin.
         """
-
         if pause <= 0.0:
             return
 
@@ -322,11 +331,12 @@ def scan(
 
     def maybe_checkpoint_save():
         """
+        Checkpoint the recorder's CSV every save_interval seconds.
+
         Periodically ask scan_recorder_node to checkpoint its CSV,
         at a much slower cadence than point capture/publishing, via
         a fire-and-forget service call (see ScanRecorderClient).
         """
-
         nonlocal last_save_time
 
         if recorder is None or save_interval <= 0.0:
@@ -347,7 +357,7 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        "========== MOVE TO INTER =========="
+        '========== MOVE TO INTER =========='
     )
 
     success = arm.move_joints(
@@ -359,7 +369,7 @@ def scan(
     if not success:
 
         arm.get_logger().error(
-            "Move to INTER failed."
+            'Move to INTER failed.'
         )
 
         return False
@@ -383,12 +393,12 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        "========== INITIAL OFFSET =========="
+        '========== INITIAL OFFSET =========='
     )
 
     arm.get_logger().info(
-        f"Stationary J7 rotation: "
-        f"{-half_sweep:+.1f} deg"
+        f'Stationary J7 rotation: '
+        f'{-half_sweep:+.1f} deg'
     )
 
     success = arm.rotate_joint7(
@@ -400,7 +410,7 @@ def scan(
     if not success:
 
         arm.get_logger().error(
-            "Initial J7 positioning failed."
+            'Initial J7 positioning failed.'
         )
 
         return False
@@ -430,7 +440,7 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        "========== INWARD SCAN =========="
+        '========== INWARD SCAN =========='
     )
 
     inward_direction = +1.0
@@ -448,10 +458,10 @@ def scan(
         )
 
         arm.get_logger().info(
-            f"[IN {i + 1}/{number_of_steps}] "
-            f"{current_depth:.3f} -> "
-            f"{next_depth:.3f} m | "
-            f"J7 {twist:+.1f} deg"
+            f'[IN {i + 1}/{number_of_steps}] '
+            f'{current_depth:.3f} -> '
+            f'{next_depth:.3f} m | '
+            f'J7 {twist:+.1f} deg'
         )
 
         success = arm.move_tool_z_with_twist(
@@ -465,7 +475,7 @@ def scan(
         if not success:
 
             arm.get_logger().error(
-                f"Inward stroke {i + 1} failed."
+                f'Inward stroke {i + 1} failed.'
             )
 
             return False
@@ -485,8 +495,8 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        f"Maximum scan depth reached: "
-        f"{current_depth:.3f} m"
+        f'Maximum scan depth reached: '
+        f'{current_depth:.3f} m'
     )
 
     # Because we started at -half_sweep:
@@ -510,8 +520,8 @@ def scan(
         nominal_end_angle = -half_sweep
 
     arm.get_logger().info(
-        f"Nominal wrist orientation: "
-        f"{nominal_end_angle:+.1f} deg"
+        f'Nominal wrist orientation: '
+        f'{nominal_end_angle:+.1f} deg'
     )
 
     # =========================================================
@@ -545,7 +555,7 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        "========== BOTTOM DETOUR =========="
+        '========== BOTTOM DETOUR =========='
     )
 
     pre_bottom_joints = arm.get_current_joints()
@@ -553,7 +563,7 @@ def scan(
     if pre_bottom_joints is None:
 
         arm.get_logger().error(
-            "Could not read joint state before BOTTOM detour."
+            'Could not read joint state before BOTTOM detour.'
         )
 
         return False
@@ -573,8 +583,8 @@ def scan(
         phase_twist = +sweep_deg
 
     arm.get_logger().info(
-        f"Turnaround phase shift (folded into detour exit): "
-        f"{phase_twist:+.1f} deg"
+        f'Turnaround phase shift (folded into detour exit): '
+        f'{phase_twist:+.1f} deg'
     )
 
     # Entry: sweep to the side OPPOSITE nominal_end_angle,
@@ -587,7 +597,7 @@ def scan(
     )
 
     arm.get_logger().info(
-        "Entering BOTTOM configuration (sweeping while tilting)."
+        'Entering BOTTOM configuration (sweeping while tilting).'
     )
 
     success = arm.move_joints(
@@ -599,7 +609,7 @@ def scan(
     if not success:
 
         arm.get_logger().error(
-            "Move to BOTTOM configuration failed."
+            'Move to BOTTOM configuration failed.'
         )
 
         return False
@@ -611,8 +621,8 @@ def scan(
     bottom_sweep_twist = phase_sign * sweep_deg
 
     arm.get_logger().info(
-        f"Stationary BOTTOM sweep: "
-        f"{bottom_sweep_twist:+.1f} deg"
+        f'Stationary BOTTOM sweep: '
+        f'{bottom_sweep_twist:+.1f} deg'
     )
 
     success = arm.rotate_joint7(
@@ -624,7 +634,7 @@ def scan(
     if not success:
 
         arm.get_logger().error(
-            "Stationary BOTTOM sweep failed."
+            'Stationary BOTTOM sweep failed.'
         )
 
         return False
@@ -642,8 +652,8 @@ def scan(
     )
 
     arm.get_logger().info(
-        "Reverting to pre-BOTTOM tilt "
-        "(already turned around for the outward scan)."
+        'Reverting to pre-BOTTOM tilt '
+        '(already turned around for the outward scan).'
     )
 
     success = arm.move_joints(
@@ -655,7 +665,7 @@ def scan(
     if not success:
 
         arm.get_logger().error(
-            "Revert from BOTTOM configuration failed."
+            'Revert from BOTTOM configuration failed.'
         )
 
         return False
@@ -692,7 +702,7 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        "========== OUTWARD SCAN =========="
+        '========== OUTWARD SCAN =========='
     )
 
     if phase_twist < 0.0:
@@ -720,10 +730,10 @@ def scan(
             next_depth = 0.0
 
         arm.get_logger().info(
-            f"[OUT {i + 1}/{number_of_steps}] "
-            f"{current_depth:.3f} -> "
-            f"{next_depth:.3f} m | "
-            f"J7 {twist:+.1f} deg"
+            f'[OUT {i + 1}/{number_of_steps}] '
+            f'{current_depth:.3f} -> '
+            f'{next_depth:.3f} m | '
+            f'J7 {twist:+.1f} deg'
         )
 
         success = arm.move_tool_z_with_twist(
@@ -737,7 +747,7 @@ def scan(
         if not success:
 
             arm.get_logger().error(
-                f"Outward stroke {i + 1} failed."
+                f'Outward stroke {i + 1} failed.'
             )
 
             return False
@@ -757,7 +767,7 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        "========== RETURN TO INTER =========="
+        '========== RETURN TO INTER =========='
     )
 
     success = arm.move_joints(INTER)
@@ -765,7 +775,7 @@ def scan(
     if not success:
 
         arm.get_logger().error(
-            "Return to INTER failed."
+            'Return to INTER failed.'
         )
 
         return False
@@ -780,16 +790,16 @@ def scan(
         current_depth = 0.0
 
     arm.get_logger().info(
-        "========================================"
+        '========================================'
     )
 
     arm.get_logger().info(
-        "SCAN COMPLETE"
+        'SCAN COMPLETE'
     )
 
     arm.get_logger().info(
-        f"Final nominal depth: "
-        f"{current_depth:.4f} m"
+        f'Final nominal depth: '
+        f'{current_depth:.4f} m'
     )
 
     if recorder is not None:
@@ -800,11 +810,11 @@ def scan(
         recorder.save_blocking()
 
         arm.get_logger().info(
-            "Final scan checkpoint saved."
+            'Final scan checkpoint saved.'
         )
 
     arm.get_logger().info(
-        "========================================"
+        '========================================'
     )
 
     return True
@@ -821,106 +831,106 @@ def scan(
 def add_scan_arguments(parser):
     """Add every scan() tuning option to an argparse parser."""
     parser.add_argument(
-        "--depth",
+        '--depth',
         type=float,
         default=DEFAULT_DEPTH_M,
         help=(
-            "Maximum insertion depth in metres "
-            f"(default: {DEFAULT_DEPTH_M})."
+            'Maximum insertion depth in metres '
+            f'(default: {DEFAULT_DEPTH_M}).'
         ),
     )
 
     parser.add_argument(
-        "--step",
+        '--step',
         type=float,
         default=DEFAULT_STEP_M,
         help=(
-            "Linear distance per scan stroke in metres "
-            f"(default: {DEFAULT_STEP_M})."
+            'Linear distance per scan stroke in metres '
+            f'(default: {DEFAULT_STEP_M}).'
         ),
     )
 
     parser.add_argument(
-        "--sweep",
+        '--sweep',
         type=float,
         default=DEFAULT_SWEEP_DEG,
         help=(
-            "J7 rotation per scan stroke in degrees "
-            f"(default: {DEFAULT_SWEEP_DEG:g})."
+            'J7 rotation per scan stroke in degrees '
+            f'(default: {DEFAULT_SWEEP_DEG:g}).'
         ),
     )
 
     parser.add_argument(
-        "--velocity",
-        dest="scan_velocity",
+        '--velocity',
+        dest='scan_velocity',
         type=float,
         default=DEFAULT_VELOCITY,
         help=(
-            "MoveIt velocity scaling for the scan strokes "
-            f"(default: {DEFAULT_VELOCITY})."
+            'MoveIt velocity scaling for the scan strokes '
+            f'(default: {DEFAULT_VELOCITY}).'
         ),
     )
 
     parser.add_argument(
-        "--acceleration",
-        dest="scan_acceleration",
+        '--acceleration',
+        dest='scan_acceleration',
         type=float,
         default=DEFAULT_ACCELERATION,
         help=(
-            "MoveIt acceleration scaling for the scan strokes "
-            f"(default: {DEFAULT_ACCELERATION})."
+            'MoveIt acceleration scaling for the scan strokes '
+            f'(default: {DEFAULT_ACCELERATION}).'
         ),
     )
 
     parser.add_argument(
-        "--rotation-velocity",
+        '--rotation-velocity',
         type=float,
         default=DEFAULT_ROTATION_VELOCITY,
         help=(
-            "MoveIt velocity scaling for the stationary "
-            f"(non-linear) J7 rotations (default: {DEFAULT_ROTATION_VELOCITY})."
+            'MoveIt velocity scaling for the stationary '
+            f'(non-linear) J7 rotations (default: {DEFAULT_ROTATION_VELOCITY}).'
         ),
     )
 
     parser.add_argument(
-        "--rotation-acceleration",
+        '--rotation-acceleration',
         type=float,
         default=DEFAULT_ROTATION_ACCELERATION,
         help=(
-            "MoveIt acceleration scaling for the stationary "
-            "(non-linear) J7 rotations "
-            f"(default: {DEFAULT_ROTATION_ACCELERATION})."
+            'MoveIt acceleration scaling for the stationary '
+            '(non-linear) J7 rotations '
+            f'(default: {DEFAULT_ROTATION_ACCELERATION}).'
         ),
     )
 
     parser.add_argument(
-        "--cartesian-step",
+        '--cartesian-step',
         type=float,
         default=DEFAULT_CARTESIAN_STEP_M,
         help=(
-            "MoveIt Cartesian interpolation step "
-            f"in metres (default: {DEFAULT_CARTESIAN_STEP_M})."
+            'MoveIt Cartesian interpolation step '
+            f'in metres (default: {DEFAULT_CARTESIAN_STEP_M}).'
         ),
     )
 
     parser.add_argument(
-        "--pause",
+        '--pause',
         type=float,
         default=DEFAULT_PAUSE_SEC,
         help=(
-            "Optional pause between motions in seconds "
-            f"(default: {DEFAULT_PAUSE_SEC:g})."
+            'Optional pause between motions in seconds '
+            f'(default: {DEFAULT_PAUSE_SEC:g}).'
         ),
     )
 
     parser.add_argument(
-        "--save-interval",
+        '--save-interval',
         type=float,
         default=DEFAULT_SAVE_INTERVAL_SEC,
         help=(
-            "Seconds between CSV checkpoint saves requested from "
-            "scan_recorder_node during the scan "
-            f"(default: {DEFAULT_SAVE_INTERVAL_SEC:g})."
+            'Seconds between CSV checkpoint saves requested from '
+            'scan_recorder_node during the scan '
+            f'(default: {DEFAULT_SAVE_INTERVAL_SEC:g}).'
         ),
     )
 
@@ -928,14 +938,14 @@ def add_scan_arguments(parser):
 def scan_kwargs_from_args(args):
     """Turn parsed add_scan_arguments() options into scan() keywords."""
     return {
-        "depth": args.depth,
-        "step": args.step,
-        "sweep_deg": args.sweep,
-        "velocity": args.scan_velocity,
-        "acceleration": args.scan_acceleration,
-        "rotation_velocity": args.rotation_velocity,
-        "rotation_acceleration": args.rotation_acceleration,
-        "cartesian_step": args.cartesian_step,
-        "pause": args.pause,
-        "save_interval": args.save_interval,
+        'depth': args.depth,
+        'step': args.step,
+        'sweep_deg': args.sweep,
+        'velocity': args.scan_velocity,
+        'acceleration': args.scan_acceleration,
+        'rotation_velocity': args.rotation_velocity,
+        'rotation_acceleration': args.rotation_acceleration,
+        'cartesian_step': args.cartesian_step,
+        'pause': args.pause,
+        'save_interval': args.save_interval,
     }

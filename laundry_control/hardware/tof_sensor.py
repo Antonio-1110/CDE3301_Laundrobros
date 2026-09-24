@@ -21,11 +21,11 @@ Usage:
 HARDWARE ONLY: needs the sensor on the Pi's I2C bus.
 """
 
+from geometry_msgs.msg import TransformStamped
 import rclpy
 from rclpy.node import Node
-import tf2_ros
-from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import Range
+import tf2_ros
 
 from ..config import (
     TOF_DEFAULT_OFFSET_CM,
@@ -52,13 +52,12 @@ class ToFSensor:
         """
         Initialize VL53L0X sensor.
 
-        Args:
+        Constructor argument:
             offset_cm:
                 Calibration offset added to the raw measurement.
                 Default (config.TOF_DEFAULT_OFFSET_CM, -10 cm)
                 matches the original Arduino code.
         """
-
         import board
         import busio
         import adafruit_vl53l0x
@@ -108,7 +107,6 @@ class ToFSensorNode(Node):
 
     def _broadcast_mounting_tf(self):
         """Broadcast the fixed offset: flange_link -> this sensor's frame."""
-
         transform = TransformStamped()
 
         transform.header.stamp = self.get_clock().now().to_msg()
@@ -155,5 +153,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

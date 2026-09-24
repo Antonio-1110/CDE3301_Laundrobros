@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""
+r"""
 Bring up everything `laundry run` needs, on one host.
 
 Real rig (default, fake:=false) - the Pi controls the arm and owns

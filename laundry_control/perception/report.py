@@ -20,8 +20,8 @@ imported by publish_clusters(), so offline detection works on a
 machine with no ROS graph running.
 """
 
-from .. import config
 from .bucket_model import fit_report, occupancy_summary
+from .. import config
 
 DEFAULT_TOPIC = 'scan_record/deviations'
 
@@ -37,20 +37,19 @@ def print_model_report(surface, baseline_scans, baseline_path):
     is mostly the pooled fallback in disguise, and the bins want
     widening.
     """
-
     total = sum(scan.shape[0] for scan in baseline_scans)
 
     print(
-        f"Baseline model: {len(baseline_scans)} scan(s) from "
-        f"{baseline_path} ({total} pts)"
+        f'Baseline model: {len(baseline_scans)} scan(s) from '
+        f'{baseline_path} ({total} pts)'
     )
 
     if len(baseline_scans) < 5:
         print(
-            f"  NOTE: only {len(baseline_scans)} baseline scan(s). "
-            "Per-cell sigma needs ~8-10 empty scans to mean much; "
-            "below that most cells fall back to the pooled sigma "
-            "and the threshold is not really calibrated."
+            f'  NOTE: only {len(baseline_scans)} baseline scan(s). '
+            'Per-cell sigma needs ~8-10 empty scans to mean much; '
+            'below that most cells fall back to the pooled sigma '
+            'and the threshold is not really calibrated.'
         )
 
     print()
@@ -68,13 +67,13 @@ def print_report(candidate_csv, candidate_count, clusters, params):
     came from (see perception.detect.detect_on_points), echoed so
     every report records the operating point that produced it.
     """
-    print(f"Loaded candidate: {candidate_csv} ({candidate_count} pts)")
+    print(f'Loaded candidate: {candidate_csv} ({candidate_count} pts)')
 
     total_flagged = sum(cluster.size for cluster in clusters)
 
     print(
-        f"Found {len(clusters)} cluster(s) covering "
-        f"{total_flagged} intruding point(s) "
+        f'Found {len(clusters)} cluster(s) covering '
+        f'{total_flagged} intruding point(s) '
         f"(k_sigma={params['k_sigma']:.1f}, "
         f"abs_floor={params['abs_floor_m']:.3f}m, "
         f"radius={params['cluster_radius_m']:.3f}m, "
@@ -84,9 +83,9 @@ def print_report(candidate_csv, candidate_count, clusters, params):
 
     if not clusters:
         print(
-            "No laundry detected. Nothing in the candidate scan "
-            "intruded past the modelled bucket wall by enough to "
-            "clear the local noise."
+            'No laundry detected. Nothing in the candidate scan '
+            'intruded past the modelled bucket wall by enough to '
+            'clear the local noise.'
         )
         return
 
@@ -98,44 +97,45 @@ def print_report(candidate_csv, candidate_count, clusters, params):
         ex, ey, ez = cluster.extent
         hx, hy, hz = cluster.highest_point
 
-        confidence = "" if cluster.confident else "  [LOW CONFIDENCE]"
+        confidence = '' if cluster.confident else '  [LOW CONFIDENCE]'
 
         print(
-            f"  #{i}  size={cluster.size}  "
-            f"vol={cluster.volume_m3 * 1e6:.1f}cm3  "
-            f"centroid=({cx:.3f}, {cy:.3f}, {cz:.3f}){confidence}"
+            f'  #{i}  size={cluster.size}  '
+            f'vol={cluster.volume_m3 * 1e6:.1f}cm3  '
+            f'centroid=({cx:.3f}, {cy:.3f}, {cz:.3f}){confidence}'
         )
 
         print(
-            f"      mean_intrusion={cluster.mean_deviation_m:.3f}m  "
-            f"max={cluster.max_intrusion_m:.3f}m  "
-            f"wall_extent={cluster.surface_extent_m:.3f}m"
+            f'      mean_intrusion={cluster.mean_deviation_m:.3f}m  '
+            f'max={cluster.max_intrusion_m:.3f}m  '
+            f'wall_extent={cluster.surface_extent_m:.3f}m'
         )
 
         print(
-            f"      bbox=({ex:.3f}, {ey:.3f}, {ez:.3f})  "
-            f"highest=({hx:.3f}, {hy:.3f}, {hz:.3f})"
+            f'      bbox=({ex:.3f}, {ey:.3f}, {ez:.3f})  '
+            f'highest=({hx:.3f}, {hy:.3f}, {hz:.3f})'
         )
 
     if any(not cluster.confident for cluster in clusters):
         print()
         print(
-            "Low-confidence clusters sit mostly in thinly-sampled "
-            "parts of the baseline grid. They are reported rather "
-            "than suppressed on purpose: a missed item costs more "
-            "than a wasted look, and sparse coverage tends to "
-            "coincide with the awkward spots laundry actually ends "
-            "up in. Take more baseline scans to firm them up."
+            'Low-confidence clusters sit mostly in thinly-sampled '
+            'parts of the baseline grid. They are reported rather '
+            'than suppressed on purpose: a missed item costs more '
+            'than a wasted look, and sparse coverage tends to '
+            'coincide with the awkward spots laundry actually ends '
+            'up in. Take more baseline scans to firm them up.'
         )
 
 
 def publish_clusters(clusters, topic=DEFAULT_TOPIC, frame=config.BASE_FRAME):
     """
+    Publish the reported clusters' points as a PointCloud2 for RViz.
+
     Publish the points belonging to the reported clusters (i.e.
     exactly what print_report() counted), so what you see in RViz
     matches the report one-to-one.
     """
-
     # Imported here, not at module scope, so the report-only path
     # above never requires a ROS graph/environment.
     import numpy as np
@@ -168,7 +168,7 @@ def publish_clusters(clusters, topic=DEFAULT_TOPIC, frame=config.BASE_FRAME):
     class DeviationPublisherNode(Node):
 
         def __init__(self):
-            super().__init__("laundry_detect")
+            super().__init__('laundry_detect')
 
             self.publisher = self.create_publisher(
                 PointCloud2,
@@ -193,13 +193,13 @@ def publish_clusters(clusters, topic=DEFAULT_TOPIC, frame=config.BASE_FRAME):
             self.publisher.publish(cloud)
 
             self.get_logger().info(
-                f"Published {cluster_xyz.shape[0]} clustered "
-                f"point(s) across {len(clusters)} cluster(s) on "
+                f'Published {cluster_xyz.shape[0]} clustered '
+                f'point(s) across {len(clusters)} cluster(s) on '
                 f"'{topic}' (TRANSIENT_LOCAL - late RViz "
-                "subscribers will still see it). Each cluster "
+                'subscribers will still see it). Each cluster '
                 "carries its 1-based index as 'intensity' - set the "
                 "display's Color Transformer to Intensity to tell "
-                "them apart."
+                'them apart.'
             )
 
     rclpy.init()

@@ -55,9 +55,9 @@ numpy/scipy geometry, so it can be unit-tested and reused from a
 plain offline script without a running ROS system.
 """
 
+from dataclasses import dataclass
 import glob
 import os
-from dataclasses import dataclass
 from typing import List, Optional, Sequence, Union
 
 import numpy as np
@@ -145,6 +145,8 @@ DEFAULT_MIN_VOLUME_M3 = 1.0e-5
 
 def load_points_xyz(csv_path: str) -> np.ndarray:
     """
+    Load just the x, y, z columns of a scan CSV as an (N, 3) array.
+
     Load a scan CSV (see scan.cloud_io.save_xyz_csv) and return
     an (N, 3) float64 array of just the x, y, z columns.
 
@@ -153,11 +155,10 @@ def load_points_xyz(csv_path: str) -> np.ndarray:
     which is all detection needs. scan.cloud_io.load_scan_csv()
     exposes the extra columns.
     """
-
     points = load_xyz_csv(csv_path)
 
     if not points:
-        raise ValueError(f"No points found in {csv_path!r}.")
+        raise ValueError(f'No points found in {csv_path!r}.')
 
     return np.array(
         [(p[0], p[1], p[2]) for p in points],
@@ -182,16 +183,15 @@ def load_baseline_scans(
     entirely the pooled fallback. Treat its thresholds with
     suspicion.
     """
-
     if isinstance(baseline, str):
 
         if os.path.isdir(baseline):
-            paths = sorted(glob.glob(os.path.join(baseline, "*.csv")))
+            paths = sorted(glob.glob(os.path.join(baseline, '*.csv')))
 
             if not paths:
                 raise ValueError(
-                    f"No .csv files found in baseline directory "
-                    f"{baseline!r}."
+                    f'No .csv files found in baseline directory '
+                    f'{baseline!r}.'
                 )
 
         else:
@@ -201,7 +201,7 @@ def load_baseline_scans(
         paths = list(baseline)
 
         if not paths:
-            raise ValueError("Empty baseline path sequence.")
+            raise ValueError('Empty baseline path sequence.')
 
     return [load_points_xyz(path) for path in paths]
 
@@ -217,15 +217,13 @@ def load_baseline_xyz(
     builder uses, and callers should not have to care whether
     `baseline` names one CSV or a directory of them.
     """
-
     return np.concatenate(load_baseline_scans(baseline), axis=0)
 
 
 @dataclass
 class IntrusionResult:
     """
-    Per-candidate-point intrusion into the empty-bucket surface,
-    and the resulting detection mask.
+    Per-candidate-point intrusion into the empty-bucket surface, and the resulting detection mask.
 
     intrusion_m:
         r_expected - r_measured, in metres. POSITIVE means the beam
@@ -273,6 +271,8 @@ def compute_intrusion(
     behind_wall_margin_m: float = DEFAULT_BEHIND_WALL_MARGIN_M,
 ) -> IntrusionResult:
     """
+    Measure each point's intrusion past the modelled bucket wall.
+
     Measure how far each candidate point intrudes past the modelled
     empty-bucket surface, and flag the ones that clear the noise.
 
@@ -292,12 +292,11 @@ def compute_intrusion(
     are harder to trip) and are reported as low-confidence, which
     is the honest version of the same caution.
     """
-
     candidate_xyz = np.asarray(candidate_xyz, dtype=np.float64)
 
     if candidate_xyz.ndim != 2 or candidate_xyz.shape[1] != 3:
         raise ValueError(
-            f"candidate_xyz must be (N, 3); got {candidate_xyz.shape}."
+            f'candidate_xyz must be (N, 3); got {candidate_xyz.shape}.'
         )
 
     n = candidate_xyz.shape[0]
@@ -370,6 +369,8 @@ def cluster_points(
     min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
 ) -> List[np.ndarray]:
     """
+    Group points into clusters by radius-graph connected components.
+
     Group points into spatial clusters via a radius graph +
     connected components (points within radius_m of one another are
     linked, transitively, into the same cluster).
@@ -385,7 +386,6 @@ def cluster_points(
     singleton components), with no separate outlier-handling path
     needed.
     """
-
     n = points.shape[0]
 
     if n < min_cluster_size:
@@ -395,7 +395,7 @@ def cluster_points(
 
     pairs = tree.query_pairs(
         r=radius_m,
-        output_type="ndarray",
+        output_type='ndarray',
     )
 
     if pairs.shape[0] == 0:
@@ -443,6 +443,8 @@ def cluster_volume_m3(
     surface: BaselineSurface,
 ) -> float:
     """
+    Integrate a cluster's intrusion over the surface into a volume.
+
     Integrate a cluster's intrusion over the bucket surface to get
     the volume of material standing proud of the empty bucket.
 
@@ -469,7 +471,6 @@ def cluster_volume_m3(
     qualify, so this fills holes without inflating the item's
     boundary outward.
     """
-
     if u.size == 0:
         return 0.0
 
@@ -549,9 +550,9 @@ class ClusterSummary:
     mean_deviation_m: float
 
     # Added by the model-based detector.
-    volume_m3: float = float("nan")
-    max_intrusion_m: float = float("nan")
-    surface_extent_m: float = float("nan")
+    volume_m3: float = float('nan')
+    max_intrusion_m: float = float('nan')
+    surface_extent_m: float = float('nan')
     confident: bool = True
 
 
@@ -591,7 +592,6 @@ def summarize_clusters(
     Order of the input cluster_indices is preserved (cluster_points
     already sorts largest-first).
     """
-
     summaries = []
 
     have_surface = u is not None and theta is not None and surface is not None
@@ -613,8 +613,8 @@ def summarize_clusters(
             max_intrusion_m = float(member_intrusion.max())
         else:
             member_intrusion = None
-            mean_deviation_m = float("nan")
-            max_intrusion_m = float("nan")
+            mean_deviation_m = float('nan')
+            max_intrusion_m = float('nan')
 
         # Straight 3D bounding-box diagonal. An earlier version
         # measured this on the unwrapped surface, which reported the
@@ -623,7 +623,7 @@ def summarize_clusters(
         # every ceiling item. In 3D there is no seam to straddle.
         surface_extent_m = float(np.linalg.norm(bbox_max - bbox_min))
 
-        volume_m3 = float("nan")
+        volume_m3 = float('nan')
 
         if have_surface and member_intrusion is not None:
             volume_m3 = cluster_volume_m3(
@@ -732,6 +732,8 @@ def detect_laundry(
     surface: Optional[BaselineSurface] = None,
 ) -> List[ClusterSummary]:
     """
+    Detect laundry in a candidate scan CSV, end to end.
+
     End-to-end: build (or accept) the empty-bucket model, measure
     how far the candidate scan intrudes past it, cluster the
     intruding points, and return per-cluster summaries.
@@ -756,7 +758,6 @@ def detect_laundry(
     should call; the building blocks above are exposed individually
     mainly so they can be unit-tested in isolation.
     """
-
     if surface is None:
         surface = build_baseline_surface(
             load_baseline_scans(baseline_csv)

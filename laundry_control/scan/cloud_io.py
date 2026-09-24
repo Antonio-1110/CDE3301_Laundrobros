@@ -12,11 +12,10 @@ saved CSV file, and every stage reads the same CSV schema.
 import csv
 
 from builtin_interfaces.msg import Time
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
-
-from std_msgs.msg import Header
-from sensor_msgs.msg import PointCloud2, PointField
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from sensor_msgs.msg import PointField
 from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
 
 # TRANSIENT_LOCAL durability means a late-joining subscriber (e.g.
 # RViz opened after the scan/replay already started publishing)
@@ -42,6 +41,8 @@ def build_cloud(frame_id, stamp, xyz_points):
 
 def build_cloud_with_intensity(frame_id, stamp, xyz_points, intensities):
     """
+    Build a PointCloud2 with a per-point intensity field.
+
     Like build_cloud(), but with a per-point `intensity` field, so
     RViz can colour points by group (set the PointCloud2 display's
     Color Transformer to "Intensity", Channel Name to "intensity").
@@ -50,17 +51,16 @@ def build_cloud_with_intensity(frame_id, stamp, xyz_points, intensities):
     otherwise every cluster renders in a single flat colour and a
     multi-cluster result is unreadable.
     """
-
     header = Header()
     header.frame_id = frame_id
     header.stamp = stamp
 
     fields = [
-        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
         PointField(
-            name="intensity",
+            name='intensity',
             offset=12,
             datatype=PointField.FLOAT32,
             count=1,
@@ -91,9 +91,9 @@ def build_cloud_with_intensity(frame_id, stamp, xyz_points, intensities):
 # an extrinsic error tracks J7, while a bucket-pose error does not,
 # and that is the only thing distinguishing them (see
 # bucket_model.fit_report).
-EXTENDED_COLUMNS = ["raw_range", "ox", "oy", "oz", "j7"]
+EXTENDED_COLUMNS = ['raw_range', 'ox', 'oy', 'oz', 'j7']
 
-BASE_COLUMNS = ["x", "y", "z", "stamp_sec", "stamp_nanosec"]
+BASE_COLUMNS = ['x', 'y', 'z', 'stamp_sec', 'stamp_nanosec']
 
 
 def save_xyz_csv(path, points):
@@ -111,7 +111,7 @@ def save_xyz_csv(path, points):
     # expands to two columns, so column count != tuple length.
     extended = bool(points) and len(points[0]) == 4 + len(EXTENDED_COLUMNS)
 
-    with open(path, "w", newline="") as f:
+    with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
 
         writer.writerow(
@@ -137,19 +137,19 @@ def load_xyz_csv(path):
     # load_scan_csv() to get at them.
     points = []
 
-    with open(path, newline="") as f:
+    with open(path, newline='') as f:
         reader = csv.DictReader(f)
 
         for row in reader:
             stamp = Time()
-            stamp.sec = int(row.get("stamp_sec") or 0)
-            stamp.nanosec = int(row.get("stamp_nanosec") or 0)
+            stamp.sec = int(row.get('stamp_sec') or 0)
+            stamp.nanosec = int(row.get('stamp_nanosec') or 0)
 
             points.append(
                 (
-                    float(row["x"]),
-                    float(row["y"]),
-                    float(row["z"]),
+                    float(row['x']),
+                    float(row['y']),
+                    float(row['z']),
                     stamp,
                 )
             )
@@ -159,6 +159,8 @@ def load_xyz_csv(path):
 
 def load_scan_csv(path):
     """
+    Load a scan CSV as a dict of flat columns, ray columns included.
+
     Load a scan CSV as a dict of flat lists, including the extended
     ray columns when the file has them.
 
@@ -168,8 +170,7 @@ def load_scan_csv(path):
     give a clear "this scan predates ray recording" message rather
     than silently analysing zeros.
     """
-
-    with open(path, newline="") as f:
+    with open(path, newline='') as f:
         reader = csv.DictReader(f)
 
         fieldnames = reader.fieldnames or []
@@ -185,7 +186,7 @@ def load_scan_csv(path):
             for name in available:
                 value = row.get(name)
                 columns[name].append(
-                    float(value) if value not in (None, "") else float("nan")
+                    float(value) if value not in (None, '') else float('nan')
                 )
 
     return columns

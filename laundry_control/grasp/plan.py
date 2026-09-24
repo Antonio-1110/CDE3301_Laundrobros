@@ -89,6 +89,8 @@ def estimate_surface_depth_below(
     tolerance_m=DEFAULT_DEPTH_TOLERANCE_M,
 ):
     """
+    Find where a vertical line through (x, y) leaves the bucket.
+
     Find the z at which a vertical line through (x, y) leaves the
     bucket, searching downward from below_z.
 
@@ -127,7 +129,6 @@ def estimate_surface_depth_below(
     sensible response - don't sink on a guess - belongs to the
     caller.
     """
-
     x = float(xy[0])
     y = float(xy[1])
 
@@ -187,9 +188,7 @@ def estimate_surface_depth_below(
 @dataclass
 class GraspTarget:
     """
-    tcp_position:
-        Where to move the flange/TCP (hand to
-        XArm7Controller.move_to_pose()).
+    tcp_position: Where to move the flange/TCP (hand to XArm7Controller.move_to_pose()).
 
     orientation:
         The Quaternion to pass as move_to_pose()'s `orientation` -
@@ -224,6 +223,8 @@ def compute_grasp_target(
     reachability_threshold: float = DEFAULT_REACHABILITY_THRESHOLD,
 ) -> Optional[GraspTarget]:
     """
+    Compute a reachable TCP pose that puts the gripper on `cluster`.
+
     Compute where to place the flange/TCP, and how to orient it, so
     the gripper's contact point lands on a graspable point of
     `cluster`, sunk below the sensed top by a dynamic amount,
@@ -245,7 +246,6 @@ def compute_grasp_target(
     is unreachable - that indicates a genuine reach/collision
     problem unrelated to sink depth, which sinking less cannot fix.
     """
-
     x = float(cluster.centroid[0])
     y = float(cluster.centroid[1])
     sensed_top_z = float(cluster.centroid[2])
@@ -265,9 +265,9 @@ def compute_grasp_target(
         # grasping at the sensed surface itself - the one depth the
         # ToF sensor has already proved reachable.
         print(
-            f"WARNING: no bucket surface found below the cluster at "
-            f"({x:.3f}, {y:.3f}, {sensed_top_z:.3f}); grasping at the "
-            f"sensed surface without sinking."
+            f'WARNING: no bucket surface found below the cluster at '
+            f'({x:.3f}, {y:.3f}, {sensed_top_z:.3f}); grasping at the '
+            f'sensed surface without sinking.'
         )
 
         gap = 0.0
@@ -279,10 +279,10 @@ def compute_grasp_target(
         if gap == 0.0:
 
             print(
-                f"WARNING: bucket surface at ({x:.3f}, {y:.3f}) "
-                f"modelled at z={floor_z:.3f}, at or above the "
+                f'WARNING: bucket surface at ({x:.3f}, {y:.3f}) '
+                f'modelled at z={floor_z:.3f}, at or above the '
                 f"cluster's sensed top z={sensed_top_z:.3f}; grasping "
-                f"at the sensed surface without sinking."
+                f'at the sensed surface without sinking.'
             )
 
     tf = arm.get_flange_transform()

@@ -130,26 +130,30 @@ class ScanRecorderClient:
 
     def clear_async(self):
         """Reset scan_recorder_node's accumulated points (fire-and-forget)."""
-        self._call_async(self._clear_client, "clear_scan")
+        self._call_async(self._clear_client, 'clear_scan')
 
     def save_async(self):
         """Ask scan_recorder_node to checkpoint to CSV (fire-and-forget)."""
-        self._call_async(self._save_client, "save_scan")
+        self._call_async(self._save_client, 'save_scan')
 
     def clear_blocking(self, timeout_sec=5.0):
         """
+        Reset the recorder's points and wait for confirmation.
+
         Reset scan_recorder_node's accumulated points and wait for
         confirmation. Only call this before the arm starts moving.
         """
-        return self._call_blocking(self._clear_client, "clear_scan", timeout_sec)
+        return self._call_blocking(self._clear_client, 'clear_scan', timeout_sec)
 
     def save_blocking(self, timeout_sec=5.0):
         """
+        Save the recorder's CSV and wait for confirmation.
+
         Ask scan_recorder_node to save to CSV and wait for
         confirmation. Only call this once the arm has stopped
         moving (e.g. the final save before shutdown).
         """
-        return self._call_blocking(self._save_client, "save_scan", timeout_sec)
+        return self._call_blocking(self._save_client, 'save_scan', timeout_sec)
 
     def _call_async(self, client, name):
 
@@ -157,7 +161,7 @@ class ScanRecorderClient:
 
             self.arm.get_logger().warning(
                 f"'{name}' service not available "
-                "(is scan_recorder_node running?); skipping.",
+                '(is scan_recorder_node running?); skipping.',
                 throttle_duration_sec=5.0,
             )
 
@@ -193,7 +197,7 @@ class ScanRecorderClient:
 
             self.arm.get_logger().warning(
                 f"'{name}' service not available after "
-                f"{timeout_sec:.1f}s (is scan_recorder_node running?)."
+                f'{timeout_sec:.1f}s (is scan_recorder_node running?).'
             )
 
             return False

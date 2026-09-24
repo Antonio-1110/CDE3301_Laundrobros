@@ -22,13 +22,16 @@ separately - it owns the GPIO) or, with --fake-hardware, a
 hardware.fake.FakeGripper.
 """
 
-from .. import config
 from .plan import compute_grasp_target
+from .. import config
+
 
 def rank_clusters(clusters):
     """
-    Order detected clusters best-target-first: largest by
-    integrated intrusion VOLUME, ties broken by point count.
+    Order detected clusters best-target-first.
+
+    Largest by integrated intrusion VOLUME, ties broken by point
+    count.
 
     Volume rather than point count, because the scan's point
     density is strongly non-uniform - the helical path samples some
@@ -44,7 +47,6 @@ def rank_clusters(clusters):
     reachable, and an unreachable one is no reason to abandon a
     scan that found other candidates.
     """
-
     return sorted(
         clusters,
         key=lambda cluster: (cluster.volume_m3, cluster.size),
@@ -53,10 +55,7 @@ def rank_clusters(clusters):
 
 
 def select_target_cluster(clusters):
-    """
-    The single best-ranked cluster, or None if there are none.
-    """
-
+    """Return the single best-ranked cluster, or None if there are none."""
     ranked = rank_clusters(clusters)
 
     return ranked[0] if ranked else None
@@ -64,6 +63,8 @@ def select_target_cluster(clusters):
 
 def plan_first_reachable(clusters, surface, arm, compute_grasp_target):
     """
+    Return the best-ranked cluster whose grasp target is reachable.
+
     Walk clusters best-first and return the first
     (cluster, GraspTarget) whose grasp target the arm can actually
     reach, or (None, None) if none of them can be.
@@ -71,15 +72,14 @@ def plan_first_reachable(clusters, surface, arm, compute_grasp_target):
     compute_grasp_target is injected rather than imported here so
     this stays unit-testable with a stub.
     """
-
     for cluster in rank_clusters(clusters):
 
         cx, cy, cz = cluster.centroid
 
         print(
-            f"Trying cluster: size={cluster.size} "
-            f"centroid=({cx:.3f}, {cy:.3f}, {cz:.3f}) "
-            f"mean_dev={cluster.mean_deviation_m:.3f}m"
+            f'Trying cluster: size={cluster.size} '
+            f'centroid=({cx:.3f}, {cy:.3f}, {cz:.3f}) '
+            f'mean_dev={cluster.mean_deviation_m:.3f}m'
         )
 
         grasp = compute_grasp_target(cluster, surface, arm)
@@ -87,7 +87,7 @@ def plan_first_reachable(clusters, surface, arm, compute_grasp_target):
         if grasp is not None:
             return cluster, grasp
 
-        print("  unreachable at every sink depth; trying the next cluster.")
+        print('  unreachable at every sink depth; trying the next cluster.')
 
     return None, None
 

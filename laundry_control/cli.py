@@ -161,7 +161,7 @@ def _add_observed_state_argument(parser):
         action='store_true',
         help=(
             'Plan Cartesian strokes from the observed /joint_states '
-            'instead of MoveIt\'s planning-scene state (always on with '
+            "instead of MoveIt's planning-scene state (always on with "
             '--fake-hardware; see HARDWARE_TESTS.md before using it on '
             'the real rig).'
         ),

@@ -70,7 +70,6 @@ DEFAULT_MIN_POINTS = 200
 
 def count_points(csv_path):
     """Rows in a scan CSV, not counting the header."""
-
     if not os.path.isfile(csv_path):
         return 0
 
@@ -101,21 +100,21 @@ def run_one_scan(csv_path, scan_args, timeout_sec):
 
 def confirm_setup(count, dest):
 
-    print("=" * 62)
-    print(f"About to record {count} EMPTY-bucket baseline scans into")
-    print(f"  {dest}")
-    print("=" * 62)
+    print('=' * 62)
+    print(f'About to record {count} EMPTY-bucket baseline scans into')
+    print(f'  {dest}')
+    print('=' * 62)
     print()
-    print("Check all of these before continuing:")
-    print("  [ ] the bucket is EMPTY")
-    print("  [ ] the gripper is OPEN")
-    print("  [ ] the bucket and robot base will not be moved")
-    print("  [ ] laundry_bringup.launch.py is running")
+    print('Check all of these before continuing:')
+    print('  [ ] the bucket is EMPTY')
+    print('  [ ] the gripper is OPEN')
+    print('  [ ] the bucket and robot base will not be moved')
+    print('  [ ] laundry_bringup.launch.py is running')
     print()
 
     answer = input("Type 'yes' to start: ").strip().lower()
 
-    return answer == "yes"
+    return answer == 'yes'
 
 
 def collect(
@@ -130,7 +129,7 @@ def collect(
 
     os.makedirs(dest, exist_ok=True)
 
-    session = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    session = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     written = []
     failed = []
@@ -142,7 +141,7 @@ def collect(
         for index in range(1, count + 1):
 
             csv_path = os.path.join(
-                dest, f"baseline_{session}_{index:02d}.csv"
+                dest, f'baseline_{session}_{index:02d}.csv'
             )
 
             elapsed = time.time() - started
@@ -150,17 +149,17 @@ def collect(
             if written:
                 per_scan = elapsed / len(written)
                 remaining = per_scan * (count - index + 1)
-                eta = f", ~{remaining / 60:.0f} min left"
+                eta = f', ~{remaining / 60:.0f} min left'
             else:
-                eta = ""
+                eta = ''
 
             print()
-            print("-" * 62)
+            print('-' * 62)
             print(
-                f"Scan {index}/{count} -> {os.path.basename(csv_path)}"
-                f"{eta}"
+                f'Scan {index}/{count} -> {os.path.basename(csv_path)}'
+                f'{eta}'
             )
-            print("-" * 62)
+            print('-' * 62)
 
             scan_started = time.time()
             ok = run_one_scan(csv_path, scan_args, timeout_sec)
@@ -169,13 +168,13 @@ def collect(
             points = count_points(csv_path)
 
             if not ok:
-                reason = "laundry scan reported failure"
+                reason = 'laundry scan reported failure'
 
             elif points < min_points:
                 # A CSV with almost nothing in it is worse than no
                 # CSV: it would quietly drag the model toward
                 # whatever handful of points it does contain.
-                reason = f"only {points} points (expected >= {min_points})"
+                reason = f'only {points} points (expected >= {min_points})'
 
             else:
                 reason = None
@@ -183,31 +182,31 @@ def collect(
             if reason is None:
                 written.append(csv_path)
                 print(
-                    f"  ok - {points} points in {took / 60:.1f} min"
+                    f'  ok - {points} points in {took / 60:.1f} min'
                 )
 
             else:
                 failed.append((index, reason))
-                print(f"  FAILED - {reason}")
+                print(f'  FAILED - {reason}')
 
                 if os.path.isfile(csv_path):
-                    os.replace(csv_path, csv_path + ".rejected")
+                    os.replace(csv_path, csv_path + '.rejected')
                     print(
-                        "  moved aside as "
-                        f"{os.path.basename(csv_path)}.rejected so it "
-                        "cannot be picked up as a baseline"
+                        '  moved aside as '
+                        f'{os.path.basename(csv_path)}.rejected so it '
+                        'cannot be picked up as a baseline'
                     )
 
                 if not keep_going:
-                    print("\nStopping after a failed scan.")
+                    print('\nStopping after a failed scan.')
                     break
 
             if index < count and settle_sec > 0:
-                print(f"  settling {settle_sec:.0f}s...")
+                print(f'  settling {settle_sec:.0f}s...')
                 time.sleep(settle_sec)
 
     except KeyboardInterrupt:
-        print("\n\nInterrupted.")
+        print('\n\nInterrupted.')
 
     return written, failed
 
@@ -215,50 +214,50 @@ def collect(
 def report(written, failed, dest):
 
     print()
-    print("=" * 62)
-    print(f"Collected {len(written)} baseline scan(s) into {dest}")
-    print("=" * 62)
+    print('=' * 62)
+    print(f'Collected {len(written)} baseline scan(s) into {dest}')
+    print('=' * 62)
 
     for path in written:
-        print(f"  {os.path.basename(path)}  ({count_points(path)} pts)")
+        print(f'  {os.path.basename(path)}  ({count_points(path)} pts)')
 
     if failed:
         print()
-        print(f"{len(failed)} scan(s) failed:")
+        print(f'{len(failed)} scan(s) failed:')
 
         for index, reason in failed:
-            print(f"  scan {index}: {reason}")
+            print(f'  scan {index}: {reason}')
 
     total = len(
         [
             name
             for name in os.listdir(dest)
-            if name.endswith(".csv")
+            if name.endswith('.csv')
         ]
     )
 
     print()
-    print(f"{dest} now holds {total} baseline CSV(s) in total.")
+    print(f'{dest} now holds {total} baseline CSV(s) in total.')
 
     if total < 5:
         print(
-            "\nThat is thin. The per-cell noise map needs about 8-10 "
-            "empty scans before the detection threshold means much; "
-            "below 5 most cells fall back to a pooled sigma. Run "
-            "this again to top up - it adds to the set rather than "
-            "replacing it."
+            '\nThat is thin. The per-cell noise map needs about 8-10 '
+            'empty scans before the detection threshold means much; '
+            'below 5 most cells fall back to a pooled sigma. Run '
+            'this again to top up - it adds to the set rather than '
+            'replacing it.'
         )
 
     print()
-    print("Next, check the model the detector builds from these:")
+    print('Next, check the model the detector builds from these:')
     print()
-    print(f"  laundry evaluate --baseline {dest}")
+    print(f'  laundry evaluate --baseline {dest}')
     print()
-    print("Look for all of:")
+    print('Look for all of:')
     print("  - 'closed end : modelled as a flat cap'")
-    print("  - the fitted cone within a few mm of the URDF seed")
-    print("  - median cell count >= 5, empty cells near 0%")
-    print("  - 0 false clusters across the leave-one-out folds")
+    print('  - the fitted cone within a few mm of the URDF seed')
+    print('  - median cell count >= 5, empty cells near 0%')
+    print('  - 0 false clusters across the leave-one-out folds')
 
 
 def promote(src_path, dest=None, force=False):

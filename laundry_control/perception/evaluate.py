@@ -85,24 +85,22 @@ import os
 
 import numpy as np
 
-from .. import config
 from .bucket_model import (
     build_baseline_surface,
     fit_report,
     occupancy_summary,
 )
 from .detect import (
+    compute_intrusion,
     DEFAULT_ABS_FLOOR_M,
-    DEFAULT_CLUSTER_RADIUS_M,
     DEFAULT_K_SIGMA,
-    DEFAULT_MIN_CLUSTER_SIZE,
     DEFAULT_MIN_EXTENT_M,
     DEFAULT_MIN_VOLUME_M3,
-    compute_intrusion,
     detect_on_points,
     load_baseline_scans,
     load_points_xyz,
 )
+from .. import config
 
 # k_sigma values walked by --sweep. Spans "trigger-happy" to
 # "conservative" so the false-positive knee is visible rather than
@@ -112,13 +110,11 @@ SWEEP_K_SIGMA = (2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0)
 
 def leave_one_out(baseline_scans, **detect_kwargs):
     """
-    Build the model from every baseline but one, run it against the
-    one held out, and repeat.
+    Build the model from every baseline but one, run it against the one held out, and repeat.
 
     Returns a list of (fold_index, clusters, intrusion_result). Any
     cluster in any fold is a false positive by construction.
     """
-
     folds = []
 
     for held_out in range(len(baseline_scans)):
@@ -152,25 +148,24 @@ def _dropout_note(result):
     number alongside it should be distrusted until that is sorted
     out.
     """
-
     total = result.in_bounds.size
 
     if total == 0:
-        return "no points"
+        return 'no points'
 
     out_of_bounds = total - int(result.in_bounds.sum())
 
     return (
-        f"{out_of_bounds}/{total} pts out of bounds "
-        f"({100.0 * out_of_bounds / total:.1f}%)"
+        f'{out_of_bounds}/{total} pts out of bounds '
+        f'({100.0 * out_of_bounds / total:.1f}%)'
     )
 
 
 def report_false_positives(baseline_scans, **detect_kwargs):
 
-    print("=" * 64)
-    print("FALSE POSITIVES - leave-one-out over empty baselines")
-    print("=" * 64)
+    print('=' * 64)
+    print('FALSE POSITIVES - leave-one-out over empty baselines')
+    print('=' * 64)
 
     folds = leave_one_out(baseline_scans, **detect_kwargs)
 
@@ -182,24 +177,24 @@ def report_false_positives(baseline_scans, **detect_kwargs):
 
         flagged = int(result.mask.sum())
 
-        detail = ""
+        detail = ''
 
         if clusters:
             biggest = max(cluster.volume_m3 for cluster in clusters)
-            detail = f"  largest {biggest * 1e6:.1f}cm3"
+            detail = f'  largest {biggest * 1e6:.1f}cm3'
 
         print(
-            f"  fold {held_out:2d}: {len(clusters)} cluster(s), "
-            f"{flagged} flagged pt(s), {_dropout_note(result)}{detail}"
+            f'  fold {held_out:2d}: {len(clusters)} cluster(s), '
+            f'{flagged} flagged pt(s), {_dropout_note(result)}{detail}'
         )
 
     n_folds = len(folds)
 
     print()
     print(
-        f"  TOTAL: {total_clusters} false cluster(s) over "
-        f"{n_folds} fold(s) "
-        f"= {total_clusters / max(n_folds, 1):.2f} per empty scan"
+        f'  TOTAL: {total_clusters} false cluster(s) over '
+        f'{n_folds} fold(s) '
+        f'= {total_clusters / max(n_folds, 1):.2f} per empty scan'
     )
     print()
 
@@ -208,9 +203,9 @@ def report_false_positives(baseline_scans, **detect_kwargs):
 
 def report_recall(surface, laundry_csvs, **detect_kwargs):
 
-    print("=" * 64)
-    print("RECALL - scans with known laundry present")
-    print("=" * 64)
+    print('=' * 64)
+    print('RECALL - scans with known laundry present')
+    print('=' * 64)
 
     found = 0
 
@@ -227,24 +222,24 @@ def report_recall(surface, laundry_csvs, **detect_kwargs):
         if clusters:
             found += 1
             biggest = clusters[0]
-            confidence = "" if biggest.confident else " [low confidence]"
+            confidence = '' if biggest.confident else ' [low confidence]'
 
             print(
-                f"  {name}: FOUND {len(clusters)} cluster(s), "
-                f"largest {biggest.volume_m3 * 1e6:.1f}cm3 "
-                f"({biggest.size} pts, max intrusion "
-                f"{biggest.max_intrusion_m * 100:.1f}cm){confidence}"
+                f'  {name}: FOUND {len(clusters)} cluster(s), '
+                f'largest {biggest.volume_m3 * 1e6:.1f}cm3 '
+                f'({biggest.size} pts, max intrusion '
+                f'{biggest.max_intrusion_m * 100:.1f}cm){confidence}'
             )
 
         else:
             print(
-                f"  {name}: MISSED - nothing cleared the gates "
-                f"({int(result.mask.sum())} pt(s) flagged, "
-                f"{_dropout_note(result)})"
+                f'  {name}: MISSED - nothing cleared the gates '
+                f'({int(result.mask.sum())} pt(s) flagged, '
+                f'{_dropout_note(result)})'
             )
 
     print()
-    print(f"  TOTAL: {found}/{len(laundry_csvs)} scan(s) detected")
+    print(f'  TOTAL: {found}/{len(laundry_csvs)} scan(s) detected')
     print()
 
     return found
@@ -259,10 +254,9 @@ def sweep(baseline_scans, laundry_csvs, base_kwargs):
     you end up with a threshold that is excellent at one and
     useless at the other.
     """
-
-    print("=" * 64)
-    print("THRESHOLD SWEEP")
-    print("=" * 64)
+    print('=' * 64)
+    print('THRESHOLD SWEEP')
+    print('=' * 64)
     print(
         f"  {'k_sigma':>8}  {'false clusters':>15}  "
         f"{'recall':>12}"
@@ -287,20 +281,20 @@ def sweep(baseline_scans, laundry_csvs, base_kwargs):
                 )
                 found += bool(clusters)
 
-            recall = f"{found}/{len(laundry_csvs)}"
+            recall = f'{found}/{len(laundry_csvs)}'
 
         else:
-            recall = "n/a"
+            recall = 'n/a'
 
         print(
-            f"  {k_sigma:>8.1f}  {false_clusters:>15d}  {recall:>12}"
+            f'  {k_sigma:>8.1f}  {false_clusters:>15d}  {recall:>12}'
         )
 
     print()
     print(
-        "  Favour recall where the two conflict: a false positive "
-        "costs one wasted look, a false negative leaves laundry in "
-        "the bucket."
+        '  Favour recall where the two conflict: a false positive '
+        'costs one wasted look, a false negative leaves laundry in '
+        'the bucket.'
     )
     print()
 
@@ -312,22 +306,24 @@ SIGNAL_PERCENTILES = (50, 90, 99, 99.9, 100)
 def _percentile_table(label, values, percentiles):
 
     if values.size == 0:
-        print(f"{label}: no points to report.")
+        print(f'{label}: no points to report.')
         return
 
-    print(f"{label} (n={values.size}):")
+    print(f'{label} (n={values.size}):')
 
     for percentile in percentiles:
         print(
-            f"    p{percentile:<5} = "
-            f"{np.percentile(values, percentile):7.2f} sigma"
+            f'    p{percentile:<5} = '
+            f'{np.percentile(values, percentile):7.2f} sigma'
         )
 
-    print(f"    mean    = {values.mean():7.2f} sigma")
+    print(f'    mean    = {values.mean():7.2f} sigma')
 
 
 def _normalised_intrusion(candidate_xyz, surface):
     """
+    Return in-bounds positive intrusions in units of local sigma.
+
     Per-point intrusion divided by that point's local sigma,
     restricted to points inside the model's trusted region.
 
@@ -336,7 +332,6 @@ def _normalised_intrusion(candidate_xyz, surface):
     bucket wall reading slightly further out than modelled, which
     is noise by definition and cannot be evidence of laundry.
     """
-
     result = compute_intrusion(candidate_xyz, surface)
 
     usable = result.in_bounds & (result.sigma_m > 0.0)
@@ -347,49 +342,48 @@ def _normalised_intrusion(candidate_xyz, surface):
 
 
 def report_point_separation(surface, repeat_csv, laundry_csv=None):
-
     """
-    Per-point noise-vs-signal separation, in units of local sigma.
+    Print the per-point noise-vs-signal separation, in local sigmas.
 
     repeat_csv is a FURTHER empty-bucket scan over the same path
     that is not among the baselines; laundry_csv optionally a scan
     with known laundry present.
     """
     repeat_xyz = load_points_xyz(repeat_csv)
-    print(f"Loaded repeat  : {repeat_csv} ({repeat_xyz.shape[0]} pts)")
+    print(f'Loaded repeat  : {repeat_csv} ({repeat_xyz.shape[0]} pts)')
     print()
 
-    print("=" * 64)
-    print("NOISE FLOOR (empty bucket, scan not used to build the model)")
-    print("=" * 64)
+    print('=' * 64)
+    print('NOISE FLOOR (empty bucket, scan not used to build the model)')
+    print('=' * 64)
 
     noise, _ = _normalised_intrusion(repeat_xyz, surface)
-    _percentile_table("positive intrusion", noise, NOISE_PERCENTILES)
+    _percentile_table('positive intrusion', noise, NOISE_PERCENTILES)
 
     if laundry_csv is None:
         print()
         print(
-            "No --laundry scan given. The noise tail above is a "
-            "lower bound on k_sigma, but on its own it cannot tell "
-            "you whether anything is still detectable above it - "
-            "re-run with --laundry, and run the cluster-level results above "
-            "for the cluster-level numbers that actually decide the "
-            "threshold."
+            'No --laundry scan given. The noise tail above is a '
+            'lower bound on k_sigma, but on its own it cannot tell '
+            'you whether anything is still detectable above it - '
+            're-run with --laundry, and run the cluster-level results above '
+            'for the cluster-level numbers that actually decide the '
+            'threshold.'
         )
         return
 
     laundry_xyz = load_points_xyz(laundry_csv)
 
     print()
-    print(f"Loaded laundry : {laundry_csv} ({laundry_xyz.shape[0]} pts)")
+    print(f'Loaded laundry : {laundry_csv} ({laundry_xyz.shape[0]} pts)')
     print()
 
-    print("=" * 64)
-    print("SIGNAL (known laundry in the bucket)")
-    print("=" * 64)
+    print('=' * 64)
+    print('SIGNAL (known laundry in the bucket)')
+    print('=' * 64)
 
     signal, _ = _normalised_intrusion(laundry_xyz, surface)
-    _percentile_table("positive intrusion", signal, SIGNAL_PERCENTILES)
+    _percentile_table('positive intrusion', signal, SIGNAL_PERCENTILES)
 
     print()
 
@@ -399,26 +393,26 @@ def report_point_separation(surface, repeat_csv, laundry_csv=None):
         signal_peak = signal.max()
 
         print(
-            f"Separation: noise p99.9 = {noise_ceiling:.2f} sigma, "
-            f"signal max = {signal_peak:.2f} sigma."
+            f'Separation: noise p99.9 = {noise_ceiling:.2f} sigma, '
+            f'signal max = {signal_peak:.2f} sigma.'
         )
 
         if signal_peak <= noise_ceiling:
             print(
-                "  NO GAP. The item never rose above the noise "
-                "tail, so no threshold can separate them - the "
-                "problem is upstream (model fit, coverage, or the "
-                "item being too small for this sensor), not the "
-                "threshold."
+                '  NO GAP. The item never rose above the noise '
+                'tail, so no threshold can separate them - the '
+                'problem is upstream (model fit, coverage, or the '
+                'item being too small for this sensor), not the '
+                'threshold.'
             )
         else:
             print(
-                "  Most points in a laundry scan still hit bare "
-                "bucket, so the bulk of this distribution SHOULD "
-                "look like noise. Only the upper tail is the item. "
-                "Judge the threshold on the cluster-level results "
-                "from the cluster-level results above, not on the percentiles "
-                "above."
+                '  Most points in a laundry scan still hit bare '
+                'bucket, so the bulk of this distribution SHOULD '
+                'look like noise. Only the upper tail is the item. '
+                'Judge the threshold on the cluster-level results '
+                'from the cluster-level results above, not on the percentiles '
+                'above.'
             )
 
 

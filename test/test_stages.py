@@ -3,9 +3,6 @@
 from dataclasses import dataclass
 import os
 
-import numpy as np
-import pytest
-
 from laundry_control import cli, config
 from laundry_control.grasp import execute
 from laundry_control.grasp.targets_io import load_targets, save_targets
@@ -13,6 +10,8 @@ from laundry_control.hardware.fake import FakeRecorder
 from laundry_control.perception.detect import ClusterSummary
 from laundry_control.pipeline import run_scan
 from laundry_control.scan.baselines import promote
+import numpy as np
+import pytest
 
 
 def _cluster(volume, centroid=(0.1, -0.4, 0.3), size=10):

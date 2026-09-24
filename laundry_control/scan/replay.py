@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""
+r"""
 Republish a previously saved ToF scan as a PointCloud2 for RViz.
 
 Lets a scan (`laundry scan --save`, or anything under scan_records/)
@@ -25,7 +25,6 @@ import argparse
 
 import rclpy
 from rclpy.node import Node
-
 from sensor_msgs.msg import PointCloud2
 
 from .cloud_io import build_cloud, load_xyz_csv, POINT_CLOUD_QOS
@@ -33,7 +32,7 @@ from .cloud_io import build_cloud, load_xyz_csv, POINT_CLOUD_QOS
 
 class ScanReplayNode(Node):
     def __init__(self, csv_path, topic, frame_id):
-        super().__init__("scan_replay")
+        super().__init__('scan_replay')
 
         self.frame_id = frame_id
         # Loaded as (x, y, z, stamp) tuples; stamp is the original
@@ -42,7 +41,7 @@ class ScanReplayNode(Node):
         self.points = load_xyz_csv(csv_path)
 
         self.get_logger().info(
-            f"Loaded {len(self.points)} points from {csv_path}"
+            f'Loaded {len(self.points)} points from {csv_path}'
         )
 
         self.publisher = self.create_publisher(
@@ -65,37 +64,37 @@ class ScanReplayNode(Node):
         self.publisher.publish(cloud)
 
         self.get_logger().info(
-            "Published replayed scan cloud "
-            "(TRANSIENT_LOCAL - late RViz subscribers will still see it)."
+            'Published replayed scan cloud '
+            '(TRANSIENT_LOCAL - late RViz subscribers will still see it).'
         )
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Replay a saved ToF scan as a PointCloud2 for RViz."
+        description='Replay a saved ToF scan as a PointCloud2 for RViz.'
     )
 
     parser.add_argument(
-        "csv_path",
+        'csv_path',
         type=str,
-        help="Path to a scan CSV saved by scan_recorder_node.",
+        help='Path to a scan CSV saved by scan_recorder_node.',
     )
 
     parser.add_argument(
-        "--topic",
+        '--topic',
         type=str,
-        default="scan_record/points",
+        default='scan_record/points',
         help=(
-            "Topic to publish on (default: scan_record/points, "
-            "same as the live recorder, so the same RViz display works)."
+            'Topic to publish on (default: scan_record/points, '
+            'same as the live recorder, so the same RViz display works).'
         ),
     )
 
     parser.add_argument(
-        "--frame",
+        '--frame',
         type=str,
-        default="link_base",
-        help="Frame the saved points are expressed in (default: link_base).",
+        default='link_base',
+        help='Frame the saved points are expressed in (default: link_base).',
     )
 
     return parser
@@ -117,5 +116,5 @@ def main(argv=None):
         rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

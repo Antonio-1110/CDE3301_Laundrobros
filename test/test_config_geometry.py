@@ -3,10 +3,6 @@
 import math
 
 from geometry_msgs.msg import Quaternion
-import numpy as np
-import pytest
-from scipy.spatial.transform import Rotation
-
 from laundry_control import config
 from laundry_control.arm.flange_check import describe_alignment
 from laundry_control.arm.geometry import (
@@ -15,6 +11,9 @@ from laundry_control.arm.geometry import (
     tool_z_from_quaternion,
 )
 from laundry_control.perception.bucket_model import seed_axis_direction
+import numpy as np
+import pytest
+from scipy.spatial.transform import Rotation
 
 
 def _quat(rotation):

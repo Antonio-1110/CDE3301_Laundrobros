@@ -27,9 +27,9 @@ import rclpy
 from rclpy.node import Node
 import tf2_ros
 
+from .geometry import angle_between_deg, tool_z_from_quaternion
 from .. import config
 from ..perception.bucket_model import seed_axis_direction
-from .geometry import angle_between_deg, tool_z_from_quaternion
 
 # Verdict bands for the insertion-vs-bucket-axis misalignment. At
 # the full 0.42m insertion depth, 1 deg of misalignment moves the
