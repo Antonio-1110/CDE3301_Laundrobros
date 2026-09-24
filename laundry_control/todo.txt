@@ -1,1 +1,0 @@
-scan move path can still be optimized as the current motion still creates gaps

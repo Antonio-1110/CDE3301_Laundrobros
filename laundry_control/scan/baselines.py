@@ -38,8 +38,8 @@ BEFORE COLLECTING
      laundry that is not there.
   3. Nothing may move - not the bucket, not the robot base. Every
      baseline has to describe the same physical scene.
-  4. `ros2 launch laundry_control laundry_bringup.launch.py` (or
-     real_arm_scan.launch.py) must already be running.
+  4. `ros2 launch laundry_control laundry_bringup.launch.py` must
+     already be running.
 
 Anything after -- is forwarded to `laundry scan`, so the baselines
 can be captured with the same non-default scan settings the real

@@ -242,8 +242,8 @@ TOF_MAX_RANGE_M = 0.25
 TOF_PUBLISH_PERIOD_SEC = 0.05
 
 # Calibration offset added to raw VL53L0X readings, in cm. The node
-# default; real_arm_scan.launch.py / laundry_bringup.launch.py pass
-# the rig's calibrated value (-8.5) explicitly.
+# default; laundry_bringup.launch.py passes the rig's calibrated value
+# (-8.5) explicitly.
 TOF_DEFAULT_OFFSET_CM = -10.0
 
 # Translation from the TCP frame (link7) to the ToF sensor's own

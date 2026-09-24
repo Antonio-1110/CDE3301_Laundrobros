@@ -88,24 +88,22 @@ def test_look_at_points_local_z_along_direction():
     assert np.allclose(z_axis, direction / np.linalg.norm(direction))
 
 
-def test_inter_insertion_axis_is_aligned_with_bucket():
+def test_inter_insertion_axis_against_the_bucket():
     # Tool +Z measured at INTER on the MoveIt fake controller.
-    tool_z = (-0.001, -0.999, 0.002)
+    tool_z = (0.010, -1.000, -0.009)
 
-    misalignment, elevation, _verdict = describe_alignment(
+    misalignment, elevation, drift, _verdict = describe_alignment(
         tool_z, seed_axis_direction()
     )
 
-    # Horizontal, and within a few degrees of pointing into the
-    # bucket (the URDF seed axis itself tilts ~5 deg).
     assert abs(elevation) < 1.0
-    assert misalignment < 10.0
+    assert misalignment == pytest.approx(4.6, abs=0.1)
+    assert drift == pytest.approx(0.42 * math.sin(math.radians(misalignment)))
 
 
-def test_describe_alignment_flags_vertical_tool():
-    _mis, _elev, verdict = describe_alignment(
-        (0.0, 0.0, -1.0), seed_axis_direction()
-    )
+def test_describe_alignment_verdict_bands():
+    axis = np.array([0.0, 1.0, 0.0])
 
-    assert verdict.startswith('MISALIGNED')
-    assert math.isfinite(_mis)
+    assert describe_alignment((0.0, -1.0, 0.0), axis)[3].startswith('ALIGNED')
+    assert describe_alignment((0.0, -1.0, 0.05), axis)[3].startswith('CLOSE')
+    assert describe_alignment((0.0, 0.0, -1.0), axis)[3].startswith('OFFSET')

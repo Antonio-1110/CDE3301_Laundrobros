@@ -14,10 +14,19 @@ INTER, +Z is horizontal along -Y, so it would always have reported
 "NOT VERTICAL".
 
 What matters now is the angle between the insertion axis and the
-bucket axis. The bucket axis used here is the URDF seed
-(perception.bucket_model.seed_axis_direction), not a fitted one; the
-cone fit printed by `laundry detect` says how far the real bucket
-sits from that seed.
+bucket axis, and how far the sensor therefore drifts relative to the
+bucket over a full-depth scan. The bucket axis is the one fitted
+from baseline_scans/ (perception.bucket_model.fit_cone), falling back
+to the URDF seed when no baselines load.
+
+Measured with the recorded INTER (fake-controller FK): 4.6 deg to the
+URDF seed, ~6 deg to the fitted axis (5.8-6.5 deg across runs, within
+MoveIt's joint tolerance; the real bucket's axis rises ~7 deg toward
+the mouth while INTER inserts horizontally), i.e. ~4.5cm of drift over
+the 0.42m scan. That is not an error in itself - the baselines were
+recorded along this same path, so the detector's model already
+accounts for it - but re-recording INTER changes the path and
+invalidates every baseline.
 """
 
 import math
@@ -29,25 +38,25 @@ import tf2_ros
 
 from .geometry import angle_between_deg, tool_z_from_quaternion
 from .. import config
-from ..perception.bucket_model import seed_axis_direction
+from ..perception.bucket_model import fit_cone, seed_axis_direction
+from ..perception.detect import load_baseline_scans
+from ..scan.pattern import DEFAULT_DEPTH_M
 
-# Verdict bands for the insertion-vs-bucket-axis misalignment. At
-# the full 0.42m insertion depth, 1 deg of misalignment moves the
-# sensor ~7mm off the intended line; 5 deg moves it ~37mm, which is
-# enough to change which part of the wall each beam lands on.
-VERY_GOOD_DEG = 1.0
-GOOD_DEG = 3.0
-WARNING_DEG = 5.0
+# Verdict bands on the sensor's drift relative to the bucket axis
+# over a full-depth scan (scan.pattern.DEFAULT_DEPTH_M).
+ALIGNED_DRIFT_M = 0.01
+CLOSE_DRIFT_M = 0.03
 
 
-def describe_alignment(tool_z, bucket_axis):
+def describe_alignment(tool_z, bucket_axis, depth_m=DEFAULT_DEPTH_M):
     """
-    Return (misalignment_deg, elevation_deg, verdict) for a tool +Z vector.
+    Return (misalignment_deg, elevation_deg, drift_m, verdict) for tool +Z.
 
     misalignment_deg is measured against the direction INTO the
     bucket, i.e. -bucket_axis (the axis points from the closed end
     toward the mouth). elevation_deg is +Z's angle above the
-    horizontal plane.
+    horizontal plane. drift_m is how far the insertion line moves
+    sideways relative to the bucket axis over depth_m of insertion.
     """
     into_bucket = -np.asarray(bucket_axis, dtype=np.float64)
 
@@ -55,19 +64,30 @@ def describe_alignment(tool_z, bucket_axis):
 
     elevation = math.degrees(math.asin(max(-1.0, min(1.0, tool_z[2]))))
 
-    if misalignment < VERY_GOOD_DEG:
-        verdict = 'VERY GOOD: insertion axis is along the bucket axis.'
-    elif misalignment < GOOD_DEG:
-        verdict = 'GOOD: close to the bucket axis.'
-    elif misalignment < WARNING_DEG:
-        verdict = 'WARNING: noticeable misalignment with the bucket axis.'
+    drift = depth_m * math.sin(math.radians(misalignment))
+
+    if drift < ALIGNED_DRIFT_M:
+        verdict = 'ALIGNED: the scan runs along the bucket axis.'
+    elif drift < CLOSE_DRIFT_M:
+        verdict = 'CLOSE: the scan runs nearly along the bucket axis.'
     else:
         verdict = (
-            'MISALIGNED: INTER (or the bucket pose) should probably be '
-            'adjusted.'
+            'OFFSET: the scan drifts noticeably relative to the bucket '
+            'axis. Fine as long as the baselines were recorded with this '
+            'same INTER - changing INTER changes the path and invalidates '
+            'them.'
         )
 
-    return misalignment, elevation, verdict
+    return misalignment, elevation, drift, verdict
+
+
+def bucket_axis_for_check():
+    """Return (axis, source): the fitted bucket axis, else the URDF seed."""
+    try:
+        points = np.concatenate(load_baseline_scans(config.baseline_dir()))
+        return fit_cone(points).axis_dir, f'fitted from {config.baseline_dir()}'
+    except (OSError, ValueError):
+        return seed_axis_direction(), 'URDF seed (no baselines loaded)'
 
 
 class FlangeChecker(Node):
@@ -95,8 +115,10 @@ class FlangeChecker(Node):
 
         zx, zy, zz = tool_z_from_quaternion(tf.transform.rotation)
 
-        misalignment, elevation, verdict = describe_alignment(
-            (zx, zy, zz), seed_axis_direction()
+        axis, source = bucket_axis_for_check()
+
+        misalignment, elevation, drift, verdict = describe_alignment(
+            (zx, zy, zz), axis
         )
 
         t = tf.transform.translation
@@ -111,8 +133,10 @@ class FlangeChecker(Node):
         print(f'  Z = {zz:+.6f}')
         print()
         print(f'Elevation above horizontal = {elevation:+.3f} degrees')
+        print(f'Angle to bucket axis ({source}) = {misalignment:.3f} degrees')
         print(
-            f'Angle to bucket axis (URDF seed) = {misalignment:.3f} degrees'
+            f'Drift over a {DEFAULT_DEPTH_M:.2f} m scan = '
+            f'{drift * 100.0:.1f} cm'
         )
         print()
         print(verdict)
