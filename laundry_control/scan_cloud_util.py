@@ -76,21 +76,66 @@ def build_cloud_with_intensity(frame_id, stamp, xyz_points, intensities):
     return point_cloud2.create_cloud(header, fields, points)
 
 
+# Columns beyond the original (x, y, z, stamp) schema.
+#
+# A ToF reading is a RAY, not a point: the endpoint alone throws
+# away where the beam started and how far it actually travelled.
+# Recording the ray lets the residual be evaluated in the sensor's
+# native 1-D range space (where its noise actually lives, rather
+# than as an anisotropic ellipsoid in Cartesian space), and lets
+# calibrate_extrinsics.py look for the theta-dependent signature of
+# a mis-measured sensor mounting - neither of which is recoverable
+# from the endpoint after the fact.
+#
+# j7 is carried alongside because the sensor sweeps with joint 7,
+# so it is the natural independent variable for that calibration:
+# an extrinsic error tracks J7, while a bucket-pose error does not,
+# and that is the only thing distinguishing them (see
+# bucket_model.fit_report).
+EXTENDED_COLUMNS = ["raw_range", "ox", "oy", "oz", "j7"]
+
+BASE_COLUMNS = ["x", "y", "z", "stamp_sec", "stamp_nanosec"]
+
+
 def save_xyz_csv(path, points):
     # points: iterable of (x, y, z, stamp), stamp being a
     # builtin_interfaces/Time (or anything with .sec/.nanosec) so
     # scan_replay.py can reconstruct the real capture cadence.
+    #
+    # Optionally (x, y, z, stamp, raw_range, ox, oy, oz, j7) - the
+    # extended schema above. The two are distinguished by tuple
+    # length, taken from the first row, so existing callers need no
+    # change and older CSVs stay readable.
+    points = list(points)
+
+    # A base point is a 4-tuple (x, y, z, stamp); the stamp
+    # expands to two columns, so column count != tuple length.
+    extended = bool(points) and len(points[0]) == 4 + len(EXTENDED_COLUMNS)
+
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["x", "y", "z", "stamp_sec", "stamp_nanosec"])
 
-        for x, y, z, stamp in points:
-            writer.writerow([x, y, z, stamp.sec, stamp.nanosec])
+        writer.writerow(
+            BASE_COLUMNS + (EXTENDED_COLUMNS if extended else [])
+        )
+
+        for point in points:
+
+            x, y, z, stamp = point[:4]
+
+            writer.writerow(
+                [x, y, z, stamp.sec, stamp.nanosec] + list(point[4:])
+            )
 
 
 def load_xyz_csv(path):
     # Returns (x, y, z, stamp) tuples. Missing/older-format stamp
     # columns default to zero.
+    #
+    # Deliberately still a 4-tuple even for extended-schema files:
+    # scan_replay.py unpacks these positionally, and the extra
+    # columns have no bearing on the geometric view. Use
+    # load_scan_csv() to get at them.
     points = []
 
     with open(path, newline="") as f:
@@ -111,3 +156,37 @@ def load_xyz_csv(path):
             )
 
     return points
+
+
+def load_scan_csv(path):
+    """
+    Load a scan CSV as a dict of flat lists, including the extended
+    ray columns when the file has them.
+
+    Always provides "x", "y", "z", "stamp_sec" and "stamp_nanosec".
+    Each key in EXTENDED_COLUMNS is present only if that column
+    exists in the file, so a caller can test for it directly and
+    give a clear "this scan predates ray recording" message rather
+    than silently analysing zeros.
+    """
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+
+        fieldnames = reader.fieldnames or []
+
+        available = BASE_COLUMNS + [
+            name for name in EXTENDED_COLUMNS if name in fieldnames
+        ]
+
+        columns = {name: [] for name in available}
+
+        for row in reader:
+
+            for name in available:
+                value = row.get(name)
+                columns[name].append(
+                    float(value) if value not in (None, "") else float("nan")
+                )
+
+    return columns

@@ -69,12 +69,14 @@ from scan_record import ScanRecorderClient
 
 from laundry_control.grasp_plan import compute_grasp_target
 from laundry_control.gripper_client import GripperClient
-from laundry_control.laundry_detect import detect_laundry, load_points_xyz
+from laundry_control.bucket_model import build_baseline_surface
+from laundry_control.laundry_detect import detect_laundry, load_baseline_scans
 from laundry_control.retrieve import plan_first_reachable
 
+# A DIRECTORY of empty-bucket scans - see retrieve.py.
 DEFAULT_BASELINE_PATH = (
     "/home/cde3301a/ros2_ws/src/CDE3301_Laundrobros/"
-    "baseline_scans/baseline.csv"
+    "baseline_scans"
 )
 
 DEFAULT_SCAN_RECORDS_DIR = (
@@ -227,9 +229,15 @@ def main():
 
         print("========== RETRIEVE ==========")
 
+        # One model for both detection and grasp depth - see
+        # retrieve.main() for why they must not be fitted twice.
+        baseline_scans = load_baseline_scans(args.baseline)
+        surface = build_baseline_surface(baseline_scans)
+
         clusters = detect_laundry(
             baseline_csv=args.baseline,
             candidate_csv=candidate_csv,
+            surface=surface,
         )
 
         if not clusters:
@@ -240,7 +248,6 @@ def main():
 
         print(f"{len(clusters)} cluster(s) detected.")
 
-        baseline_xyz = load_points_xyz(args.baseline)
 
         # scan() already returns to INTER at its own end, but this
         # is repeated explicitly (matches retrieve.py) so the
@@ -256,7 +263,7 @@ def main():
 
         target_cluster, grasp = plan_first_reachable(
             clusters,
-            baseline_xyz,
+            surface,
             arm,
             compute_grasp_target,
         )

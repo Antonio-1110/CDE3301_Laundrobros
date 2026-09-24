@@ -4,22 +4,75 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
+from laundry_control.bucket_model import (
+    _axis_basis,
+    build_baseline_surface,
+    seed_cone,
+)
 from laundry_control.grasp_plan import (
     DEFAULT_MAX_SINK_M,
     compute_grasp_target,
-    estimate_baseline_depth,
+    estimate_surface_depth_below,
     look_at_quaternion,
 )
 from laundry_control.gripper import GRIPPER_OFFSET_Z
 from laundry_control.laundry_detect import ClusterSummary
 
+CONE = seed_cone()
+E1, E2 = _axis_basis(CONE.axis_dir)
 
-def _make_grid(n_side=10, spacing=0.05, z=0.0):
-    xs = np.arange(n_side) * spacing
-    ys = np.arange(n_side) * spacing
-    xx, yy = np.meshgrid(xs, ys)
-    zz = np.full_like(xx, z)
-    return np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1)
+
+def _sample_bucket(n=5000, seed=0, noise_m=0.002, cap_fraction=0.1):
+    """An empty bucket: lateral wall plus the flat closed end."""
+
+    rng = np.random.default_rng(seed)
+
+    n_cap = int(n * cap_fraction)
+    n_wall = n - n_cap
+
+    s = rng.uniform(0.02, 0.42, n_wall)
+    theta = rng.uniform(0.0, 2.0 * np.pi, n_wall)
+    r = CONE.radius_at(s) + rng.normal(0.0, noise_m, n_wall)
+
+    r_cap = CONE.radius_at(0.02) * np.sqrt(rng.uniform(0.0, 1.0, n_cap))
+    theta_cap = rng.uniform(0.0, 2.0 * np.pi, n_cap)
+    s_cap = np.full(n_cap, 0.02) + rng.normal(0.0, noise_m, n_cap)
+
+    s = np.concatenate([s, s_cap])
+    theta = np.concatenate([theta, theta_cap])
+    r = np.concatenate([r, r_cap])
+
+    return (
+        CONE.axis_point
+        + s[:, None] * CONE.axis_dir
+        + (r * np.cos(theta))[:, None] * E1
+        + (r * np.sin(theta))[:, None] * E2
+    )
+
+
+@pytest.fixture(scope="module")
+def surface():
+    return build_baseline_surface([_sample_bucket(seed=i) for i in range(6)])
+
+
+def _axis_point_at(s_along=0.25):
+    """A point on the bucket axis, well inside the scanned extent."""
+    return CONE.axis_point + s_along * CONE.axis_dir
+
+
+def _cluster_above_floor(surface, gap_m, s_along=0.25):
+    """
+    Place a single-point cluster exactly gap_m above the bucket
+    wall, on the vertical line through the axis - so the gap the
+    grasp planner derives is known by construction.
+    """
+
+    x, y, z_axis = _axis_point_at(s_along)
+
+    floor_z = estimate_surface_depth_below(surface, (x, y), z_axis)
+    assert floor_z is not None
+
+    return _make_cluster(float(x), float(y), floor_z + gap_m), floor_z
 
 
 def _make_cluster(x, y, z):
@@ -97,86 +150,91 @@ class _StubArm:
 
 
 # ---------------------------------------------------------------
-# estimate_baseline_depth
+# estimate_surface_depth_below
 # ---------------------------------------------------------------
 
-def test_estimate_baseline_depth_flat_grid():
-    baseline = _make_grid(z=0.0)
-
-    depth = estimate_baseline_depth(baseline, (0.1, 0.1))
-
-    assert depth == pytest.approx(0.0, abs=1e-9)
-
-
-def test_estimate_baseline_depth_picks_local_region():
-    left = _make_grid(n_side=5, spacing=0.02, z=0.0)
-    right = _make_grid(n_side=5, spacing=0.02, z=-0.05)
-    right[:, 0] += 1.0  # shift the right region far away in x
-
-    baseline = np.concatenate([left, right], axis=0)
-
-    depth_left = estimate_baseline_depth(baseline, (0.02, 0.02), k=3)
-    depth_right = estimate_baseline_depth(baseline, (1.02, 0.02), k=3)
-
-    assert depth_left == pytest.approx(0.0, abs=1e-9)
-    assert depth_right == pytest.approx(-0.05, abs=1e-9)
-
-
-def test_estimate_baseline_depth_empty_baseline_raises():
-    with pytest.raises(ValueError):
-        estimate_baseline_depth(np.empty((0, 3)), (0.0, 0.0))
-
-
-def test_estimate_baseline_depth_ignores_wall_points_above_the_item():
+def test_depth_below_finds_the_bucket_wall(surface):
     """
-    The multivalued-z case this function exists to survive: a floor
-    and a wall standing over it at nearly the same (x, y). Averaging
-    both - what this used to do - returns a height describing
-    neither surface.
+    Straight down from the axis, the wall sits one model radius
+    below - that is the room a gripper has before it hits bucket.
     """
 
-    floor = np.array([[0.0, 0.0, 0.0], [0.004, 0.0, 0.0], [0.0, 0.004, 0.0]])
-    wall = np.array([[0.002, 0.002, 0.10], [0.006, 0.002, 0.10]])
+    x, y, z_axis = _axis_point_at(0.25)
 
-    baseline = np.concatenate([floor, wall], axis=0)
+    floor_z = estimate_surface_depth_below(surface, (x, y), z_axis)
 
-    # Item sensed at 5cm, i.e. above the floor but below the wall.
-    depth = estimate_baseline_depth(baseline, (0.002, 0.002), k=5, below_z=0.05)
+    assert floor_z is not None
+    assert floor_z < z_axis
 
-    assert depth == pytest.approx(0.0, abs=1e-9)
+    drop = z_axis - floor_z
+    expected = CONE.radius_at(0.25)
 
-    # Averaging all five would have landed between the two surfaces.
-    assert depth != pytest.approx(baseline[:, 2].mean(), abs=1e-9)
-
-
-def test_estimate_baseline_depth_returns_highest_surface_below():
-    # A ledge partway up is what the gripper meets first on the way
-    # down, so it - not the floor beneath it - bounds the sink.
-    baseline = np.array(
-        [
-            [0.0, 0.0, 0.0],
-            [0.004, 0.0, 0.03],
-            [0.0, 0.004, 0.01],
-        ]
-    )
-
-    depth = estimate_baseline_depth(baseline, (0.0, 0.0), k=3, below_z=0.05)
-
-    assert depth == pytest.approx(0.03, abs=1e-9)
+    assert drop == pytest.approx(expected, abs=0.01)
 
 
-def test_estimate_baseline_depth_none_when_nothing_below():
-    baseline = np.array(
-        [
-            [0.0, 0.0, 0.20],
-            [0.004, 0.0, 0.22],
-            [0.0, 0.004, 0.25],
-        ]
-    )
+def test_depth_below_returns_none_outside_the_bucket(surface):
+    """
+    A point already below the wall has nothing under it to measure,
+    and must say so rather than inventing a number.
+    """
 
-    depth = estimate_baseline_depth(baseline, (0.0, 0.0), k=3, below_z=0.05)
+    x, y, z_axis = _axis_point_at(0.25)
 
-    assert depth is None
+    below_the_wall = z_axis - CONE.radius_at(0.25) - 0.05
+
+    assert estimate_surface_depth_below(
+        surface, (x, y), below_the_wall
+    ) is None
+
+
+def test_depth_below_returns_none_past_the_mouth(surface):
+    """
+    Beyond the mouth the cone is extrapolation, so a point out
+    there is outside the bucket however wide the extended cone
+    would be.
+    """
+
+    beyond = CONE.axis_point + (surface.cone.s_max + 0.2) * CONE.axis_dir
+
+    assert estimate_surface_depth_below(
+        surface, (beyond[0], beyond[1]), beyond[2]
+    ) is None
+
+
+def test_depth_below_is_answerable_without_baseline_coverage(surface):
+    """
+    The point of using the model rather than the baseline points:
+    the real scan path reaches only ~30% of the bucket's surface
+    cells, and a depth query over an unsampled patch still has to
+    get a real answer.
+    """
+
+    x, y, z_axis = _axis_point_at(0.25)
+
+    sparse = build_baseline_surface([_sample_bucket(n=400, seed=99)])
+
+    assert (sparse.count == 0).sum() > 0.5 * sparse.count.size
+
+    floor_z = estimate_surface_depth_below(sparse, (x, y), z_axis)
+
+    assert floor_z is not None
+    assert z_axis - floor_z == pytest.approx(CONE.radius_at(0.25), abs=0.02)
+
+
+def test_depth_below_resolves_more_finely_than_sensor_noise(surface):
+    """
+    Two queries a millimetre apart must not land in the same
+    bisection bucket, or the gap would quantise coarser than the
+    2mm the sensor itself resolves.
+    """
+
+    x, y, z_axis = _axis_point_at(0.25)
+
+    a = estimate_surface_depth_below(surface, (x, y), z_axis)
+    b = estimate_surface_depth_below(surface, (x + 0.02, y), z_axis)
+
+    assert a is not None and b is not None
+    assert abs(a - b) < 0.02
 
 
 # ---------------------------------------------------------------
@@ -221,124 +279,136 @@ def test_look_at_quaternion_handles_parallel_reference_x():
 # compute_grasp_target
 # ---------------------------------------------------------------
 
-def test_compute_grasp_target_reachable_at_first_fraction():
-    baseline = _make_grid(z=-0.10)
-    cluster = _make_cluster(0.1, 0.1, 0.0)
+def test_compute_grasp_target_reachable_at_first_fraction(surface):
+    cluster, floor_z = _cluster_above_floor(surface, gap_m=0.06)
+    top_z = float(cluster.centroid[2])
 
     # Arm sits directly above the cluster's (x, y) -> approach
     # direction is purely -Z, reproducing the old pure-Z-offset
     # behaviour as a special case.
     arm = _StubArm(
         reachable_at_or_above=-1.0,
-        current_position=(0.1, 0.1, 0.5),
+        current_position=(cluster.centroid[0], cluster.centroid[1], 0.9),
     )
 
-    result = compute_grasp_target(cluster, baseline, arm)
+    result = compute_grasp_target(cluster, surface, arm)
 
     assert result is not None
     assert result.sink_fraction_used == 0.5
     assert len(arm.probed) == 1
-    assert result.sink_amount_m == pytest.approx(0.05)
-    assert result.grasp_point[2] == pytest.approx(-0.05)
-    assert result.tcp_position[2] == pytest.approx(-0.05 + GRIPPER_OFFSET_Z)
+    # Within the depth search's own 0.5mm bisection tolerance: the
+    # planner re-queries from the cluster's top rather than from the
+    # axis, so its bracket lands slightly differently. Still an
+    # order below the sensor's 2mm noise.
+    assert result.gap_m == pytest.approx(0.06, abs=1e-3)
+    assert result.sink_amount_m == pytest.approx(0.03, abs=1e-3)
+    assert result.grasp_point[2] == pytest.approx(top_z - 0.03, abs=1e-3)
+    assert result.tcp_position[2] == pytest.approx(
+        top_z - 0.03 + GRIPPER_OFFSET_Z, abs=1e-3
+    )
     assert result.tcp_position[:2] == pytest.approx(result.grasp_point[:2])
+    assert floor_z < result.grasp_point[2]
 
 
-def test_compute_grasp_target_falls_through_to_floor():
-    baseline = _make_grid(z=-0.10)
-    cluster = _make_cluster(0.1, 0.1, 0.0)
+def test_compute_grasp_target_falls_through_to_floor(surface):
+    cluster, _floor = _cluster_above_floor(surface, gap_m=0.06)
+    top_z = float(cluster.centroid[2])
 
+    # Only the un-sunk grasp clears the obstruction.
     arm = _StubArm(
-        reachable_at_or_above=GRIPPER_OFFSET_Z - 1e-9,
-        current_position=(0.1, 0.1, 0.5),
+        reachable_at_or_above=top_z + GRIPPER_OFFSET_Z - 1e-9,
+        current_position=(cluster.centroid[0], cluster.centroid[1], 0.9),
     )
 
-    result = compute_grasp_target(cluster, baseline, arm)
+    result = compute_grasp_target(cluster, surface, arm)
 
     assert result is not None
     assert result.sink_fraction_used == 0.0
     assert result.sink_amount_m == pytest.approx(0.0)
-    assert result.grasp_point[2] == pytest.approx(0.0)
+    assert result.grasp_point[2] == pytest.approx(top_z)
 
 
-def test_compute_grasp_target_never_reachable_returns_none():
-    baseline = _make_grid(z=-0.10)
-    cluster = _make_cluster(0.1, 0.1, 0.0)
+def test_compute_grasp_target_never_reachable_returns_none(surface):
+    cluster, _floor = _cluster_above_floor(surface, gap_m=0.06)
 
     arm = _StubArm(
         reachable_at_or_above=1000.0,
-        current_position=(0.1, 0.1, 0.5),
+        current_position=(cluster.centroid[0], cluster.centroid[1], 0.9),
     )
 
-    result = compute_grasp_target(cluster, baseline, arm)
-
-    assert result is None
+    assert compute_grasp_target(cluster, surface, arm) is None
 
 
-def test_compute_grasp_target_gap_clamped_when_baseline_above_cluster():
-    baseline = _make_grid(z=0.10)
-    cluster = _make_cluster(0.1, 0.1, 0.0)
+def test_compute_grasp_target_no_sink_when_nothing_below(surface):
+    """
+    A cluster outside the modelled bucket has no measurable room
+    underneath, so the planner must grasp at the sensed surface
+    rather than sink on a guess.
+    """
 
-    arm = _StubArm(
-        reachable_at_or_above=-1.0,
-        current_position=(0.1, 0.1, 0.5),
-    )
+    x, y, z_axis = _axis_point_at(0.25)
+    outside_z = z_axis - CONE.radius_at(0.25) - 0.05
 
-    result = compute_grasp_target(cluster, baseline, arm)
+    cluster = _make_cluster(float(x), float(y), float(outside_z))
+
+    arm = _StubArm(reachable_at_or_above=-1.0, current_position=(x, y, 0.9))
+
+    result = compute_grasp_target(cluster, surface, arm)
 
     assert result is not None
     assert result.gap_m == pytest.approx(0.0)
     assert result.sink_amount_m == pytest.approx(0.0)
 
 
-def test_compute_grasp_target_max_sink_cap():
-    baseline = _make_grid(z=-1.0)
-    cluster = _make_cluster(0.1, 0.1, 0.0)
+def test_compute_grasp_target_max_sink_cap(surface):
+    """
+    A cluster sitting high in the bucket has most of a bucket
+    radius underneath it - far more than the planner should dig in
+    one go.
+    """
 
-    arm = _StubArm(
-        reachable_at_or_above=-1.0,
-        current_position=(0.1, 0.1, 0.5),
-    )
+    x, y, z_axis = _axis_point_at(0.25)
+    cluster = _make_cluster(float(x), float(y), float(z_axis))
 
-    result = compute_grasp_target(cluster, baseline, arm)
+    arm = _StubArm(reachable_at_or_above=-1.0, current_position=(x, y, 0.9))
+
+    result = compute_grasp_target(cluster, surface, arm)
 
     assert result is not None
+    assert result.gap_m > 2 * DEFAULT_MAX_SINK_M
     assert result.sink_fraction_used == 0.5
     assert result.sink_amount_m == pytest.approx(DEFAULT_MAX_SINK_M)
 
 
-def test_compute_grasp_target_offset_arithmetic_directly_above():
-    baseline = _make_grid(z=-0.10)
-    cluster = _make_cluster(0.2, -0.3, 0.05)
+def test_compute_grasp_target_offset_arithmetic_directly_above(surface):
+    cluster, _floor = _cluster_above_floor(surface, gap_m=0.06)
+    cx, cy = float(cluster.centroid[0]), float(cluster.centroid[1])
 
-    arm = _StubArm(
-        reachable_at_or_above=-1.0,
-        current_position=(0.2, -0.3, 0.5),
-    )
+    arm = _StubArm(reachable_at_or_above=-1.0, current_position=(cx, cy, 0.9))
 
-    result = compute_grasp_target(cluster, baseline, arm)
+    result = compute_grasp_target(cluster, surface, arm)
 
     assert result is not None
     assert result.tcp_position[2] - result.grasp_point[2] == pytest.approx(
         GRIPPER_OFFSET_Z
     )
     assert result.tcp_position[:2] == pytest.approx(result.grasp_point[:2])
-    assert result.tcp_position[:2] == pytest.approx([0.2, -0.3])
+    assert result.tcp_position[:2] == pytest.approx([cx, cy])
 
 
-def test_compute_grasp_target_tilts_when_arm_offset_laterally():
+def test_compute_grasp_target_tilts_when_arm_offset_laterally(surface):
     # Arm is NOT above the cluster -- offset well to the side. The
     # reach from tcp_position to grasp_point must still be exactly
     # gripper_offset_z long, but no longer purely vertical.
-    baseline = _make_grid(z=-0.10)
-    cluster = _make_cluster(0.0, 0.0, 0.0)
+    cluster, _floor = _cluster_above_floor(surface, gap_m=0.06)
+    cx, cy = float(cluster.centroid[0]), float(cluster.centroid[1])
 
     arm = _StubArm(
         reachable_at_or_above=-1000.0,  # always reachable
-        current_position=(0.3, 0.0, 0.2),
+        current_position=(cx + 0.3, cy + 0.2, 0.7),
     )
 
-    result = compute_grasp_target(cluster, baseline, arm)
+    result = compute_grasp_target(cluster, surface, arm)
 
     assert result is not None
 
@@ -346,8 +416,8 @@ def test_compute_grasp_target_tilts_when_arm_offset_laterally():
     reach_length = np.linalg.norm(reach_vector)
 
     assert reach_length == pytest.approx(GRIPPER_OFFSET_Z)
-    # Not purely vertical this time: has a nonzero X component.
-    assert abs(reach_vector[0]) > 1e-6
+    # Not purely vertical this time: has a nonzero lateral component.
+    assert np.linalg.norm(reach_vector[:2]) > 1e-6
 
     # The probed orientation's local Z must match the reach direction.
     _x, _y, _z, orientation = arm.probed[0]

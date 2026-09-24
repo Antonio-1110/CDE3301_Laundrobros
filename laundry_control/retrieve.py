@@ -42,7 +42,8 @@ import rclpy
 from .arm_position import INTER
 from .grasp_plan import compute_grasp_target
 from .gripper_client import GripperClient
-from .laundry_detect import detect_laundry, load_points_xyz
+from .bucket_model import build_baseline_surface, fit_report, occupancy_summary
+from .laundry_detect import detect_laundry, load_baseline_scans
 from .move import XArm7Controller
 
 # Absolute, not relative: `ros2 run` executes from the colcon
@@ -51,22 +52,29 @@ from .move import XArm7Controller
 # fail to resolve unless run from inside CDE3301_Laundrobros/
 # itself. Matches real_arm_scan.launch.py's own `records_dir`
 # default for the same reason.
+# A DIRECTORY, not a single file: the detector builds its model
+# from all the empty scans it finds there, and the per-cell noise
+# map it derives the threshold from needs ~8-10 of them. A single
+# CSV path still works if one is passed explicitly.
 DEFAULT_BASELINE_PATH = (
     "/home/cde3301a/ros2_ws/src/CDE3301_Laundrobros/"
-    "baseline_scans/baseline.csv"
+    "baseline_scans"
 )
 
 
 def rank_clusters(clusters):
     """
-    Order detected clusters best-target-first: largest by point
-    count (cluster.size), ties broken by highest mean_deviation_m.
+    Order detected clusters best-target-first: largest by
+    integrated intrusion VOLUME, ties broken by point count.
 
-    cluster.size is the most direct, noise-robust proxy for "how
-    much actual fabric is here" - more member points means more of
-    the scan grid registered something raised off the baseline at
-    that spot. mean_deviation_m (how far above baseline, on
-    average) breaks ties as a secondary "more/closer" signal.
+    Volume rather than point count, because the scan's point
+    density is strongly non-uniform - the helical path samples some
+    parts of the bucket several times more densely than others - so
+    cluster.size partly measures where an item happened to sit
+    rather than how much fabric is there. volume_m3 is integrated
+    per grid cell and is density-independent, so it compares two
+    items fairly wherever they landed. It is also the quantity a
+    gripper actually cares about.
 
     Callers should walk this list rather than committing to its
     first entry: being the biggest cluster does not make a target
@@ -76,7 +84,7 @@ def rank_clusters(clusters):
 
     return sorted(
         clusters,
-        key=lambda cluster: (cluster.size, cluster.mean_deviation_m),
+        key=lambda cluster: (cluster.volume_m3, cluster.size),
         reverse=True,
     )
 
@@ -91,7 +99,7 @@ def select_target_cluster(clusters):
     return ranked[0] if ranked else None
 
 
-def plan_first_reachable(clusters, baseline_xyz, arm, compute_grasp_target):
+def plan_first_reachable(clusters, surface, arm, compute_grasp_target):
     """
     Walk clusters best-first and return the first
     (cluster, GraspTarget) whose grasp target the arm can actually
@@ -111,7 +119,7 @@ def plan_first_reachable(clusters, baseline_xyz, arm, compute_grasp_target):
             f"mean_dev={cluster.mean_deviation_m:.3f}m"
         )
 
-        grasp = compute_grasp_target(cluster, baseline_xyz, arm)
+        grasp = compute_grasp_target(cluster, surface, arm)
 
         if grasp is not None:
             return cluster, grasp
@@ -166,18 +174,43 @@ def main():
 
     args = build_parser().parse_args()
 
+    # The bucket model is built ONCE and used for both halves of
+    # the job: finding the laundry, and working out how much room
+    # is underneath it to sink the gripper into. Fitting it twice
+    # would waste the expensive step and, worse, risk the grasp
+    # being planned against a different surface than the detection
+    # was judged against.
+    baseline_scans = load_baseline_scans(args.baseline)
+    surface = build_baseline_surface(baseline_scans)
+
+    print(
+        f"Bucket model from {len(baseline_scans)} baseline scan(s) "
+        f"({sum(scan.shape[0] for scan in baseline_scans)} pts)"
+    )
+    print(fit_report(surface.cone))
+    print(occupancy_summary(surface))
+    print()
+
     clusters = detect_laundry(
         baseline_csv=args.baseline,
         candidate_csv=args.candidate_csv,
+        surface=surface,
     )
 
     if not clusters:
         print("No laundry detected; nothing to retrieve.")
         return
 
-    print(f"{len(clusters)} cluster(s) detected.")
+    print(f"{len(clusters)} cluster(s) detected:")
 
-    baseline_xyz = load_points_xyz(args.baseline)
+    for rank, cluster in enumerate(rank_clusters(clusters), start=1):
+        cx, cy, cz = cluster.centroid
+        print(
+            f"  #{rank}  vol={cluster.volume_m3 * 1e6:.1f}cm3  "
+            f"size={cluster.size}  "
+            f"centroid=({cx:.3f}, {cy:.3f}, {cz:.3f})"
+            f"{'' if cluster.confident else '  [low confidence]'}"
+        )
 
     rclpy.init()
 
@@ -196,7 +229,7 @@ def main():
 
         target_cluster, grasp = plan_first_reachable(
             clusters,
-            baseline_xyz,
+            surface,
             arm,
             compute_grasp_target,
         )

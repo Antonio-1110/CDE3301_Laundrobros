@@ -14,8 +14,9 @@ sinks the target below that surface by a DYNAMIC amount, informed
 by two things:
 
   1. How much vertical room actually exists between the sensed top
-     and the true bucket floor/wall at that same lateral position,
-     estimated from the baseline (empty-bucket) scan.
+     and the bucket wall at that same lateral position, taken from
+     the fitted bucket model (bucket_model.BaselineSurface) rather
+     than from raw baseline points.
 
   2. Whether the arm can actually reach a given depth at all,
      checked live via a plan-only dry-run (XArm7Controller.
@@ -40,17 +41,11 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
-from scipy.spatial import cKDTree
+from geometry_msgs.msg import Quaternion
 from scipy.spatial.transform import Rotation
 
+from .bucket_model import to_cylindrical
 from .gripper import GRIPPER_OFFSET_Z
-
-# scan_move.py's default insertion step is 3cm, so the baseline is
-# effectively sampled on a ~3cm grid - averaging this many nearest
-# neighbours covers roughly one step-radius patch around a query
-# point, smoothing single-point sensor noise without smearing
-# across an unrelated part of the bucket.
-DEFAULT_BASELINE_K = 5
 
 # Walked largest to smallest: starts at the midpoint of a
 # reasonable 40-60% range, halves on failure (fast convergence),
@@ -62,99 +57,123 @@ DEFAULT_SINK_FRACTIONS = (0.5, 0.25, 0.1, 0.0)
 
 # Never sink drastically further than the sensing resolution that
 # produced the cluster in the first place: roughly one scan step
-# (0.03m) plus margin, so a noisy/sparse baseline lookup can't
-# justify an unreasonably deep sink.
+# (0.03m) plus margin, so a noisy depth estimate can't justify an
+# unreasonably deep sink.
 DEFAULT_MAX_SINK_M = 0.05
 
 # Matches the threshold _plan_to_pose/_plan_tool_z already use to
 # decide a Cartesian path is "complete".
 DEFAULT_REACHABILITY_THRESHOLD = 0.999
 
+# How far below the sensed top to look for the bucket wall before
+# giving up, and how precisely to locate it. 0.5mm is well under
+# the sensor's own 2mm noise, so the bisection is never the
+# limiting error.
+DEFAULT_MAX_DROP_M = 0.6
+DEFAULT_DEPTH_TOLERANCE_M = 0.0005
 
-def estimate_baseline_depth(
-    baseline_xyz,
+
+def estimate_surface_depth_below(
+    surface,
     xy,
-    k=DEFAULT_BASELINE_K,
-    below_z=None,
+    below_z,
+    max_drop_m=DEFAULT_MAX_DROP_M,
+    tolerance_m=DEFAULT_DEPTH_TOLERANCE_M,
 ):
     """
-    Estimate the empty-bucket baseline surface's z directly beneath
-    lateral position xy=(x, y): take the k nearest baseline points
-    in XY, keep those at or below `below_z`, and return the HIGHEST
-    of those.
+    Find the z at which a vertical line through (x, y) leaves the
+    bucket, searching downward from below_z.
 
-    Returns None when `below_z` is given and none of the k
-    neighbours lie below it - see "no surface below" at the end.
+    This is what limits how far the gripper may sink into a pile:
+    the room between the item's sensed top and whatever the gripper
+    would hit first on its way down.
 
-    Why not simply average the k neighbours' z (what this did
-    before): z is NOT single-valued over (x, y) on this bucket.
-    Measured on a real baseline scan, 65% of points sit in
-    neighbourhoods spanning more than the detector's whole noise
-    ceiling in z, with up to 13cm of spread inside a single 3cm
-    cell, because the bucket walls are steep in base_frame. Near a
-    wall, the "k nearest in XY" are therefore a mix of floor points
-    and wall points standing above them at almost the same (x, y),
-    and their mean is an average of two unrelated surfaces - a
-    number describing no real surface at all. Feeding that to
-    compute_grasp_target()'s `gap` skews how deep the gripper digs
-    in exactly the places laundry tends to collect.
+    WHY THE MODEL AND NOT THE BASELINE POINTS
+    -----------------------------------------
+    This used to take the k nearest baseline points in (x, y) and
+    keep the highest one below the item. That inherited the exact
+    problem the detector was rewritten to escape: z is not
+    single-valued over (x, y) on a bucket lying on its side, so the
+    "k nearest in (x, y)" are a mix of floor points and wall points
+    standing above them at almost the same place. Picking the
+    highest one below the item was a workaround, not a fix.
 
-    Why the highest point below rather than the lowest or the mean:
-    the sink is purely vertical, so what limits it is whatever the
-    gripper would hit FIRST on its way down - the topmost surface
-    under the item, be that the floor or a ledge partway up a wall.
-    Choosing the highest also errs toward a smaller gap and so a
-    shallower sink, which is the safe direction to be wrong in.
+    It also needed baseline points to be THERE. Measured on the
+    real 8-scan baseline set, the scan path only reaches about 30%
+    of the bucket's surface cells, so a query over an unsampled
+    patch was answered from whatever happened to be nearest, which
+    could be some distance away on a differently-oriented piece of
+    wall.
 
-    "No surface below" means every nearby baseline point stands
-    above the item's own sensed top, so this neighbourhood cannot
-    describe what is under it. That is reported as None rather than
-    papered over with a number, because the sensible response -
-    don't sink on an estimate this bad - belongs to the caller.
+    The fitted profile has neither problem: it is defined
+    everywhere, and asking where a vertical line crosses it is an
+    exact geometric question with one answer. Solved by bisection
+    rather than algebraically so it stays correct for the whole
+    profile - cone, flat closed end, and the corner between them -
+    without a special case per segment. It costs about 70 point
+    evaluations, which is nothing next to a single motion plan.
+
+    Returns None when the line does not leave the bucket within
+    max_drop_m, or when below_z is already outside it. Both mean
+    "no trustworthy estimate of what is underneath", and the
+    sensible response - don't sink on a guess - belongs to the
+    caller.
     """
 
-    if baseline_xyz.shape[0] == 0:
+    x = float(xy[0])
+    y = float(xy[1])
 
-        raise ValueError(
-            "baseline_xyz has no points."
-        )
+    cone = surface.cone
+    profile = surface.profile
 
-    tree = cKDTree(baseline_xyz[:, :2])
+    def inside(z):
 
-    k_eff = min(k, baseline_xyz.shape[0])
+        point = np.array([[x, y, float(z)]])
 
-    _distances, indices = tree.query(
-        np.asarray(xy, dtype=np.float64),
-        k=k_eff,
-    )
+        s, _theta, r = to_cylindrical(point, cone)
 
-    indices = np.atleast_1d(indices)
-    neighbour_z = baseline_xyz[indices, 2]
+        if s[0] > cone.s_max:
+            # Past the mouth: outside the bucket, even though the
+            # cone's radius keeps growing if extrapolated.
+            return False
 
-    if below_z is None:
-        return float(neighbour_z.max())
+        _u, intrusion = profile.project(s, r)
 
-    below = neighbour_z[neighbour_z <= below_z]
+        return bool(intrusion[0] > 0.0)
 
-    if below.size == 0:
+    if not inside(below_z):
         return None
 
-    return float(below.max())
+    step = 0.01
 
+    z_inside = float(below_z)
+    z_outside = None
 
-@dataclass
-class Quaternion:
-    """
-    Plain x/y/z/w quaternion, duck-type compatible with
-    move.py's _build_pose() (which only ever reads those four
-    attributes) without pulling a geometry_msgs dependency into
-    this otherwise ROS-graph-free module.
-    """
+    z = float(below_z)
 
-    x: float
-    y: float
-    z: float
-    w: float
+    while below_z - z < max_drop_m:
+
+        z -= step
+
+        if not inside(z):
+            z_outside = z
+            break
+
+        z_inside = z
+
+    if z_outside is None:
+        return None
+
+    while z_inside - z_outside > tolerance_m:
+
+        midpoint = 0.5 * (z_inside + z_outside)
+
+        if inside(midpoint):
+            z_inside = midpoint
+        else:
+            z_outside = midpoint
+
+    return 0.5 * (z_inside + z_outside)
 
 
 def look_at_quaternion(direction, reference_x_axis):
@@ -233,12 +252,11 @@ class GraspTarget:
 
 def compute_grasp_target(
     cluster,
-    baseline_xyz,
+    surface,
     arm,
     gripper_offset_z=GRIPPER_OFFSET_Z,
     sink_fractions: Sequence[float] = DEFAULT_SINK_FRACTIONS,
     max_sink_m: float = DEFAULT_MAX_SINK_M,
-    baseline_k: int = DEFAULT_BASELINE_K,
     max_step: float = 0.005,
     velocity: float = 0.1,
     acceleration: float = 0.1,
@@ -271,23 +289,22 @@ def compute_grasp_target(
     y = float(cluster.centroid[1])
     sensed_top_z = float(cluster.centroid[2])
 
-    baseline_z = estimate_baseline_depth(
-        baseline_xyz,
+    floor_z = estimate_surface_depth_below(
+        surface,
         (x, y),
-        k=baseline_k,
         below_z=sensed_top_z,
     )
 
-    if baseline_z is None:
+    if floor_z is None:
 
-        # No baseline point near this cluster sits below its sensed
-        # top, so there is no trustworthy estimate of how much room
-        # is underneath. Sinking on a guess risks driving the
-        # gripper into the bucket, so fall back to grasping at the
-        # sensed surface itself - the one depth the ToF sensor has
-        # already proved reachable.
+        # A vertical line through the cluster never crosses the
+        # modelled bucket wall, so there is no trustworthy estimate
+        # of how much room is underneath. Sinking on a guess risks
+        # driving the gripper into the bucket, so fall back to
+        # grasping at the sensed surface itself - the one depth the
+        # ToF sensor has already proved reachable.
         print(
-            f"WARNING: no baseline surface found below the cluster at "
+            f"WARNING: no bucket surface found below the cluster at "
             f"({x:.3f}, {y:.3f}, {sensed_top_z:.3f}); grasping at the "
             f"sensed surface without sinking."
         )
@@ -296,13 +313,13 @@ def compute_grasp_target(
 
     else:
 
-        gap = max(0.0, sensed_top_z - baseline_z)
+        gap = max(0.0, sensed_top_z - floor_z)
 
         if gap == 0.0:
 
             print(
-                f"WARNING: baseline surface at ({x:.3f}, {y:.3f}) "
-                f"estimated at z={baseline_z:.3f}, at or above the "
+                f"WARNING: bucket surface at ({x:.3f}, {y:.3f}) "
+                f"modelled at z={floor_z:.3f}, at or above the "
                 f"cluster's sensed top z={sensed_top_z:.3f}; grasping "
                 f"at the sensed surface without sinking."
             )

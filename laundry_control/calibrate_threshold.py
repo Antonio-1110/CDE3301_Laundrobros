@@ -1,49 +1,43 @@
 #!/usr/bin/env python3
 
-"""
+r"""
 calibrate_threshold.py
 
-Offline calibration helper for laundry_detect.py's thresholds.
+Per-POINT view of the noise-vs-signal separation behind
+laundry_detect.py's thresholds.
 
-Re-derives the "noise vs. signal" percentile gap described in
-laundry_detect.py's module comment (DEFAULT_THRESHOLD_M etc.).
-Re-run it against fresh scans whenever the sensor, the scan path,
-or the bucket placement changes - the current defaults were picked
-from one such run and are only as good as the scans behind them.
+This is the companion to validate_detector.py, not a replacement
+for it. They answer different questions and you want both:
 
-Two comparisons are made, both with the SAME one-sided
-signed-z logic the detector itself uses:
+    validate_detector.py works at the CLUSTER level and tells you
+    what the detector actually does - how many false clusters per
+    empty scan, how many known items it finds. That is the number
+    that matters, and it is the one to choose an operating point
+    from.
 
-    noise (--repeat):
-        baseline vs. a SECOND empty-bucket scan, run over the same
-        physical path (see scan_move.py). Any signed_z > 0 here is
-        pure registration/timing noise - the bucket was empty in
-        both scans - so its distribution is the noise floor the
-        threshold must sit above.
+    this script works at the POINT level and tells you WHY - where
+    the noise tail ends, where the signal tail begins, and whether
+    there is any gap between them at all. When validation comes
+    back bad, this is what shows whether the threshold is wrong or
+    whether the underlying separation was never there.
 
-    signal (--laundry, optional):
-        baseline vs. a scan with known laundry actually in the
-        bucket. Its signed_z distribution (restricted to the region
-        actually covering the item, if you know it) is the real
-        detection signal the threshold must sit below.
+Intrusions are reported in units of the LOCAL sigma, because that
+is what the detector thresholds on (k * sigma). Reporting raw
+metres would hide the thing that makes the new threshold work:
+noise varies several-fold across the bucket with incidence angle
+and coverage, so a single metre value means very different things
+in different places.
 
-A good threshold sits in the gap between the noise distribution's
-upper tail (e.g. p95/p99) and the signal distribution's lower tail
-(e.g. p5/p10). If --laundry is omitted, only the noise-side
-percentiles are reported - useful on its own for sanity-checking
-how tight the one-sided noise floor is before recording a "known
-laundry" reference scan.
-
-This module does no ROS/graph work - like laundry_detect.py, it
-only reads saved CSVs - so it works as a bare offline script.
+Re-run this whenever the sensor, the scan path, or the bucket
+placement changes.
 
 Usage:
     calibrate_threshold \\
-        --baseline baseline_scans/baseline.csv \\
+        --baseline baseline_scans \\
         --repeat scan_records/scan_<second_empty_bucket_run>.csv
 
     calibrate_threshold \\
-        --baseline baseline_scans/baseline.csv \\
+        --baseline baseline_scans \\
         --repeat scan_records/scan_<second_empty_bucket_run>.csv \\
         --laundry scan_records/scan_<known_laundry_run>.csv
 """
@@ -52,15 +46,18 @@ import argparse
 
 import numpy as np
 
+from .bucket_model import build_baseline_surface, fit_report, occupancy_summary
 from .laundry_detect import (
-    compute_deviation,
+    compute_intrusion,
+    load_baseline_scans,
     load_points_xyz,
 )
 
-PERCENTILES = (50, 90, 95, 99, 100)
+NOISE_PERCENTILES = (50, 90, 95, 99, 99.9, 100)
+SIGNAL_PERCENTILES = (50, 90, 99, 99.9, 100)
 
 
-def _percentile_table(label, values):
+def _percentile_table(label, values, percentiles):
 
     if values.size == 0:
         print(f"{label}: no points to report.")
@@ -68,49 +65,72 @@ def _percentile_table(label, values):
 
     print(f"{label} (n={values.size}):")
 
-    for p in PERCENTILES:
-        print(f"    p{p:<3d} = {np.percentile(values, p):.4f} m")
+    for percentile in percentiles:
+        print(
+            f"    p{percentile:<5} = "
+            f"{np.percentile(values, percentile):7.2f} sigma"
+        )
 
-    print(f"    mean  = {values.mean():.4f} m")
-
-
-def _positive(signed_z):
-    # Only the one-sided "candidate above baseline" tail is
-    # physically meaningful for a threshold decision - see this
-    # module's docstring and laundry_detect.compute_deviation().
-    return signed_z[signed_z > 0.0]
+    print(f"    mean    = {values.mean():7.2f} sigma")
 
 
-def run(
-    baseline_csv,
-    repeat_csv,
-    laundry_csv=None,
-):
+def _normalised_intrusion(candidate_xyz, surface):
+    """
+    Per-point intrusion divided by that point's local sigma,
+    restricted to points inside the model's trusted region.
 
-    baseline_xyz = load_points_xyz(baseline_csv)
+    Only the POSITIVE tail is physically meaningful: an object can
+    only intercept the beam early, so negative intrusion is the
+    bucket wall reading slightly further out than modelled, which
+    is noise by definition and cannot be evidence of laundry.
+    """
+
+    result = compute_intrusion(candidate_xyz, surface)
+
+    usable = result.in_bounds & (result.sigma_m > 0.0)
+
+    normalised = result.intrusion_m[usable] / result.sigma_m[usable]
+
+    return normalised[normalised > 0.0], result
+
+
+def run(baseline, repeat_csv, laundry_csv=None):
+
+    baseline_scans = load_baseline_scans(baseline)
+
+    print(
+        f"Loaded {len(baseline_scans)} baseline scan(s) from {baseline} "
+        f"({sum(scan.shape[0] for scan in baseline_scans)} pts)"
+    )
+
+    surface = build_baseline_surface(baseline_scans)
+
+    print()
+    print(fit_report(surface.cone))
+    print()
+    print(occupancy_summary(surface))
+    print()
+
     repeat_xyz = load_points_xyz(repeat_csv)
-
-    print(f"Loaded baseline: {baseline_csv} ({baseline_xyz.shape[0]} pts)")
     print(f"Loaded repeat  : {repeat_csv} ({repeat_xyz.shape[0]} pts)")
     print()
 
-    print("=" * 60)
-    print("NOISE FLOOR (empty bucket vs. empty bucket)")
-    print("=" * 60)
+    print("=" * 64)
+    print("NOISE FLOOR (empty bucket, scan not used to build the model)")
+    print("=" * 64)
 
-    point_noise = compute_deviation(baseline_xyz, repeat_xyz, threshold_m=0.0)
-    _percentile_table(
-        "signed_z > 0 only",
-        _positive(point_noise.signed_z),
-    )
+    noise, _ = _normalised_intrusion(repeat_xyz, surface)
+    _percentile_table("positive intrusion", noise, NOISE_PERCENTILES)
 
     if laundry_csv is None:
         print()
         print(
-            "No --laundry scan given - pick a threshold above the "
-            "noise p95/p99 above, then re-run with --laundry once "
-            "you have a known-laundry scan to confirm the signal "
-            "side clears it."
+            "No --laundry scan given. The noise tail above is a "
+            "lower bound on k_sigma, but on its own it cannot tell "
+            "you whether anything is still detectable above it - "
+            "re-run with --laundry, and run validate_detector.py "
+            "for the cluster-level numbers that actually decide the "
+            "threshold."
         )
         return
 
@@ -120,33 +140,51 @@ def run(
     print(f"Loaded laundry : {laundry_csv} ({laundry_xyz.shape[0]} pts)")
     print()
 
-    print("=" * 60)
-    print("SIGNAL (empty bucket vs. known laundry)")
-    print("=" * 60)
+    print("=" * 64)
+    print("SIGNAL (known laundry in the bucket)")
+    print("=" * 64)
 
-    point_signal = compute_deviation(baseline_xyz, laundry_xyz, threshold_m=0.0)
-    _percentile_table(
-        "signed_z > 0 only",
-        _positive(point_signal.signed_z),
-    )
+    signal, _ = _normalised_intrusion(laundry_xyz, surface)
+    _percentile_table("positive intrusion", signal, SIGNAL_PERCENTILES)
 
     print()
-    print(
-        "Pick a threshold in the gap between the NOISE p95/p99 "
-        "above and the SIGNAL p5/p10 (i.e. re-run this print with "
-        "np.percentile(..., [5, 10]) on the signal arrays if the "
-        "gap isn't obvious from p50/p90/p95/p99 alone)."
-    )
+
+    if noise.size and signal.size:
+
+        noise_ceiling = np.percentile(noise, 99.9)
+        signal_peak = signal.max()
+
+        print(
+            f"Separation: noise p99.9 = {noise_ceiling:.2f} sigma, "
+            f"signal max = {signal_peak:.2f} sigma."
+        )
+
+        if signal_peak <= noise_ceiling:
+            print(
+                "  NO GAP. The item never rose above the noise "
+                "tail, so no threshold can separate them - the "
+                "problem is upstream (model fit, coverage, or the "
+                "item being too small for this sensor), not the "
+                "threshold."
+            )
+        else:
+            print(
+                "  Most points in a laundry scan still hit bare "
+                "bucket, so the bulk of this distribution SHOULD "
+                "look like noise. Only the upper tail is the item. "
+                "Judge the threshold on the cluster-level results "
+                "from validate_detector.py, not on the percentiles "
+                "above."
+            )
 
 
 def build_parser():
 
     parser = argparse.ArgumentParser(
         description=(
-            "Calibrate laundry_detect.py's deviation thresholds by "
-            "comparing empty-bucket repeatability noise against "
-            "known-laundry signal, using the same one-sided "
-            "signed-z logic the detector uses."
+            "Report per-point intrusion distributions, in units of "
+            "local sigma, for an empty repeat scan and (optionally) "
+            "a known-laundry scan."
         )
     )
 
@@ -154,7 +192,10 @@ def build_parser():
         "--baseline",
         type=str,
         required=True,
-        help="Path to the empty-bucket baseline scan CSV.",
+        help=(
+            "Directory of empty-bucket baseline scan CSVs, or a "
+            "single CSV."
+        ),
     )
 
     parser.add_argument(
@@ -162,9 +203,9 @@ def build_parser():
         type=str,
         required=True,
         help=(
-            "Path to a SECOND empty-bucket scan CSV, taken over "
-            "the same physical path, used to measure the noise "
-            "floor (baseline vs. baseline)."
+            "A FURTHER empty-bucket scan CSV, over the same "
+            "physical path, not among the baselines. Used to "
+            "measure the noise floor."
         ),
     )
 
@@ -173,9 +214,8 @@ def build_parser():
         type=str,
         default=None,
         help=(
-            "Optional path to a scan CSV taken with known laundry "
-            "in the bucket, used to measure the detection signal "
-            "(baseline vs. laundry)."
+            "Optional scan CSV taken with known laundry in the "
+            "bucket, used to measure the detection signal."
         ),
     )
 
@@ -187,7 +227,7 @@ def main():
     args = build_parser().parse_args()
 
     run(
-        baseline_csv=args.baseline,
+        baseline=args.baseline,
         repeat_csv=args.repeat,
         laundry_csv=args.laundry,
     )

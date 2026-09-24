@@ -37,6 +37,7 @@ setup(
             'gripper_cli = laundry_control.gripper_cli:main',
             'laundry_detect = laundry_control.laundry_detect_cli:main',
             'calibrate_threshold = laundry_control.calibrate_threshold:main',
+            'validate_detector = laundry_control.validate_detector:main',
             'promote_baseline = laundry_control.promote_baseline:main',
             'retrieve = laundry_control.retrieve:main',
         ],

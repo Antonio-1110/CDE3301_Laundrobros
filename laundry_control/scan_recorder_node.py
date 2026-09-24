@@ -54,11 +54,19 @@ import tf2_ros
 import tf2_geometry_msgs
 
 from geometry_msgs.msg import PointStamped
-from sensor_msgs.msg import Range, PointCloud2
+from sensor_msgs.msg import Range, PointCloud2, JointState
 from std_srvs.srv import Trigger
 
 from .scan_cloud_util import build_cloud, save_xyz_csv, POINT_CLOUD_QOS
 from .tof_sensor import TOF_SENSOR_FRAME
+
+# The joint the ToF sensor sweeps with during a scan (see
+# scan_move.py's helical strokes). Recorded per point so
+# calibrate_extrinsics.py can look for a J7-periodic signature in
+# the empty-bucket residual, which is what distinguishes a
+# mis-measured sensor mounting from a mis-placed bucket - the cone
+# fit alone cannot tell those apart (see bucket_model.fit_report).
+SWEEP_JOINT_NAME = "joint7"
 
 
 def _default_scan_records_dir():
@@ -87,6 +95,7 @@ class ScanRecorderNode(Node):
         self.declare_parameter("publish_rate_hz", 5.0)
         self.declare_parameter("csv_path", "")
         self.declare_parameter("records_dir", "")
+        self.declare_parameter("joint_state_topic", "/joint_states")
 
         self.base_frame = self.get_parameter("base_frame").value
         self.flange_link = self.get_parameter("flange_link").value
@@ -98,6 +107,18 @@ class ScanRecorderNode(Node):
 
         self.points_tcp_frame = []
         self.points_base_frame = []
+
+        # Per-point ray metadata, index-aligned with
+        # points_base_frame: (raw_range, ox, oy, oz, j7). The
+        # endpoint alone loses where the beam started, which is what
+        # range-space residuals and extrinsic calibration both need.
+        self.point_rays = []
+
+        # Latest sweep-joint angle, cached from /joint_states. NaN
+        # until the first message arrives, so a scan recorded
+        # without joint states is visibly missing the column rather
+        # than quietly full of zeros.
+        self._latest_sweep_angle = float("nan")
 
         # TF lookup outcomes for the current scan. The fallback path
         # below substitutes "wherever the arm is NOW" for "where the
@@ -128,6 +149,13 @@ class ScanRecorderNode(Node):
             qos_profile_sensor_data,
         )
 
+        self._joint_state_sub = self.create_subscription(
+            JointState,
+            self.get_parameter("joint_state_topic").value,
+            self._joint_state_callback,
+            10,
+        )
+
         publish_rate_hz = self.get_parameter("publish_rate_hz").value
 
         self._publish_timer = self.create_timer(
@@ -144,6 +172,26 @@ class ScanRecorderNode(Node):
         )
 
         self.get_logger().info("scan_recorder_node ready.")
+
+    def _joint_state_callback(self, msg):
+        """
+        Cache the sweep joint's angle.
+
+        Latest-value caching is good enough here: this is only ever
+        used for offline calibration diagnostics, never for placing
+        a point (which goes through TF at the reading's own
+        timestamp). A few milliseconds of staleness shifts the
+        fitted phase of a J7 sinusoid slightly and changes nothing
+        about the scan geometry.
+        """
+
+        if SWEEP_JOINT_NAME not in msg.name:
+            return
+
+        index = msg.name.index(SWEEP_JOINT_NAME)
+
+        if index < len(msg.position):
+            self._latest_sweep_angle = float(msg.position[index])
 
     def _range_callback(self, msg):
 
@@ -247,8 +295,33 @@ class ScanRecorderNode(Node):
         tcp_point.header.stamp = msg.header.stamp
         base_point.header.stamp = msg.header.stamp
 
+        # The beam's ORIGIN in base_frame: the same transform
+        # applied to the sensor frame's own origin. Together with
+        # the endpoint this reconstructs the full ray, which is
+        # what range-space residuals and extrinsic calibration
+        # need and what the endpoint alone cannot give back.
+        origin_point = PointStamped()
+        origin_point.header.frame_id = sensor_frame
+        origin_point.point.x = 0.0
+        origin_point.point.y = 0.0
+        origin_point.point.z = 0.0
+
+        base_origin = tf2_geometry_msgs.do_transform_point(
+            origin_point, base_transform
+        )
+
         self.points_tcp_frame.append(tcp_point)
         self.points_base_frame.append(base_point)
+
+        self.point_rays.append(
+            (
+                float(msg.range),
+                base_origin.point.x,
+                base_origin.point.y,
+                base_origin.point.z,
+                self._latest_sweep_angle,
+            )
+        )
 
     def _publish_point_cloud(self):
 
@@ -278,8 +351,8 @@ class ScanRecorderNode(Node):
         csv_path = self._resolve_csv_path()
 
         points = [
-            (p.point.x, p.point.y, p.point.z, p.header.stamp)
-            for p in self.points_base_frame
+            (p.point.x, p.point.y, p.point.z, p.header.stamp) + ray
+            for p, ray in zip(self.points_base_frame, self.point_rays)
         ]
 
         try:
@@ -359,6 +432,7 @@ class ScanRecorderNode(Node):
 
         self.points_tcp_frame.clear()
         self.points_base_frame.clear()
+        self.point_rays.clear()
 
         # clear_scan marks a scan boundary, so the TF tally starts
         # over with it - otherwise the next scan's accuracy report

@@ -29,17 +29,39 @@ import argparse
 import os
 import shutil
 
-DEFAULT_DEST_PATH = "baseline_scans/baseline.csv"
+# A DIRECTORY, not a fixed filename. The detector builds its model
+# from EVERY empty scan in here, so promoting a second baseline must
+# add to the set rather than replace it - which a fixed
+# "baseline.csv" destination would do silently, leaving you with one
+# scan and a sigma map that is entirely pooled fallback.
+DEFAULT_DEST_DIR = "baseline_scans"
 
 
 def promote(
     src_path: str,
-    dest_path: str = DEFAULT_DEST_PATH,
+    dest: str = DEFAULT_DEST_DIR,
     force: bool = False,
-) -> None:
+) -> str:
+    """
+    Copy an empty-bucket scan into the baseline set.
+
+    `dest` is normally a DIRECTORY; the scan keeps its own filename
+    inside it, so repeated promotions accumulate into the 8-10
+    empty scans the model wants. Passing an explicit .csv path
+    still works for one-off use.
+
+    Returns the path actually written.
+    """
 
     if not os.path.isfile(src_path):
         raise FileNotFoundError(f"No such scan CSV: {src_path!r}")
+
+    treat_as_dir = os.path.isdir(dest) or not dest.endswith(".csv")
+
+    if treat_as_dir:
+        dest_path = os.path.join(dest, os.path.basename(src_path))
+    else:
+        dest_path = dest
 
     if os.path.exists(dest_path) and not force:
 
@@ -54,6 +76,8 @@ def promote(
         os.makedirs(dest_dir, exist_ok=True)
 
     shutil.copyfile(src_path, dest_path)
+
+    return dest_path
 
 
 def build_parser():
@@ -77,8 +101,12 @@ def build_parser():
     parser.add_argument(
         "--dest",
         type=str,
-        default=DEFAULT_DEST_PATH,
-        help=f"Destination path (default: {DEFAULT_DEST_PATH}).",
+        default=DEFAULT_DEST_DIR,
+        help=(
+            "Destination directory - the scan keeps its own "
+            "filename inside it, so promotions accumulate "
+            f"(default: {DEFAULT_DEST_DIR})."
+        ),
     )
 
     parser.add_argument(
@@ -96,7 +124,7 @@ def main():
 
     promote(
         src_path=args.src_path,
-        dest_path=args.dest,
+        dest=args.dest,
         force=args.force,
     )
 
