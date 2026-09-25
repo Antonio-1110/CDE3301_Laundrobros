@@ -5,8 +5,11 @@
 # (gpiozero, lgpio, adafruit) are only imported on real hardware.
 name: tests
 
+# Pushes to main, and every pull request (a push to a PR branch runs
+# once, as the pull_request event).
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
