@@ -177,6 +177,15 @@ class _StubGripper:
         return True
 
 
+@pytest.fixture(autouse=True)
+def _named_moves_through_stub(monkeypatch):
+    """Route go_to() through the stub arm's move_joints, as before."""
+    def fake_go_to(arm, name, **_kwargs):
+        return arm.move_joints(config.get_named_pose(name))
+
+    monkeypatch.setattr(execute, 'go_to', fake_go_to)
+
+
 def _sequence(arm):
     names = {tuple(config.INTER): 'INTER', tuple(config.DROP): 'DROP'}
     return [

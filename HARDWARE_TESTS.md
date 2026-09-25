@@ -12,7 +12,12 @@ source ~/ros2_ws/src/CDE3301_Laundrobros/env.sh
 
 **Safety:** keep a hand on the e-stop for every motion test.
 
-**Scan speed:** the default scan velocity is now **0.03** (was 0.1), but the committed `baseline_scans/` were recorded at 0.1. Tests 6–8 therefore also check that the old baselines still judge a slower scan correctly. Section D then replaces them with baselines taken at the new speed.
+**What changed in the motion:**
+- **Scan speed:** the default scan velocity is now **0.03** (was 0.1).
+- **End scan:** the closed end is covered by the baked precession end scan (test 7), not the BOTTOM detour.
+- **Transfers:** INTER ↔ HOME/DROP use baked paths (test 5).
+
+The committed `baseline_scans/` were recorded with the old speed and the old detour, so **they no longer match the default scan path**. Tests 8–10 check how the old baselines judge the new scans, and section D replaces them.
 
 ---
 
@@ -66,7 +71,21 @@ laundry move joint7 30 && laundry move joint7 -30 && laundry move linear 0.03 &&
 - **Paste back:** "ok", or the first error.
 - **Verifies:** the J7 and tool-Z moves work exactly as `move_cli.py` did.
 
-**5. Gripper through `gripper_node`, then a raw servo angle.**
+**5. Baked transfers INTER ↔ HOME and INTER ↔ DROP, slowly.** Hand on the e-stop; watch the wiring.
+
+```bash
+laundry move inter && laundry move home --speed 0.3 && laundry move inter --speed 0.3 && laundry move drop --speed 0.3 && laundry move inter --speed 0.3
+```
+
+- **Paste back:**
+  - the output, which should say "Baked transfer to …" for each of the four moves;
+  - whether the gripper backed straight out of the bucket before swinging away;
+  - whether any cable pulled.
+- **Verifies:** these moves now replay fixed, collision-checked paths (`scan_plans/transfers.yaml`) instead of the planner. On the fake controller the planner turned J7 up to 536° on DROP → INTER; the baked path turns it the direct 14°, identically every time.
+- **If it's fine at 0.3:** repeat without `--speed`.
+- **If something comes too close:** re-bake on the rig with `laundry plan bake transfers`. It moves the arm; watch it. Then paste back the per-joint summary and commit the file.
+
+**6. Gripper through `gripper_node`, then a raw servo angle.**
 
 ```bash
 laundry gripper close && laundry gripper open && laundry gripper 80
@@ -84,7 +103,7 @@ The closed end is now covered by a **baked precession ("coning") sweep** instead
 - **It's a fixed joint trajectory** (`scan_plans/endcap.yaml`, baked on the fake controller against the URDF bucket), replayed identically every scan.
 - **The old detour** is still there, but only as `--end-scan bottom`.
 
-**6. Replay the end scan alone, slowly.** Hand on the e-stop. Watch the elbow (link3) against the bucket rim and the gripper against the walls, especially in the last ring (the largest tilt).
+**7. Replay the end scan alone, slowly.** Hand on the e-stop. Watch the elbow (link3) against the bucket rim and the gripper against the walls, especially in the last ring (the largest tilt).
 
 ```bash
 laundry plan replay --speed 0.3
@@ -96,7 +115,7 @@ laundry plan replay --speed 0.3
 - **If it's fine at 0.3:** run `laundry plan replay --speed 1.0` once more before scanning.
 
 
-**7. Empty-bucket scan through the new CLI.** Empty the bucket and open the gripper first.
+**8. Empty-bucket scan through the new CLI.** Empty the bucket and open the gripper first.
 
 ```bash
 laundry scan --save scan_records/hw_empty_01.csv 2>&1 | tail -5 && ros2 param get /scan_recorder_node csv_path
@@ -108,7 +127,7 @@ laundry scan --save scan_records/hw_empty_01.csv 2>&1 | tail -5 && ros2 param ge
   - The recorder's `csv_path` is handed back afterwards (the second command must print an empty string).
   - The recorder's `TF: ... exact, ... fallback` tally is in the log.
 
-**8. The new scan detects nothing.**
+**9. The new scan detects nothing.**
 
 ```bash
 laundry detect scan_records/hw_empty_01.csv
@@ -117,16 +136,16 @@ laundry detect scan_records/hw_empty_01.csv
 - **Paste back:** everything from "Loaded candidate" down.
 - **Verifies:** on real data, the new detector (hysteresis + low-confidence gate) reports 0 clusters in an empty bucket.
 
-**9. Observed-start-state planning on the real arm.** On the fake controller this was required to finish a scan at all; on the rig it's untested.
+**10. Observed-start-state planning on the real arm.** On the fake controller this was required to finish a scan at all; on the rig it's untested.
 
 ```bash
 laundry scan --observed-start-state --save scan_records/hw_empty_obs_01.csv 2>&1 | grep -cE "failed|deviates"; laundry detect scan_records/hw_empty_obs_01.csv | grep "Found"
 ```
 
 - **Paste back:** both lines, plus the CSV.
-- **Verifies:** the arm can plan each stroke from `/joint_states` instead of MoveIt's own state. If it scans cleanly and the result matches test 8, I'll make it the default everywhere.
+- **Verifies:** the arm can plan each stroke from `/joint_states` instead of MoveIt's own state. If it scans cleanly and the result matches test 9, I'll make it the default everywhere.
 
-**10. Scan with the ray columns** (a check on test 7's CSV).
+**11. Scan with the ray columns** (a check on test 8's CSV).
 
 ```bash
 head -1 scan_records/hw_empty_01.csv
@@ -143,17 +162,17 @@ head -1 scan_records/hw_empty_01.csv
 - **Localisation:** in simulation, the grasp point's median error dropped from ~1.0 to ~0.65 cm.
 - **Coverage is unchanged:** `laundry evaluate --coverage` shows the same area covered, because the cone footprint already bridges the gaps between readings. The upper wall and ceiling stay out of scope by design.
 
-**11. One slow empty scan, compared with a fast one.**
+**12. One slow empty scan, compared with a fast one.**
 
 ```bash
 time laundry scan --save scan_records/hw_empty_slow_01.csv 2>&1 | grep -cE "twist runs|failed"; wc -l scan_records/hw_empty_01.csv scan_records/hw_empty_slow_01.csv
 ```
 
 - **Paste back:** the time, the count (should be 0), the two line counts, plus the CSV.
-- **Note:** test 7 already ran at 0.03 as well. If you want the fast comparison, rerun test 7 with `--velocity 0.1 --acceleration 0.1`.
+- **Note:** test 8 already ran at 0.03 as well. If you want the fast comparison, rerun test 8 with `--velocity 0.1 --acceleration 0.1`.
 - **Verifies:** the slow scan completes without J7-rate warnings, and gives roughly twice the points.
 
-**12. Baselines at the new speed.** Empty bucket, open gripper; takes about 13 minutes.
+**13. Baselines at the new speed.** Empty bucket, open gripper; takes about 13 minutes.
 
 ```bash
 laundry baseline collect --count 8 --dest baseline_scans_v003 && laundry scan --end-scan bottom --save scan_records/hw_empty_bottom.csv && laundry evaluate --baseline baseline_scans_v003 --sweep --synthetic --coverage --coverage-scan baseline_scans_v003/$(ls baseline_scans_v003 | head -1) --coverage-scan scan_records/hw_empty_bottom.csv
@@ -167,23 +186,23 @@ laundry baseline collect --count 8 --dest baseline_scans_v003 && laundry scan --
   - The two `--coverage-scan` lines give the measured closed-end coverage of the precession vs the BOTTOM detour, on real data.
 - **If this looks right:** `baseline_scans_v003` replaces `baseline_scans/` (I'll do the swap in a commit), and every later test uses it.
 
-**13. Optional: 2 cm step.**
+**14. Optional: 2 cm step.**
 
 ```bash
 laundry scan --step 0.02 --save scan_records/hw_empty_step2.csv
 ```
 
 - **Paste back:** the CSV and the time.
-- **Why it's optional:** in simulation it adds 43% more readings for no extra area coverage (~127 s per scan). Worth it only if test 12 shows cells still thinly sampled.
+- **Why it's optional:** in simulation it adds 43% more readings for no extra area coverage (~127 s per scan). Worth it only if test 13 shows cells still thinly sampled.
 
 ## E. Grasping
 
-**14. Grasp offset (measure by hand).** `config.GRIPPER_OFFSET_Z = 0.15` is reported, not verified. It's the distance along link7 +Z (at INTER, horizontally into the bucket) from the flange face to the point where the claw closes.
+**15. Grasp offset (measure by hand).** `config.GRIPPER_OFFSET_Z = 0.15` is reported, not verified. It's the distance along link7 +Z (at INTER, horizontally into the bucket) from the flange face to the point where the claw closes.
 
 - **Paste back:** the distance in cm.
 - **Also measure** the ToF sensor's offset from the flange axis (7.75 cm expected) and its distance forward of the flange face (2.8 cm expected). The old README had these two swapped relative to the code; the code's values are the ones in use.
 
-**15. Dry run with one item.** Put a small towel on the floor, mid-depth.
+**16. Dry run with one item.** Put a small towel on the floor, mid-depth.
 
 ```bash
 laundry run --dry-run --save scan_records/hw_towel_dry.csv 2>&1 | grep -A12 "Found"
@@ -192,7 +211,7 @@ laundry run --dry-run --save scan_records/hw_towel_dry.csv 2>&1 | grep -A12 "Fou
 - **Paste back:** the output, the CSV, and a photo.
 - **Verifies:** detection on real cloth. The printed `grasp=(...)` point should sit on the towel; say how far off it looks.
 
-**16. Full retrieval.**
+**17. Full retrieval.**
 
 ```bash
 laundry run --save scan_records/hw_towel_run.csv 2>&1 | grep -vE "joint[0-9]:|Joint-space target"
@@ -205,7 +224,7 @@ laundry run --save scan_records/hw_towel_run.csv 2>&1 | grep -vE "joint[0-9]:|Jo
 
 ## F. Real-cloth validation scans I need
 
-Everything detection-related is currently tuned on synthetic items injected into real empty scans. These scans check it against real cloth. Take them **after test 12**, at the default speed (0.03), so they match the new baselines.
+Everything detection-related is currently tuned on synthetic items injected into real empty scans. These scans check it against real cloth. Take them **after test 13**, at the default speed (0.03), so they match the new baselines.
 
 **How to take each one:**
 

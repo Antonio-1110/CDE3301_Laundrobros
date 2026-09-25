@@ -23,6 +23,7 @@ from datetime import datetime
 import os
 
 from . import config
+from .arm.transfers import go_to
 from .grasp.execute import grasp_best
 from .perception.bucket_model import build_baseline_surface
 from .perception.detect import detect_on_points, load_baseline_scans
@@ -183,14 +184,14 @@ def run_preplanned(arm, gripper):
     """
     print('Moving to INTER...')
 
-    if not arm.move_joints(config.INTER):
+    if not go_to(arm, 'inter'):
         print('Failed to reach INTER; aborting.')
         return False
 
     for name in PREPLANNED_SEQUENCE:
         print(f'Moving to {name}...')
 
-        if not arm.move_joints(config.get_named_pose(name)):
+        if not go_to(arm, name):
             print(f'Failed to reach {name}; aborting.')
             return False
 
@@ -200,7 +201,7 @@ def run_preplanned(arm, gripper):
 
         print('Moving to DROP...')
 
-        if not arm.move_joints(config.DROP):
+        if not go_to(arm, 'drop'):
             print('Failed to reach DROP; aborting.')
             return False
 
@@ -210,4 +211,4 @@ def run_preplanned(arm, gripper):
 
     print('Returning to INTER...')
 
-    return arm.move_joints(config.INTER)
+    return go_to(arm, 'inter')

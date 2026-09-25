@@ -23,7 +23,7 @@ hardware.fake.FakeGripper.
 """
 
 from .plan import compute_grasp_target
-from .. import config
+from ..arm.transfers import go_to
 
 
 def rank_clusters(clusters):
@@ -136,7 +136,7 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Retracting to INTER...')
 
-    if not arm.move_joints(config.INTER):
+    if not go_to(arm, 'inter'):
         print('Failed to retract to INTER; aborting.')
 
         return False
@@ -146,7 +146,7 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Moving to DROP...')
 
-    if not arm.move_joints(config.DROP):
+    if not go_to(arm, 'drop'):
         print('Failed to reach DROP; aborting.')
 
         return False
@@ -157,7 +157,7 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Returning to INTER...')
 
-    return arm.move_joints(config.INTER)
+    return go_to(arm, 'inter')
 
 
 def grasp_best(arm, gripper, clusters, surface, drop=False, dry_run=False):
@@ -172,7 +172,7 @@ def grasp_best(arm, gripper, clusters, surface, drop=False, dry_run=False):
     """
     print('Moving to INTER (reference orientation for grasp math)...')
 
-    if not arm.move_joints(config.INTER):
+    if not go_to(arm, 'inter'):
         print('Failed to reach INTER; aborting.')
 
         return False

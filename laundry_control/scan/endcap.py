@@ -311,7 +311,9 @@ def bake(
     """
     log('Baking the end scan: moving to INTER and in to the pivot...')
 
-    if not arm.move_joints(config.INTER):
+    from ..arm.transfers import go_to
+
+    if not go_to(arm, 'inter'):
         raise BakeError('Could not reach INTER.')
 
     if not arm.move_tool_z(depth_m):
@@ -438,7 +440,7 @@ def bake(
 
     log('Returning to INTER...')
     arm.move_tool_z(-depth_m)
-    arm.move_joints(config.INTER)
+    go_to(arm, 'inter')
 
     return EndcapPlan(
         depth_m=float(depth_m),

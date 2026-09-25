@@ -140,10 +140,10 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 
 | Command | Needs |
 |---|---|
-| `laundry move inter` / `home` / `bottom` / `drop` / `retrieve_0..3` | MoveIt |
+| `laundry move inter` / `home` / `bottom` / `drop` / `retrieve_0..3` `[--speed 0.3]` | MoveIt |
 | `laundry move joints J1 .. J7 [--degrees]`, `joint6 DEG`, `joint7 DEG`, `linear M`, `twist M DEG` | MoveIt |
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
-| `laundry plan bake` — solve, check and save the end-scan trajectory (**moves the arm**) | MoveIt |
+| `laundry plan bake [endcap\|transfers\|all]` — solve, check and save the end scan and/or the INTER↔HOME/DROP transfers (**moves the arm**) | MoveIt |
 | `laundry plan replay [--speed 0.3]` — the end scan alone, INTER to INTER | MoveIt |
 | `laundry scan [--save scan.csv] [--end-scan precession\|bottom] [--velocity 0.03 ...]` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` | nothing — plain files |
@@ -207,6 +207,21 @@ The arm gets on and off it with collision-checked straight joint moves, so nothi
 - **`--coverage`** shows how much of the bucket the scan path reaches at all, measured and simulated, and compares scan speeds.
 
 Current numbers and their provenance are in the constants' comments in `perception/detect.py` and in the git log.
+
+## Repeatable moves between poses
+
+Named-pose moves (`laundry move <pose>`, and the scan, grasp and drop stages) go through `arm/transfers.go_to`, which tries three routes in order:
+
+1. **INTER ↔ HOME and INTER ↔ DROP:** a baked path from `scan_plans/transfers.yaml`.
+   - The gripper first backs straight out of the bucket.
+   - Then come straight joint-space segments through one or two intermediate poses, every 1° collision-checked.
+   - The path is chosen to minimise joint travel, weighted toward J1 and J4–J7, which twist the cables.
+   - Going back to INTER replays it in reverse.
+   - J7 turns exactly its direct amount. On the fake controller, the planner had once turned it 536° on DROP → INTER.
+2. **Otherwise:** a straight, collision-checked joint move, which is the minimum twist.
+3. **Only if that collides:** the planner, with a warning.
+
+Re-bake (`laundry plan bake transfers`) after changing INTER, HOME, DROP or the URDF.
 
 ## Frames and offsets
 

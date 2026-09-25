@@ -15,6 +15,7 @@ This module has no ROS dependency and does no I/O at import time, so
 anything - tests included - can import it freely.
 """
 
+import math
 import os
 
 # =============================================================
@@ -226,7 +227,7 @@ JOINT7_MAX_VELOCITY_RAD_S = 2.14
 # Peak joint speed for the planner-free straight joint moves
 # (XArm7Controller.move_joints_linear) and the baked end scan: 45
 # deg/s, well inside every xArm7 joint's limit.
-LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S = 0.785
+LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S = math.radians(45.0)
 
 # =============================================================
 # TOF SENSOR (VL53L0X)

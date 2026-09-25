@@ -16,7 +16,8 @@ import os
 
 import rclpy
 
-from ..config import BOTTOM, INTER
+from ..arm.transfers import go_to
+from ..config import BOTTOM
 
 # Defaults for every scan parameter, shared by scan() and the CLI so
 # the two can never drift apart. Baselines and detection scans MUST
@@ -401,11 +402,9 @@ def scan(
         '========== MOVE TO INTER =========='
     )
 
-    success = arm.move_joints(
-        INTER,
-        velocity=velocity,
-        acceleration=acceleration,
-    )
+    # Baked transfer from HOME/DROP, else a straight checked joint
+    # move, else the planner (arm/transfers.go_to).
+    success = go_to(arm, 'inter')
 
     if not success:
 
@@ -758,7 +757,7 @@ def scan(
         '========== RETURN TO INTER =========='
     )
 
-    success = arm.move_joints(INTER)
+    success = go_to(arm, 'inter')
 
     if not success:
 

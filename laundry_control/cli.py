@@ -15,7 +15,7 @@
     laundry baseline promote scan.csv
     laundry replay scan.csv
     laundry check-flange
-    laundry plan bake [--depth 0.42] [-o scan_plans/endcap.yaml]
+    laundry plan bake [endcap|transfers|all] [--depth 0.42]
     laundry plan replay [--speed 0.3]
     laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
     laundry run [--dry-run]                                 # everything
@@ -340,11 +340,18 @@ def cmd_move(args):
                 acceleration=acceleration,
             )
 
-        else:
+        elif kind == 'joints':
             velocity, acceleration = joint_speed
             ok = arm.move_joints(
                 target, velocity=velocity, acceleration=acceleration
             )
+
+        else:
+            # Named pose: baked transfer, else straight checked joint
+            # move, else the planner (arm/transfers.go_to).
+            from .arm.transfers import go_to
+
+            ok = go_to(arm, kind, time_scale=args.speed)
 
     return 0 if ok else 1
 
@@ -510,51 +517,62 @@ def cmd_check_flange(args):
 
 
 def cmd_plan(args):
-    """Run `laundry plan bake`: solve and save the end-scan trajectory."""
+    """Run `laundry plan bake [endcap|transfers|all]`."""
     import socket
 
+    from .arm import transfers
     from .scan import endcap
 
-    output = args.output or endcap.default_plan_path()
+    speed = math.radians(args.max_joint_speed)
 
     with _RosSession(args=args) as arm:
-        try:
-            plan = endcap.bake(
-                arm,
-                args.depth,
-                max_velocity_rad_s=math.radians(args.max_joint_speed),
-                log=print,
-            )
-        except endcap.BakeError as exc:
-            print(f'Bake failed: {exc}', file=sys.stderr)
-            return 1
+        if args.which in ('transfers', 'all'):
+            try:
+                routes = transfers.bake(arm, log=print)
+            except transfers.BakeError as exc:
+                print(f'Transfer bake failed: {exc}', file=sys.stderr)
+                return 1
 
-    plan.baked_on = socket.gethostname()
-    plan.save(output)
+            path = transfers.default_plan_path()
+            transfers.save(path, routes, speed, baked_on=socket.gethostname())
+            print(f'Saved {path}')
 
-    print(f'Saved {output}')
+        if args.which in ('endcap', 'all'):
+            try:
+                plan = endcap.bake(
+                    arm, args.depth, max_velocity_rad_s=speed, log=print
+                )
+            except endcap.BakeError as exc:
+                print(f'End-scan bake failed: {exc}', file=sys.stderr)
+                return 1
 
-    for alpha, low, high in plan.rings:
-        print(f'  ring alpha={alpha:g} deg: phi {low:+g} .. {high:+g} deg')
+            plan.baked_on = socket.gethostname()
+            output = args.output or endcap.default_plan_path()
+            plan.save(output)
 
-    print(
-        f'  {plan.duration_s:.1f} s, {len(plan.waypoints)} points. Commit it '
-        'so every scan replays the same motion.'
-    )
+            print(f'Saved {output}')
+
+            for alpha, low, high in plan.rings:
+                print(f'  ring alpha={alpha:g} deg: phi {low:+g} .. {high:+g} deg')
+
+            print(f'  {plan.duration_s:.1f} s, {len(plan.waypoints)} points.')
+
+    print('Commit scan_plans/ so every run replays the same motion.')
 
     return 0
 
 
 def cmd_plan_replay(args):
     """Run `laundry plan replay`: the end scan alone, INTER to INTER."""
-    from . import config
     from .scan import endcap
 
     plan = endcap.EndcapPlan.load(args.end_plan or endcap.default_plan_path())
 
+    from .arm.transfers import go_to
+
     with _RosSession(args=args) as arm:
         ok = (
-            arm.move_joints(config.INTER)
+            go_to(arm, 'inter')
             and arm.move_tool_z(plan.depth_m)
             and endcap.run_plan(arm, plan, plan.depth_m, time_scale=args.speed)
         )
@@ -562,7 +580,7 @@ def cmd_plan_replay(args):
         # Always try to come back out, even after a failure part-way.
         arm.move_joints_linear(plan.start, time_scale=args.speed)
         arm.move_tool_z(-plan.depth_m)
-        arm.move_joints(config.INTER)
+        go_to(arm, 'inter')
 
     return 0 if ok else 1
 
@@ -641,7 +659,18 @@ def _build_move_parser(subparsers):
     kinds = move.add_subparsers(dest='move_kind', required=True)
 
     for name in config.named_poses():
-        kinds.add_parser(name, help=f'Move to the recorded {name.upper()} pose.')
+        pose = kinds.add_parser(
+            name, help=f'Move to the recorded {name.upper()} pose.'
+        )
+        pose.add_argument(
+            '--speed',
+            type=float,
+            default=1.0,
+            help=(
+                'Fraction of the baked transfer / straight-move speed, '
+                '(0, 1] (default: 1). Use e.g. 0.3 for first runs.'
+            ),
+        )
 
     joints = kinds.add_parser('joints', help='Move all seven joints.')
     joints.add_argument(
@@ -805,9 +834,13 @@ def build_parser():
     bake = plan_actions.add_parser(
         'bake',
         help=(
-            'Solve, collision-check and save the end-scan trajectory. '
-            'MOVES THE ARM (INTER, in to --depth, back).'
+            'Solve, collision-check and save the end-scan trajectory and/or '
+            'the INTER<->HOME/DROP transfers. MOVES THE ARM.'
         ),
+    )
+    bake.add_argument(
+        'which', nargs='?', choices=('endcap', 'transfers', 'all'),
+        default='all', help='What to bake (default: all).',
     )
     from .scan.pattern import DEFAULT_DEPTH_M
 
@@ -817,7 +850,7 @@ def build_parser():
     )
     bake.add_argument(
         '-o', '--output', type=str, default=None,
-        help='Where to save it (default: <repo>/scan_plans/endcap.yaml).',
+        help='Where to save the end scan (default: <repo>/scan_plans/endcap.yaml).',
     )
     bake.add_argument(
         '--max-joint-speed', type=float, default=45.0,

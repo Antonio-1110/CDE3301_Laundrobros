@@ -134,3 +134,40 @@ def time_path(waypoints, max_velocity_rad_s):
         elapsed += duration
 
     return times, velocities
+
+
+def time_stop_at_each(waypoints, max_velocity_rad_s, step_rad=DEFAULT_CHECK_STEP_RAD):
+    """
+    Densify and time a polyline that comes to rest at every waypoint.
+
+    Returns (dense_waypoints, times, velocities). Each straight
+    segment gets its own minimum-jerk profile from rest to rest, so
+    the arm follows exactly the straight joint-space lines that were
+    collision-checked - no corner-cutting at the vias - at the cost
+    of a brief stop at each one.
+    """
+    waypoints = np.asarray(waypoints, dtype=np.float64)
+
+    dense = [waypoints[:1]]
+    times = [np.zeros(1)]
+    velocities = [np.zeros((1, waypoints.shape[1]))]
+    elapsed = 0.0
+
+    for start, end in zip(waypoints[:-1], waypoints[1:]):
+        if np.abs(end - start).max() < 1e-9:
+            continue
+
+        segment = densify([start, end], step_rad)
+        seg_times, seg_velocities = time_path(segment, max_velocity_rad_s)
+
+        dense.append(segment[1:])
+        times.append(elapsed + seg_times[1:])
+        velocities.append(seg_velocities[1:])
+
+        elapsed += float(seg_times[-1])
+
+    return (
+        np.concatenate(dense),
+        np.concatenate(times),
+        np.concatenate(velocities),
+    )
