@@ -6,13 +6,10 @@ geometry, so the fit can be checked against ground truth rather
 than against another estimate. No ROS, no hardware, no CSVs.
 """
 
-import numpy as np
-import pytest
-
-from laundry_control.bucket_model import (
-    ConeModel,
+from laundry_control.perception.bucket_model import (
     _axis_basis,
     build_baseline_surface,
+    ConeModel,
     fit_bucket_profile,
     fit_cone,
     fit_report,
@@ -22,17 +19,20 @@ from laundry_control.bucket_model import (
     surface_residual,
     to_cylindrical,
 )
+import numpy as np
+import pytest
 
 S_CAP = 0.02
 
 
 def sample_cone(model, n=4000, seed=0, noise_m=0.002, bias=None):
     """
+    Sample points over a cone's lateral surface, optionally biased.
+
     Points scattered over a cone's LATERAL surface, optionally with
     a deterministic theta-dependent radial bias standing in for the
     ToF's incidence-angle error.
     """
-
     rng = np.random.default_rng(seed)
 
     s = rng.uniform(model.s_min + 0.02, model.s_max - 0.02, n)
@@ -55,10 +55,11 @@ def sample_cone(model, n=4000, seed=0, noise_m=0.002, bias=None):
 
 def sample_with_cap(model, n=5000, seed=0, cap_fraction=0.1, noise_m=0.002):
     """
+    Sample the lateral wall plus the flat closed end.
+
     Lateral wall PLUS the flat closed end - the real bucket's
     geometry, and the case a bare cone cannot represent.
     """
-
     rng = np.random.default_rng(seed)
     e1, e2 = _axis_basis(model.axis_dir)
 
@@ -134,8 +135,7 @@ def test_to_cylindrical_round_trips():
 
 
 def test_theta_zero_is_the_top_of_the_bucket():
-    """theta is anchored to world +Z so the grid stays stable."""
-
+    """Theta is anchored to world +Z so the grid stays stable."""
     cone = seed_cone()
     e1, _e2 = _axis_basis(cone.axis_dir)
 
@@ -182,11 +182,12 @@ def test_fit_cone_recovers_known_parameters():
 
 def test_fit_cone_is_robust_to_gross_outliers():
     """
+    A few stray returns must not distort the fitted surface.
+
     The Huber loss is there so a handful of stray returns cannot
     distort the surface. A distorted surface biases EVERY later
     detection, not just the region the outliers came from.
     """
-
     truth = seed_cone()
     points = sample_cone(truth, n=4000, seed=1)
 
@@ -220,8 +221,8 @@ def test_surface_residual_is_zero_on_the_model_surface():
 def test_fit_report_mentions_the_seed_comparison():
     report = fit_report(fit_cone(sample_cone(seed_cone(), n=1000)))
 
-    assert "axis point" in report
-    assert "taper" in report
+    assert 'axis point' in report
+    assert 'taper' in report
 
 
 # ---------------------------------------------------------------
@@ -237,11 +238,7 @@ def test_profile_finds_the_closed_end():
 
 
 def test_profile_omits_a_cap_the_scan_never_reached():
-    """
-    A wall-only scan must not have a closed end invented for it out
-    of a few stray returns.
-    """
-
+    """A wall-only scan must not get a closed end invented for it."""
     profile = fit_bucket_profile(sample_cone(seed_cone(), n=5000))
 
     assert not profile.has_cap
@@ -250,13 +247,14 @@ def test_profile_omits_a_cap_the_scan_never_reached():
 
 def test_cap_points_do_not_drag_the_cone_fit():
     """
+    Cap points must not drag the lateral cone fit.
+
     Regression: the flat disc sits far inside the wall radius, so a
     lateral-surface fit sees it as a mass of outliers. Measured
     before the profile split, with a fifth of the points on the
     cap, r0 came out 9mm low and the taper went 0.104 -> 0.137 -
     a distortion applied to the WHOLE bucket, not just the cap.
     """
-
     truth = seed_cone()
 
     naive = fit_cone(sample_with_cap(truth, n=5000, cap_fraction=0.20))
@@ -344,7 +342,6 @@ def test_closed_end_does_not_inflate_sigma():
     grid the cap is spread along u like any other surface, so its
     sigma is just noise again.
     """
-
     truth = seed_cone()
     scans = [
         sample_with_cap(truth, n=5000, seed=i, cap_fraction=0.1)
@@ -358,17 +355,18 @@ def test_closed_end_does_not_inflate_sigma():
     occupied = surface.count > 0
     worst = surface.offset_sigma[occupied].max()
 
-    assert worst < 0.006, f"worst cell sigma {worst * 1000:.1f}mm"
+    assert worst < 0.006, f'worst cell sigma {worst * 1000:.1f}mm'
     assert surface.pooled_sigma_m < 0.004
 
 
 def test_baseline_surface_absorbs_a_deterministic_bias():
     """
+    A cos(2*theta) bias must land in the residual field in full.
+
     A cos(2*theta) radial bias is exactly the kind of systematic
     sensor artefact the offset field exists to soak up - it is not
     in the cone's own span, so the cone cannot absorb it.
     """
-
     truth = seed_cone()
 
     def bias(theta):
@@ -395,6 +393,8 @@ def test_baseline_surface_absorbs_a_deterministic_bias():
 
 def test_cos_theta_bias_is_degenerate_with_the_axis_position():
     """
+    A cos(theta) bias is absorbed by the axis, not the residual field.
+
     Documents a real limitation rather than a behaviour anyone
     chose: a cos(theta) radial bias - the signature of a lateral
     boresight/extrinsic error - IS a lateral shift of the axis, so
@@ -405,7 +405,6 @@ def test_cos_theta_bias_is_degenerate_with_the_axis_position():
     the bucket pose or to the sensor mounting from the fit alone.
     See bucket_model.fit_report.
     """
-
     truth = seed_cone()
 
     def bias(theta):
@@ -432,13 +431,14 @@ def test_cos_theta_bias_is_degenerate_with_the_axis_position():
 
 def test_empty_cells_are_still_judgeable():
     """
+    Cells with no baseline coverage must still be judged.
+
     The old detector gave points with no baseline neighbour -inf
     and could never flag them, so every gap in the scan path was a
     place laundry could hide. Empty cells must still return a
     usable expectation - just a wider sigma and a low-confidence
     flag.
     """
-
     truth = seed_cone()
 
     points = sample_cone(truth, n=4000)
@@ -470,17 +470,18 @@ def test_occupancy_summary_reports_counts_and_cap_state():
 
     summary = occupancy_summary(surface)
 
-    assert "Occupancy" in summary
-    assert "closed end" in summary
+    assert 'Occupancy' in summary
+    assert 'closed end' in summary
 
 
 def test_cell_area_vanishes_at_the_cap_centre():
     """
+    Cells at the closed-end centre must carry almost no area.
+
     At u = 0 every theta is the same physical point, so those cells
     carry essentially no area and must not contribute volume as if
     they were full-width rings.
     """
-
     surface = build_baseline_surface(
         [sample_with_cap(seed_cone(), n=5000, seed=i) for i in range(3)]
     )
