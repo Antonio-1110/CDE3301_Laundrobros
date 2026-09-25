@@ -54,8 +54,8 @@ from ..perception.synthetic import (
 INTER_BORESIGHT = np.array([-0.011, 0.009, -1.000])
 BOTTOM_BORESIGHT = np.array([-0.019, -0.673, -0.739])
 
-# Measured on the real baselines: 14 inward strokes in ~15.5s at the
-# default velocity scaling, sampled at 20Hz.
+# Measured on the real baselines (velocity 0.1): 14 inward strokes in
+# ~15.5s, sampled at 20Hz. path_for_velocity() scales it.
 DEFAULT_SAMPLES_PER_STROKE = 22
 # Per move of the detour (entry tilt, stationary sweep, exit tilt):
 # roughly 300 of a real scan's ~1000 readings between the three.
@@ -105,6 +105,10 @@ class ScanPath:
     sweep_centre_deg: float = 0.0
     bottom_detour: bool = True
     samples_per_stroke: int = DEFAULT_SAMPLES_PER_STROKE
+    # Where in its sampling interval each reading lands (0..1). Real
+    # scans are not phase-locked to the strokes, so repeated scans
+    # sample slightly different spots; vary this to mimic that.
+    sample_phase: float = 0.5
 
 
 def _stroke_beams(path):
@@ -114,7 +118,10 @@ def _stroke_beams(path):
     centre = np.deg2rad(path.sweep_centre_deg)
 
     strokes = int(round(path.depth_m / path.step_m))
-    progress = (np.arange(path.samples_per_stroke) + 0.5) / path.samples_per_stroke
+    progress = (
+        (np.arange(path.samples_per_stroke) + path.sample_phase)
+        / path.samples_per_stroke
+    )
 
     origins = []
     directions = []
@@ -215,36 +222,42 @@ def _detour_beams(path, half, centre, samples=DEFAULT_SAMPLES_PER_BOTTOM_SWEEP):
     )
 
 
-# The J7 rate the current path runs at (150 deg per ~1.1s stroke).
-# Wider sweeps are assumed to keep it - the strokes slow down rather
-# than spin J7 faster - so samples and duration scale with the sweep.
-CURRENT_DEG_PER_SAMPLE = 150.0 / DEFAULT_SAMPLES_PER_STROKE
+# 3cm stroke durations measured on the fake controller, by scan
+# velocity scaling. At the ToF's fixed 20Hz they set how many readings
+# each stroke gets.
+STROKE_DURATION_S = {0.1: 0.95, 0.05: 1.69, 0.03: 2.68, 0.02: 3.91}
+
+# Per-stroke planning/execution overhead on top of the motion itself.
+STROKE_OVERHEAD_S = 0.15
 
 
-def path_for_sweep(sweep_deg, **kwargs):
-    """Return a ScanPath with stroke sampling scaled to keep J7's rate."""
-    samples = max(
-        DEFAULT_SAMPLES_PER_STROKE,
-        int(round(sweep_deg / CURRENT_DEG_PER_SAMPLE)),
-    )
-    return ScanPath(sweep_deg=sweep_deg, samples_per_stroke=samples, **kwargs)
+def path_for_velocity(velocity, rate_hz=20.0, **kwargs):
+    """Return a ScanPath sampled as densely as a scan at `velocity` is."""
+    samples = int(round(STROKE_DURATION_S[velocity] * rate_hz))
+    return ScanPath(samples_per_stroke=samples, **kwargs)
 
 
 def estimated_duration_s(path, rate_hz=20.0):
-    """Return a rough scan duration: 20Hz samples plus the detour."""
+    """Return a rough scan duration from the path's sampling."""
     strokes = 2 * int(round(path.depth_m / path.step_m))
-    detour = 3 * DEFAULT_SAMPLES_PER_BOTTOM_SWEEP * path.sweep_deg / 150.0
-    return (strokes * path.samples_per_stroke + detour) / rate_hz
+    per_stroke = path.samples_per_stroke / rate_hz + STROKE_OVERHEAD_S
+    detour = 3 * DEFAULT_SAMPLES_PER_BOTTOM_SWEEP / rate_hz / 2.0
+    return strokes * per_stroke + detour
 
 
+# The upper part of the bucket is deliberately out of scope (the
+# focus is laundry lying at the bottom), so candidates vary speed and
+# step, not the sweep - which stays floor-centred at 150 deg.
 CANDIDATE_PATHS = {
-    'current (150deg, 3cm step)': ScanPath(),
-    'outward strokes interleaved': ScanPath(outward_phase=0.5),
-    'step 2cm': ScanPath(step_m=0.02),
-    'sweep 210deg': path_for_sweep(210.0),
-    'sweep 270deg': path_for_sweep(270.0),
-    'sweep 360deg': path_for_sweep(360.0),
+    'velocity 0.1 (old default)': path_for_velocity(0.1),
+    'velocity 0.05': path_for_velocity(0.05),
+    'velocity 0.03 (default)': path_for_velocity(0.03),
+    'velocity 0.03, step 2cm': path_for_velocity(0.03, step_m=0.02),
 }
+
+# Regions the scan is meant to cover. The rest is reported for
+# completeness, marked out of scope.
+FOCUS_REGIONS = ('floor', 'lower_wall', 'closed_end_lower')
 
 
 def cast_rays(origins, directions, profile, step_m=0.001):
@@ -384,7 +397,14 @@ def coverage_by_region(profile, rays):
         result[region] = float(seen[band].mean()) if band.any() else float('nan')
 
     if on_cap.any():
-        result['closed_end'] = float(seen[on_cap].mean())
+        # Split at the axis: laundry settles on the lower half, and the
+        # scan (by design) never looks at the upper half, so a single
+        # closed-end figure would understate what matters.
+        e1, _e2 = _axis_basis(profile.cone.axis_dir)
+        above_axis = (points - profile.cone.axis_point) @ e1 >= 0.0
+
+        result['closed_end_lower'] = float(seen[on_cap & ~above_axis].mean())
+        result['closed_end_upper'] = float(seen[on_cap & above_axis].mean())
 
     result['whole_bucket'] = float(seen.mean())
 

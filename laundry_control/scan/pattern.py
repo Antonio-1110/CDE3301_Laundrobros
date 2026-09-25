@@ -24,8 +24,18 @@ from ..config import BOTTOM, INTER
 DEFAULT_DEPTH_M = 0.42
 DEFAULT_STEP_M = 0.03
 DEFAULT_SWEEP_DEG = 150.0
-DEFAULT_VELOCITY = 0.1
-DEFAULT_ACCELERATION = 0.1
+#
+# Stroke velocity/acceleration scaling: 0.03, down from 0.1. Measured
+# on the fake controller, a 3cm stroke takes 0.95s at 0.1 and 2.68s
+# at 0.03, so at the ToF's fixed 20Hz a scan gets ~2.1x the readings
+# (~94s instead of ~46s). It also brings the J7 twist - which MoveIt
+# does not rate-limit (config.JOINT7_MAX_VELOCITY_RAD_S) - from ~157
+# deg/s, above J7's 123 deg/s limit, down to ~56 deg/s. In simulation
+# the denser scan cut the grasp point's median error ~1.0 -> 0.65cm;
+# 0.02 gained nothing more. The committed baselines were recorded at
+# 0.1: re-collect them at this speed (HARDWARE_TESTS.md D).
+DEFAULT_VELOCITY = 0.03
+DEFAULT_ACCELERATION = 0.03
 DEFAULT_ROTATION_VELOCITY = 0.5
 DEFAULT_ROTATION_ACCELERATION = 0.5
 DEFAULT_CARTESIAN_STEP_M = 0.005

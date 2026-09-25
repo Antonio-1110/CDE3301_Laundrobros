@@ -438,6 +438,11 @@ def report_synthetic(baseline_scans, detect_kwargs, args):
     trials = synthetic_eval.run_campaign(
         baseline_scans,
         detect_kwargs=detect_kwargs,
+        regions=(
+            list(synthetic_eval.REGIONS)
+            if args.all_regions
+            else list(synthetic_eval.FOCUS_REGIONS)
+        ),
         per_region=args.per_region,
         model=args.sensor_model,
         reflectivity=args.reflectivity,
@@ -458,16 +463,22 @@ def report_coverage(surface, baseline_scans):
     from ..scan import coverage
     from .synthetic import reconstruct_rays
 
-    def line(label, result, seconds=None):
+    def line(label, result, seconds=None, points=None):
         cells = '  '.join(
             f'{name}={100 * value:3.0f}%' for name, value in result.items()
         )
         tail = f'  ~{seconds:.0f}s' if seconds else ''
+        tail += f', {points} readings' if points else ''
         print(f'  {label:30s} {cells}{tail}')
 
     print('=' * 64)
     print('SCAN COVERAGE - share of the bucket surface inside a beam footprint')
     print('=' * 64)
+    print(
+        '  Focus: ' + ', '.join(coverage.FOCUS_REGIONS)
+        + '. upper_wall/ceiling are out of scope by design.'
+    )
+    print()
 
     line(
         'measured, one scan',
@@ -481,7 +492,10 @@ def report_coverage(surface, baseline_scans):
     )
 
     print()
-    print('  Simulated (validate: "current" should match "one scan" above):')
+    print(
+        '  Simulated (validate: "velocity 0.1" should match "one scan" '
+        'above, if the baselines were taken at 0.1):'
+    )
 
     for label, path in coverage.CANDIDATE_PATHS.items():
         rays = coverage.simulate_path(path, surface.profile)
@@ -489,7 +503,15 @@ def report_coverage(surface, baseline_scans):
             label,
             coverage.coverage_by_region(surface.profile, rays),
             coverage.estimated_duration_s(path),
+            len(rays.range_m),
         )
+
+    print()
+    print(
+        '  Speed barely changes AREA coverage (the ~25 deg cone already '
+        'bridges the gaps between readings); what it buys is more '
+        'readings per area.'
+    )
 
     print()
 
@@ -540,6 +562,15 @@ def add_evaluate_arguments(parser):
         help=(
             'Inject synthetic laundry into the held-out empty scans and '
             'report detection rate / localisation by size and region.'
+        ),
+    )
+
+    parser.add_argument(
+        '--all-regions',
+        action='store_true',
+        help=(
+            'Also place synthetic items on the upper wall and ceiling '
+            '(out of scope by default: the scan targets the bottom).'
         ),
     )
 

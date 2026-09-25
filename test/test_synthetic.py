@@ -133,12 +133,33 @@ def test_wider_sweep_covers_more_of_the_bucket(surface):
     )
     wide = coverage.coverage_by_region(
         surface.profile,
-        coverage.simulate_path(coverage.path_for_sweep(360.0), surface.profile),
+        coverage.simulate_path(
+            coverage.ScanPath(sweep_deg=360.0, samples_per_stroke=53),
+            surface.profile,
+        ),
     )
 
     assert narrow['ceiling'] < 0.05
     assert wide['ceiling'] > 0.5
     assert wide['whole_bucket'] > narrow['whole_bucket']
+
+
+def test_slower_scan_is_denser_but_covers_the_same_area(surface):
+    fast = coverage.simulate_path(
+        coverage.path_for_velocity(0.1), surface.profile
+    )
+    slow = coverage.simulate_path(
+        coverage.path_for_velocity(0.03), surface.profile
+    )
+
+    assert len(slow.range_m) > 1.8 * len(fast.range_m)
+
+    fast_cover = coverage.coverage_by_region(surface.profile, fast)
+    slow_cover = coverage.coverage_by_region(surface.profile, slow)
+
+    for region in coverage.FOCUS_REGIONS:
+        if region in fast_cover:
+            assert slow_cover[region] >= fast_cover[region] - 0.02
 
 
 def test_campaign_scores_detections(surface, simulated_scan):

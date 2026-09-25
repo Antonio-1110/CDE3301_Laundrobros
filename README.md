@@ -143,7 +143,7 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry move inter` / `home` / `bottom` / `drop` / `retrieve_0..3` | MoveIt |
 | `laundry move joints J1 .. J7 [--degrees]`, `joint6 DEG`, `joint7 DEG`, `linear M`, `twist M DEG` | MoveIt |
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
-| `laundry scan [--save scan.csv] [--sweep 150 --velocity 0.1 ...]` | rig, or `--fake-hardware --scan-from X.csv` |
+| `laundry scan [--save scan.csv] [--velocity 0.03 --step 0.03 ...]` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` | nothing — plain files |
 | `laundry grasp targets.json [--drop] [--dry-run]` | rig, or `--fake-hardware` |
 | `laundry run [--dry-run]` — scan → detect → grasp → drop | rig, or `--fake-hardware --scan-from X.csv` |
@@ -187,10 +187,13 @@ The bucket and table in RViz are only as accurate as our URDF edits. The detecto
 3. **Filter clusters.** Clusters must pass extent and volume gates. Clusters in thinly-sampled cells must also peak at ≥ 7σ. Each cluster reports its peak σ, and a grasp point: the mean of its top-quartile-intrusion points.
 4. **Plan the grasp.** `grasp/plan.py` sinks the grasp point into the pile by as much room as the bucket model says exists underneath, then checks reachability with a plan-only probe.
 
+The scan deliberately covers the **bottom** of the bucket: the floor, the lower walls and the lower half of the closed end. The 150° J7 sweep is centred on the floor. It runs at velocity 0.03 (was 0.1) for denser data and a J7 speed within its limit.
+
 `laundry evaluate` measures all of this:
 - **Leave-one-out** over the empty baselines: every reported cluster is a false positive.
 - **`--synthetic`** injects known items into real empty scans, respecting the ToF's ~25° cone. It reports recall by size and region, and localisation error.
-- **`--coverage`** shows how much of the bucket the scan path reaches at all.
+- **`--synthetic`** places items on the bottom regions by default; `--all-regions` adds the upper wall and ceiling.
+- **`--coverage`** shows how much of the bucket the scan path reaches at all, measured and simulated, and compares scan speeds.
 
 Current numbers and their provenance are in the constants' comments in `perception/detect.py` and in the git log.
 

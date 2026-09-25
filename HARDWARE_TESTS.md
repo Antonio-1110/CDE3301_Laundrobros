@@ -10,7 +10,9 @@ source ~/ros2_ws/src/CDE3301_Laundrobros/env.sh
 
 **Paste back:** each test's **Paste back** line says what to send. For scans, also send the CSV file.
 
-**Safety:** keep a hand on the e-stop for every motion test, especially 10–12, which drive J7 further than the old path ever did.
+**Safety:** keep a hand on the e-stop for every motion test.
+
+**Scan speed:** the default scan velocity is now **0.03** (was 0.1), but the committed `baseline_scans/` were recorded at 0.1. Tests 6–8 therefore also check that the old baselines still judge a slower scan correctly. Section D then replaces them with baselines taken at the new speed.
 
 ---
 
@@ -116,47 +118,54 @@ head -1 scan_records/hw_empty_01.csv
 - **Paste back:** the header line.
 - **Verifies:** new scans include `raw_range,ox,oy,oz,j7`. The 8 committed baselines predate these columns, so the synthetic evaluation currently has to rebuild each ray from the scan geometry. Real ray columns replace that approximation.
 
-## D. Wider sweep (the coverage fix)
+## D. Slower, denser scan
 
-`laundry evaluate --coverage` shows why this matters. The current 150° sweep is centred on the floor and never sees the top ~120° of the bucket (0% of the ceiling, 3–11% of the upper wall). In simulation, a 360° sweep raises whole-bucket coverage from 45% to 80%, and the ceiling to 76%.
+**Why 0.03:**
+- **Density:** the ToF samples at a fixed 20 Hz, so a slower stroke gets more readings. On the fake controller, a 3 cm stroke takes 0.95 s at 0.1 and 2.68 s at 0.03, giving ~2.1× the readings for a ~94 s scan.
+- **J7 speed:** the J7 twist bypasses MoveIt's velocity limits. At 0.1 it ran at ~157°/s, above J7's 123°/s limit; at 0.03 it's ~56°/s.
+- **Localisation:** in simulation, the grasp point's median error dropped from ~1.0 to ~0.65 cm.
+- **Coverage is unchanged:** `laundry evaluate --coverage` shows the same area covered, because the cone footprint already bridges the gaps between readings. The upper wall and ceiling stay out of scope by design.
 
-**The main hardware risk is cable wrap.** The ToF and servo cables run past J7, and J7 will turn up to 360° in each stroke. So step up the sweep, and check the cables after each run. `--velocity 0.02` keeps J7 under its 123°/s limit; at the current default of 0.1 it already runs at ~157°/s.
-
-**10. 210° sweep.**
+**10. One slow empty scan, compared with a fast one.**
 
 ```bash
-laundry scan --sweep 210 --velocity 0.02 --acceleration 0.02 --save scan_records/hw_sweep210.csv 2>&1 | grep -E "COMPLETE|failed|twist runs"
+time laundry scan --save scan_records/hw_empty_slow_01.csv 2>&1 | grep -cE "twist runs|failed"; wc -l scan_records/hw_empty_01.csv scan_records/hw_empty_slow_01.csv
 ```
 
-- **Paste back:** the output, the CSV, and "cables OK / not OK".
-- **Verifies:** J7 range, cable slack, and coverage (I'll measure it from the CSV).
+- **Paste back:** the time, the count (should be 0), the two line counts, plus the CSV.
+- **Note:** test 6 already ran at 0.03 as well. If you want the fast comparison, rerun test 6 with `--velocity 0.1 --acceleration 0.1`.
+- **Verifies:** the slow scan completes without J7-rate warnings, and gives roughly twice the points.
 
-**11. 270° sweep.** Only if test 10 was fine; same command with `--sweep 270` and `--save scan_records/hw_sweep270.csv`.
-
-- **Paste back:** the same as test 10.
-
-**12. 360° sweep.** Only if test 11 was fine; same command with `--sweep 360` and `--save scan_records/hw_sweep360.csv`.
-
-- **Paste back:** the same as test 10, plus the scan's wall-clock time (`time laundry scan ...`).
-
-**13. Baselines for the chosen path.** The noise field is path-specific, so a new sweep needs its own baselines. Use an empty bucket and an open gripper, with the sweep you settled on.
+**11. Baselines at the new speed.** Empty bucket, open gripper; takes about 13 minutes.
 
 ```bash
-laundry baseline collect --count 8 --dest baseline_scans_sweep360 -- --sweep 360 --velocity 0.02 --acceleration 0.02
-laundry evaluate --baseline baseline_scans_sweep360 --coverage --synthetic
+laundry baseline collect --count 8 --dest baseline_scans_v003 && laundry evaluate --baseline baseline_scans_v003 --sweep --synthetic --coverage
 ```
 
 - **Paste back:** the evaluate output, plus the 8 CSVs.
-- **Verifies:** false positives and coverage for the new path. If both look right, it replaces `baseline_scans/`.
+- **Verifies:**
+  - No false clusters in the leave-one-out.
+  - How recall, sigma and occupancy compare with the 0.1 baselines (`laundry evaluate --synthetic --coverage` on `baseline_scans/`, which I can run here).
+  - These scans carry the real ray columns, so the synthetic evaluation stops depending on the rebuilt rays.
+- **If this looks right:** `baseline_scans_v003` replaces `baseline_scans/` (I'll do the swap in a commit), and every later test uses it.
+
+**12. Optional: 2 cm step.**
+
+```bash
+laundry scan --step 0.02 --save scan_records/hw_empty_step2.csv
+```
+
+- **Paste back:** the CSV and the time.
+- **Why it's optional:** in simulation it adds 43% more readings for no extra area coverage (~127 s per scan). Worth it only if test 11 shows cells still thinly sampled.
 
 ## E. Grasping
 
-**14. Grasp offset (measure by hand).** `config.GRIPPER_OFFSET_Z = 0.15` is reported, not verified. It's the distance along link7 +Z (at INTER, horizontally into the bucket) from the flange face to the point where the claw closes.
+**13. Grasp offset (measure by hand).** `config.GRIPPER_OFFSET_Z = 0.15` is reported, not verified. It's the distance along link7 +Z (at INTER, horizontally into the bucket) from the flange face to the point where the claw closes.
 
 - **Paste back:** the distance in cm.
 - **Also measure** the ToF sensor's offset from the flange axis (7.75 cm expected) and its distance forward of the flange face (2.8 cm expected). The old README had these two swapped relative to the code; the code's values are the ones in use.
 
-**15. Dry run with one item.** Put a small towel on the floor, mid-depth.
+**14. Dry run with one item.** Put a small towel on the floor, mid-depth.
 
 ```bash
 laundry run --dry-run --save scan_records/hw_towel_dry.csv 2>&1 | grep -A12 "Found"
@@ -165,7 +174,7 @@ laundry run --dry-run --save scan_records/hw_towel_dry.csv 2>&1 | grep -A12 "Fou
 - **Paste back:** the output, the CSV, and a photo.
 - **Verifies:** detection on real cloth. The printed `grasp=(...)` point should sit on the towel; say how far off it looks.
 
-**16. Full retrieval.**
+**15. Full retrieval.**
 
 ```bash
 laundry run --save scan_records/hw_towel_run.csv 2>&1 | grep -vE "joint[0-9]:|Joint-space target"
@@ -178,7 +187,7 @@ laundry run --save scan_records/hw_towel_run.csv 2>&1 | grep -vE "joint[0-9]:|Jo
 
 ## F. Real-cloth validation scans I need
 
-Everything detection-related is currently tuned on synthetic items injected into real empty scans. These scans check it against real cloth. They all use the **current** path and `baseline_scans/`, since those baselines exist. Take them before changing the sweep.
+Everything detection-related is currently tuned on synthetic items injected into real empty scans. These scans check it against real cloth. Take them **after test 11**, at the default speed (0.03), so they match the new baselines.
 
 **How to take each one:**
 
@@ -205,7 +214,7 @@ Everything detection-related is currently tuned on synthetic items injected into
 | 7 | `val_sock_dark_floor` | sock, **black** | same spot as 6 | dark fabric absorbs IR; the synthetic model assumes ~0.3 reflectivity |
 | 8 | `val_sock_dark_wall` | black sock | lower wall (4 or 8), 30 cm deep | small + dark + wall |
 | 9 | `val_cloth_flat_floor` | handkerchief / thin cloth, laid flat | floor (6), 20 cm deep | the hardest case (synthetic recall ~40%) |
-| 10 | `val_towel_upper_wall` | small towel | upper wall (2 or 10), 25 cm deep | the scan barely sees here: the coverage prediction says this should mostly be MISSED |
+| 10 | `val_towel_closed_end_mid` | small towel | against the closed end at axis height (3 or 9 o'clock) | only ~50% of the closed end's lower half is covered, and the gap is this middle band; checks whether it matters in practice |
 | 11 | `val_two_items` | towel + sock | towel floor 20 cm, sock lower wall 35 cm | two clusters, correctly ranked |
 | 12 | `val_towel_floor_mid_b` | as 2 | as 2, item re-placed | repeatability of detection and grasp point |
 

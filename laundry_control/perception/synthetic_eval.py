@@ -58,6 +58,11 @@ REGIONS = {
     'closed_end': None,
 }
 
+# What the scan is meant to cover: laundry lying at the bottom. The
+# upper wall and ceiling are out of scope by design; `--all-regions`
+# includes them anyway.
+FOCUS_REGIONS = ('floor', 'lower_wall', 'closed_end')
+
 MATCH_MARGIN_M = 0.03
 
 
@@ -175,7 +180,7 @@ def run_campaign(
     """
     detect_kwargs = dict(detect_kwargs or {})
     sizes = sizes or list(ITEM_SIZES)
-    regions = regions or list(REGIONS)
+    regions = regions or list(FOCUS_REGIONS)
 
     rng = np.random.default_rng(seed)
 
