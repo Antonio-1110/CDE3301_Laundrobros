@@ -229,6 +229,11 @@ def run_preplanned(arm, gripper, recorded=False, limit=None, time_scale=1.0):
         if stale:
             print(f'WARNING: {stale}')
 
+        changed = retrieve_grid.grid_mismatch()
+
+        if changed:
+            print(f'WARNING: {changed}')
+
         grabs = grabs[:limit] if limit else grabs
 
         print(f'Sensorless sweep over {len(grabs)} generated grab(s).')

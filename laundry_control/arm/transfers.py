@@ -312,10 +312,7 @@ def bake(arm, targets=None, log=print):
     failures = {}
 
     for name in targets:
-        extra = (
-            config.BAKE_GRIPPER_CLEARANCE_M if name in OUTSIDE_TARGETS
-            else config.GRIPPER_PADDING_M
-        )
+        extra = expected_gripper_clearance(name)
 
         scene.set_padding(
             arm, route_arm_padding(name), {'gripper_link': extra}
@@ -397,7 +394,7 @@ def save(
                 'padding_m': {
                     'arm_links': float(route_arm_padding(name)),
                     'gripper': float(
-                        clearances.get(name, config.GRIPPER_PADDING_M)
+                        clearances.get(name, expected_gripper_clearance(name))
                     ),
                 },
             }
@@ -460,18 +457,51 @@ def baked_scene(path=None):
     return '' if document is None else str(document.get('scene', ''))
 
 
-def baked_arm_paddings(path=None):
-    """Return {target: arm-link padding its route was baked with}."""
+def expected_gripper_clearance(name):
+    """Return the gripper padding a route to `name` should be baked with."""
+    return float(
+        config.BAKE_GRIPPER_CLEARANCE_M if name in OUTSIDE_TARGETS
+        else config.GRIPPER_PADDING_M
+    )
+
+
+def padding_mismatches(path=None):
+    """
+    Return {route: explanation} for routes baked with other padding.
+
+    Compares what each route recorded against what config asks for now
+    (route_arm_padding, expected_gripper_clearance). Replays are
+    re-checked under the CURRENT arm padding, so a route baked with
+    less may now be refused; one baked with more, or with a different
+    gripper clearance, still runs but is not what a fresh bake gives.
+    """
     document = _read(path)
 
     if document is None:
         return {}
 
-    return {
-        name: float(route['padding_m']['arm_links'])
-        for name, route in document['routes'].items()
-        if 'padding_m' in route
-    }
+    mismatches = {}
+
+    for name, route in document['routes'].items():
+        recorded = route.get('padding_m', {})
+        wanted = {
+            'arm_links': route_arm_padding(name),
+            'gripper': expected_gripper_clearance(name),
+        }
+
+        changed = [
+            f'{part} {recorded.get(part, 0.0) * 100:g} -> {value * 100:g} cm'
+            for part, value in wanted.items()
+            if abs(recorded.get(part, 0.0) - value) > 1e-9
+        ]
+
+        if changed:
+            mismatches[name] = (
+                'baked with other padding than config now sets ('
+                + ', '.join(changed) + '); re-bake: laundry plan bake transfers'
+            )
+
+    return mismatches
 
 
 def _at(joints, pose):
@@ -539,20 +569,21 @@ def go_to(
 
     1. A baked transfer (see route_for), re-checked against the
        current planning scene, then replayed exactly - under the
-       arm-link padding it was baked with (arm_paddings, read from
-       the file by default; the smaller one when two routes are
-       chained through INTER).
+       arm-link padding config sets for it now (route_arm_padding;
+       the smaller one when two routes are chained through INTER).
+       Routes baked with other padding are warned about.
     2. Otherwise a straight, collision-checked joint move.
     3. Only if that would collide: the planner (move_joints), with a
        warning, since its route is not repeatable.
     """
     stamp = None
+    mismatches = {}
 
     if routes is None:
         routes, baked_velocity = load()
         max_velocity_rad_s = max_velocity_rad_s or baked_velocity
         stamp = baked_scene()
-        arm_paddings = baked_arm_paddings()
+        mismatches = padding_mismatches()
 
     max_velocity_rad_s = (
         max_velocity_rad_s or config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S
@@ -567,11 +598,29 @@ def go_to(
     route = route_for(current, target_name, routes)
 
     if route is not None:
-        used = (_where(current, routes), target_name.lower())
+        used = [
+            name for name in (_where(current, routes), target_name.lower())
+            if name in routes
+        ]
+
+        for name in used:
+            if name in mismatches:
+                arm.get_logger().warning(
+                    f'Route to {name.upper()} {mismatches[name]}',
+                    throttle_duration_sec=60.0,
+                )
+
+        # Checked under the arm padding config asks for NOW (arm_paddings
+        # overrides it, for tests), so raising OBSTACLE_PADDING_M is
+        # enforced on routes baked before - they are refused if they no
+        # longer keep it - rather than replayed at their old clearance.
+        wanted = dict(
+            {name: route_arm_padding(name) for name in used},
+            **(arm_paddings or {}),
+        )
         padding = min(
             [config.OBSTACLE_PADDING_M]
-            + [(arm_paddings or {}).get(name, config.OBSTACLE_PADDING_M)
-               for name in used]
+            + [wanted.get(name, config.OBSTACLE_PADDING_M) for name in used]
         )
 
         return _replay(

@@ -526,11 +526,20 @@ def run_plan(arm, plan, depth_m, time_scale=1.0):
     if stale:
         arm.get_logger().warning(stale)
 
+    if abs(plan.padding_m - config.ENDCAP_PADDING_M) > 1e-9:
+        arm.get_logger().warning(
+            f'The end scan was baked with {plan.padding_m * 100:g} cm arm '
+            f'padding; config.ENDCAP_PADDING_M is now '
+            f'{config.ENDCAP_PADDING_M * 100:g} cm. It is checked under the '
+            f'new value. Re-bake: laundry plan bake endcap --depth '
+            f'{plan.depth_m:.3f}'
+        )
+
     # The plan was collision-checked when it was baked - possibly on
     # another machine, against an older bucket pose. Re-check
     # every state against the planning scene loaded NOW, under the
     # padding it was baked with, before the arm moves at all.
-    arm.set_arm_padding(plan.padding_m)
+    arm.set_arm_padding(config.ENDCAP_PADDING_M)
 
     try:
         bad = arm.first_invalid_state(plan.waypoints)

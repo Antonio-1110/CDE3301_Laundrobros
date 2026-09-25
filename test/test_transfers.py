@@ -90,10 +90,35 @@ def test_saved_routes_record_scene_and_paddings(tmp_path):
     )
 
     assert transfers.baked_scene(path) == scene.signature()
-    assert transfers.baked_arm_paddings(path) == {
-        'drop': config.OBSTACLE_PADDING_M,
-        'bottom': config.ROUTE_ARM_PADDING_M['bottom'],
-    }
+    assert transfers.padding_mismatches(path) == {}
+
+
+def test_padding_changes_are_reported(tmp_path, monkeypatch):
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(path, {'drop': list(ROUTES['drop'])}, 0.7)
+
+    monkeypatch.setattr(config, 'OBSTACLE_PADDING_M', 0.05)
+
+    report = transfers.padding_mismatches(path)
+    assert set(report) == {'drop'}
+    assert 'arm_links 3 -> 5 cm' in report['drop']
+
+
+def test_replay_is_checked_under_the_current_padding(monkeypatch):
+    monkeypatch.setattr(config, 'OBSTACLE_PADDING_M', 0.05)
+    arm = _StubArm(INTER)
+
+    # Routes supplied directly carry no file; the padding comes from
+    # config, so the raised value is what the route is checked under.
+    assert transfers.go_to(arm, 'drop', routes=ROUTES, max_velocity_rad_s=0.7)
+    assert arm.calls[0][0] == 'baked'  # 5 cm is config now: no switch needed
+
+    monkeypatch.setattr(config, 'ROUTE_ARM_PADDING_M', {'drop': 0.04})
+    arm = _StubArm(INTER)
+    assert transfers.go_to(arm, 'drop', routes=ROUTES, max_velocity_rad_s=0.7)
+    assert [c for c in arm.calls if c[0] == 'padding'] == [
+        ('padding', 0.04), ('padding', 0.05)
+    ]
 
 
 def test_missing_file_means_no_routes(tmp_path):

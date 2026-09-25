@@ -116,3 +116,14 @@ def test_saved_grabs_become_named_poses(tmp_path, monkeypatch):
     assert config.get_named_pose('grab_01') == [0.5] * 7
     grabs, stamp = retrieve_grid.load(str(path))
     assert [g['name'] for g in grabs] == ['grab_01'] and stamp
+
+
+def test_a_changed_grid_is_reported(tmp_path, monkeypatch):
+    path = str(tmp_path / 'retrieve.yaml')
+    grab = dict(_grab('grab_01', 0.5), tilt_deg=0.0, contact=[0.1, -0.4, 0.3])
+    retrieve_grid.save([grab], path=path)
+
+    assert retrieve_grid.grid_mismatch(path) is None
+
+    monkeypatch.setitem(config.RETRIEVE_GRID, 'clearance_m', 0.02)
+    assert 'clearance_m' in retrieve_grid.grid_mismatch(path)

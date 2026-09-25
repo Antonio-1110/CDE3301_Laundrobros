@@ -791,7 +791,7 @@ def cmd_scene(args):
 
         routes, _speed = transfers.load()
         stamp = transfers.baked_scene()
-        paddings = transfers.baked_arm_paddings()
+        mismatches = transfers.padding_mismatches()
 
         print('\nBaked transfers from INTER (scan_plans/transfers.yaml):')
 
@@ -813,7 +813,7 @@ def cmd_scene(args):
                 problems += 1
                 continue
 
-            padding = paddings.get(name, config.OBSTACLE_PADDING_M)
+            padding = transfers.route_arm_padding(name)
             arm.set_arm_padding(padding)
 
             try:
@@ -826,6 +826,10 @@ def cmd_scene(args):
                 f'  {name:<11} {"ok" if hit is None else "COLLIDES " + hit} '
                 f'({len(route) - 2} via(s), arm links {padding * 100:g} cm)'
             )
+
+            if name in mismatches:
+                problems += 1
+                print(f'              {mismatches[name]}')
 
         from .grasp import retrieve_grid
 
@@ -843,6 +847,12 @@ def cmd_scene(args):
             if stale:
                 print(stale)
 
+            changed = retrieve_grid.grid_mismatch()
+
+            if changed:
+                problems += 1
+                print(f'  {changed}')
+
             for grab in grabs:
                 hit = _check_path(arm, [grab['approach'], grab['grab']])
                 problems += hit is not None
@@ -858,7 +868,7 @@ def cmd_scene(args):
 
             print(
                 f'\nEnd scan (scan_plans/endcap.yaml, arm link padding '
-                f'{plan.padding_m * 100:g} cm):'
+                f'{config.ENDCAP_PADDING_M * 100:g} cm):'
             )
 
             stale = scene.stale_plan_message(
@@ -869,7 +879,15 @@ def cmd_scene(args):
             if stale:
                 print(stale)
 
-            arm.set_arm_padding(plan.padding_m)
+            if abs(plan.padding_m - config.ENDCAP_PADDING_M) > 1e-9:
+                problems += 1
+                print(
+                    f'  baked with {plan.padding_m * 100:g} cm arm padding, '
+                    f'config says {config.ENDCAP_PADDING_M * 100:g} cm; '
+                    're-bake: laundry plan bake endcap'
+                )
+
+            arm.set_arm_padding(config.ENDCAP_PADDING_M)
 
             try:
                 bad = arm.first_invalid_state(plan.waypoints)

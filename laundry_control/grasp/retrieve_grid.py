@@ -426,6 +426,42 @@ def save(grabs, path=None, baked_on=''):
         yaml.safe_dump(document, handle, sort_keys=False, width=100)
 
 
+def grid_mismatch(path=None):
+    """
+    Return why retrieve.yaml no longer matches config, or None.
+
+    The grid it was solved for (depths, angles, heights, tilts,
+    approach, clearance) and the gripper offset, against config now.
+    """
+    path = path or plan_path()
+
+    if not os.path.isfile(path):
+        return None
+
+    with open(path) as handle:
+        document = yaml.safe_load(handle) or {}
+
+    def same(a, b):
+        return np.allclose(np.asarray(a, float), np.asarray(b, float))
+
+    baked = document.get('grid', {})
+    changed = [
+        key for key, value in config.RETRIEVE_GRID.items()
+        if key not in baked or not same(baked[key], value)
+    ]
+
+    if not same(document.get('gripper_offset_z', 0.0), config.GRIPPER_OFFSET_Z):
+        changed.append('GRIPPER_OFFSET_Z')
+
+    if not changed:
+        return None
+
+    return (
+        'scan_plans/retrieve.yaml was solved for other settings ('
+        + ', '.join(changed) + ' changed); re-bake: laundry plan bake retrieve'
+    )
+
+
 def load(path=None):
     """Return (grabs in visiting order, scene stamp); ([], '') if absent."""
     path = path or plan_path()
