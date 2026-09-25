@@ -1,7 +1,6 @@
 """Tests for the stage plumbing: targets JSON, fakes, CLI, grasp sequence."""
 
 from dataclasses import dataclass
-import os
 
 from laundry_control import cli, config
 from laundry_control.grasp import execute
@@ -9,7 +8,6 @@ from laundry_control.grasp.targets_io import load_targets, save_targets
 from laundry_control.hardware.fake import FakeRecorder
 from laundry_control.perception.detect import ClusterSummary
 from laundry_control.pipeline import run_scan
-from laundry_control.scan.baselines import promote
 import numpy as np
 import pytest
 
@@ -287,25 +285,6 @@ def test_plan_first_reachable_skips_unreachable_clusters():
 
     assert chosen is small
     assert grasp is not None
-
-
-# ------------------------------------------------------------ baselines
-
-
-def test_promote_accumulates_into_directory(tmp_path):
-    source = tmp_path / 'scan_a.csv'
-    source.write_text('x,y,z\n')
-    dest = tmp_path / 'baselines'
-
-    written = promote(str(source), dest=str(dest))
-
-    assert written == str(dest / 'scan_a.csv')
-
-    with pytest.raises(FileExistsError):
-        promote(str(source), dest=str(dest))
-
-    promote(str(source), dest=str(dest), force=True)
-    assert os.listdir(dest) == ['scan_a.csv']
 
 
 # ------------------------------------------------------------ CLI

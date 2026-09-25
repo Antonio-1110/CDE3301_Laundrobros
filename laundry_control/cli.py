@@ -11,8 +11,9 @@
     laundry detect scan.csv [-o targets.json] [--publish]   # offline
     laundry grasp targets.json [--drop] [--dry-run]
     laundry gripper open|close|ANGLE
-    laundry baseline collect [--count N] [-- <scan options>]
-    laundry baseline promote scan.csv
+    laundry baseline collect [--count N] [--archive] [-- <scan options>]
+    laundry baseline promote scan.csv|dir ... [--move] [--archive]
+    laundry baseline archive | list | restore LABEL
     laundry replay scan.csv
     laundry check-flange
     laundry scene apply | check
@@ -494,17 +495,73 @@ def cmd_gripper(args):
 
 
 def cmd_baseline(args):
-    """Run `laundry baseline collect|promote`."""
+    """Run `laundry baseline collect|promote|archive|list|restore`."""
+    from . import config
     from .scan import baselines
 
-    if args.baseline_action == 'collect':
+    action = args.baseline_action
+
+    if action == 'collect':
         return baselines.run_collect(args, args.forwarded_scan_args)
 
-    written = baselines.promote(args.src_path, dest=args.dest, force=args.force)
+    dest = args.dest or config.baseline_dir()
 
-    print(f'Promoted {args.src_path!r} -> {written!r}')
+    if action == 'promote':
+        written, shelved = baselines.promote(
+            args.sources, dest=dest, move=args.move,
+            archive_first=args.archive,
+        )
+
+        if shelved:
+            print(f'Archived the previous set to {shelved}')
+
+        verb = 'Moved' if args.move else 'Copied'
+
+        for path in written:
+            print(f'{verb} -> {path}')
+
+    elif action == 'archive':
+        shelved, moved = baselines.archive(dest, label=args.label)
+
+        if shelved is None:
+            print(f'Nothing to archive in {dest}.')
+        else:
+            print(f'Archived {len(moved)} file(s) to {shelved}')
+            print('The detector now has NO baseline set until you collect '
+                  'or restore one.')
+
+    elif action == 'restore':
+        restored, shelved = baselines.restore(dest, args.label)
+
+        if shelved:
+            print(f'Archived the replaced set to {shelved}')
+
+        print(f'Restored {len(restored)} file(s) from archive/{args.label}')
+
+    if action in ('promote', 'archive', 'restore', 'list'):
+        _print_baseline_sets(baselines, dest)
 
     return 0
+
+
+def _print_baseline_sets(baselines, dest):
+    from collections import Counter
+
+    current = baselines.active_scans(dest)
+    sessions = Counter(baselines.session_of(p) or '?' for p in current)
+
+    print(f'\nCurrent set in {dest}: {len(current)} scan(s)')
+
+    for session, count in sorted(sessions.items()):
+        print(f'  {session}: {count}')
+
+    archived = baselines.archived_sets(dest)
+
+    if archived:
+        print(f'Archived ({baselines.ARCHIVE_DIR}/):')
+
+        for label, count in archived:
+            print(f'  {label}: {count}')
 
 
 def cmd_replay(args):
@@ -1010,7 +1067,7 @@ def build_parser():
     gripper.set_defaults(func=cmd_gripper)
 
     baseline = subparsers.add_parser(
-        'baseline', help='Collect or promote empty-bucket baseline scans.'
+        'baseline', help='Collect, add, archive and restore empty-bucket baseline scans.'
     )
     baseline_actions = baseline.add_subparsers(
         dest='baseline_action', required=True
@@ -1021,16 +1078,45 @@ def build_parser():
     )
     add_collect_arguments(collect)
     promote = baseline_actions.add_parser(
-        'promote', help='Copy a saved empty-bucket scan into the baseline set.'
+        'promote',
+        help=(
+            'Add saved empty-bucket scans to the set, named '
+            'baseline_<when taken>_NN.csv.'
+        ),
     )
-    promote.add_argument('src_path', help='The empty-bucket scan CSV.')
     promote.add_argument(
-        '--dest', type=str, default=None,
-        help='Baseline directory (default: <repo>/baseline_scans).',
+        'sources', nargs='+', help='Scan CSVs and/or directories of them.'
     )
     promote.add_argument(
-        '--force', action='store_true', help='Overwrite an existing file.'
+        '--move', action='store_true', help='Move instead of copying.'
     )
+    promote.add_argument(
+        '--archive', action='store_true',
+        help='Archive the current set first, so these REPLACE it.',
+    )
+    archive = baseline_actions.add_parser(
+        'archive',
+        help='Move the current set to baseline_scans/archive/<label>/.',
+    )
+    archive.add_argument(
+        '--label', type=str, default=None,
+        help="Archive folder name (default: the scans' session stamp).",
+    )
+    baseline_actions.add_parser(
+        'list', help='Show the current set and the archived ones.'
+    )
+    restore = baseline_actions.add_parser(
+        'restore',
+        help='Make an archived set current again (archiving the current one).',
+    )
+    restore.add_argument('label', help='Archived set, as `list` names it.')
+
+    for sub in baseline_actions.choices.values():
+        if sub is not collect:
+            sub.add_argument(
+                '--dest', type=str, default=None,
+                help='Baseline directory (default: <repo>/baseline_scans).',
+            )
     baseline.set_defaults(func=cmd_baseline)
 
     replay = subparsers.add_parser(
