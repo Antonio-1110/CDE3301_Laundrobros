@@ -19,11 +19,13 @@ source ~/ros2_ws/src/CDE3301_Laundrobros/env.sh
 **1. Clean rebuild of this package.** This restructure renamed files, so a stale symlink install fails to build.
 
 ```bash
-cd ~/ros2_ws && rm -rf build/laundry_control install/laundry_control && colcon build --symlink-install --packages-select laundry_control && source install/setup.bash && laundry --help | head -3
+cd ~/ros2_ws && rm -rf build/laundry_control install/laundry_control && python3 -m colcon build --symlink-install --packages-select laundry_control && source install/setup.bash && head -1 install/laundry_control/lib/laundry_control/tof_sensor && laundry --help | head -3
 ```
 
-- **Paste back:** the last 3 lines.
-- **Verifies:** the package builds on the rig and `laundry` is on PATH.
+- **Paste back:** the last 4 lines.
+- **Verifies:**
+  - The package builds on the rig, and `laundry` is on PATH.
+  - The shebang line is the venv's `.venv/bin/python3`, not `/usr/bin/python3`. Otherwise `tof_sensor` and `gripper_node` can't import their hardware libraries.
 
 **2. Bring-up starts every node** (leave it running for everything below).
 

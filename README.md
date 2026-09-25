@@ -77,12 +77,18 @@ Stages hand off through files — a scan CSV, then a targets JSON — so each on
 
    `requirements.txt` holds only non-ROS dependencies (GPIO, the VL53L0X driver, scipy). ROS dependencies are declared in `package.xml`. On a machine with no GPIO or I2C hardware, the GPIO packages still install; they're only imported when the hardware is actually used.
 
-4. **ROS dependencies and build.** Build with the venv active:
+4. **ROS dependencies and build.** Build with colcon running under the **venv's Python**:
 
    ```bash
    source /opt/ros/jazzy/setup.bash
    rosdep install --from-paths src --ignore-src -r -y
-   colcon build --symlink-install
+   python3 -m colcon build --symlink-install
+   ```
+
+   Plain `colcon` is `/usr/bin/colcon`, which always runs under `/usr/bin/python3` even with the venv active. The interpreter colcon runs under becomes the shebang of every installed executable. Built with plain `colcon`, `tof_sensor` and `gripper_node` start under system Python, can't import the pip-installed `gpiozero`/`adafruit_vl53l0x`, and fail. After you source `env.sh`, plain `colcon` is routed through `python3 -m colcon` for you, and `env.sh` warns if an existing build has the wrong interpreter. To check a build:
+
+   ```bash
+   head -1 install/laundry_control/lib/laundry_control/tof_sensor    # must be .../.venv/bin/python3
    ```
 
    `--symlink-install` matters: Python edits take effect without a rebuild, and the package finds its data directories (`baseline_scans/`, `scan_records/`) through the symlink back to this checkout. Without it, set `LAUNDRY_DATA_DIR` to the checkout's path.
@@ -93,9 +99,11 @@ Stages hand off through files — a scan CSV, then a targets JSON — so each on
 source ~/ros2_ws/src/CDE3301_Laundrobros/env.sh
 ```
 
-This sources ROS, activates `.venv`, sources `install/setup.bash`, and puts `laundry` on `PATH`. `ros2 run laundry_control laundry ...` also works.
+This sources ROS, activates `.venv`, sources `install/setup.bash`, puts `laundry` on `PATH`, and makes `colcon` run under the venv's Python. `ros2 run laundry_control laundry ...` also works.
 
 ## Rebuilding
+
+From a shell that has sourced `env.sh` (so `colcon` runs under the venv):
 
 ```bash
 colcon build --symlink-install --packages-select laundry_control
