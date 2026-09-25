@@ -3,3 +3,8 @@ __pycache__/*
 
 # lgpio notification FIFOs (created wherever GPIO notify code runs)
 .lgd-nfy*
+
+# ToF scan CSVs auto-saved by scan_recorder_node.py
+scan_records/
+# macOS Finder metadata
+.DS_Store

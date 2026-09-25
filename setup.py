@@ -1,5 +1,6 @@
-import os
 from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 package_name = 'laundry_control'
@@ -20,7 +21,7 @@ setup(
     zip_safe=True,
     maintainer='cde3301a',
     maintainer_email='cde3301a@todo.todo',
-    description='TODO: Package description',
+    description='xArm7 laundry retrieval: ToF bucket scan, laundry detection and grasping.',
     license='TODO: License declaration',
     extras_require={
         'test': [
@@ -29,9 +30,13 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'run_probe = laundry_control.main:main',
-            'tof_sensor = laundry_control.tof_sensor:main',
-            'scan_replay = laundry_control.scan_replay:main',
+            # The one user-facing command (see laundry_control/cli.py).
+            'laundry = laundry_control.cli:main',
+            # Long-running nodes, started by laundry_bringup.launch.py.
+            'tof_sensor = laundry_control.hardware.tof_sensor:main',
+            'gripper_node = laundry_control.hardware.gripper_node:main',
+            'scan_recorder_node = laundry_control.scan.recorder_node:main',
+            'scan_replay = laundry_control.scan.replay:main',
         ],
     },
 )
