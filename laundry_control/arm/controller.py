@@ -12,17 +12,21 @@ top of a planned tool-Z stroke.
 
 import math
 
-from geometry_msgs.msg import Pose
+from builtin_interfaces.msg import Duration
+from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
-from moveit_msgs.msg import Constraints, JointConstraint
-from moveit_msgs.srv import GetCartesianPath
+from moveit_msgs.msg import Constraints, JointConstraint, RobotTrajectory
+from moveit_msgs.srv import GetCartesianPath, GetPositionIK, GetStateValidity
+import numpy as np
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 import tf2_ros
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .geometry import tool_z_from_quaternion
+from .joint_path import densify, time_path
 from .. import config
 from ..config import (
     OMPL_PIPELINE_ID,
@@ -114,6 +118,12 @@ class XArm7Controller(Node):
         super().__init__('xarm7_controller')
 
         self.plan_from_observed_state = plan_from_observed_state
+
+        # Created on first use: only the planner-free joint paths
+        # (move_joints_linear, execute_joint_path, and baking the end
+        # scan) need them.
+        self._ik_client = None
+        self._validity_client = None
 
         self.group_name = group_name
         self.base_frame = base_frame
@@ -971,6 +981,175 @@ class XArm7Controller(Node):
         )
 
         return False
+
+    # =========================================================
+    # PLANNER-FREE JOINT PATHS
+    #
+    # A sampling planner (OMPL) takes a different route every run,
+    # and Pilz PTP is only there if move_group loaded it. These build
+    # the motion themselves - straight joint-space lines, minimum-jerk
+    # timing (arm/joint_path.py) - and ask MoveIt only to CHECK each
+    # densely interpolated state for collisions, so the same request
+    # always produces the same motion, or the same refusal.
+    # =========================================================
+
+    def _client(self, attribute, service_type, name):
+        client = getattr(self, attribute)
+
+        if client is None:
+            client = self.create_client(service_type, name)
+
+            while not client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info(f'Waiting for {name}...')
+
+            setattr(self, attribute, client)
+
+        return client
+
+    def _call(self, client, request):
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+        return future.result()
+
+    def _joint_state(self, joints):
+        return JointState(
+            name=list(self.JOINT_NAMES),
+            position=[float(q) for q in joints],
+        )
+
+    def compute_ik(self, pose, seed, avoid_collisions=True, timeout=0.2):
+        """
+        Solve IK for the flange at `pose` (base_frame), seeded at `seed`.
+
+        Returns 7 joint angles in JOINT_NAMES order, or None. The
+        seed matters: the xArm7 is redundant, so the solver returns
+        the solution nearest the seed's elbow configuration.
+        """
+        client = self._client('_ik_client', GetPositionIK, '/compute_ik')
+
+        request = GetPositionIK.Request()
+        request.ik_request.group_name = self.group_name
+        request.ik_request.ik_link_name = self.flange_link
+        request.ik_request.avoid_collisions = avoid_collisions
+        request.ik_request.robot_state.joint_state = self._joint_state(seed)
+        request.ik_request.timeout = Duration(
+            sec=int(timeout), nanosec=int((timeout % 1.0) * 1e9)
+        )
+
+        stamped = PoseStamped()
+        stamped.header.frame_id = self.base_frame
+        stamped.pose = pose
+        request.ik_request.pose_stamped = stamped
+
+        response = self._call(client, request)
+
+        if response is None or response.error_code.val != 1:
+            return None
+
+        solution = dict(
+            zip(
+                response.solution.joint_state.name,
+                response.solution.joint_state.position,
+            )
+        )
+
+        return [solution[name] for name in self.JOINT_NAMES]
+
+    def state_is_valid(self, joints):
+        """Return True if MoveIt finds this joint state collision-free."""
+        client = self._client(
+            '_validity_client', GetStateValidity, '/check_state_validity'
+        )
+
+        request = GetStateValidity.Request()
+        request.group_name = self.group_name
+        request.robot_state.joint_state = self._joint_state(joints)
+
+        response = self._call(client, request)
+
+        return bool(response is not None and response.valid)
+
+    def first_invalid_state(self, waypoints):
+        """Return the index of the first colliding densified state, or None."""
+        for index, joints in enumerate(densify(waypoints)):
+            if not self.state_is_valid(joints):
+                return index
+
+        return None
+
+    def execute_joint_path(self, waypoints, times, velocities, time_scale=1.0):
+        """
+        Execute a fixed joint trajectory exactly as given.
+
+        time_scale < 1 replays it slower (times / time_scale, velocities
+        * time_scale) without changing the path - for cautious first
+        runs on the real arm. The first waypoint must match the arm's
+        current state within MoveIt's start tolerance (0.01 rad);
+        callers get there with move_joints_linear() first.
+        """
+        if not 0.0 < time_scale <= 1.0:
+            raise ValueError('time_scale must be in (0, 1].')
+
+        trajectory = JointTrajectory()
+        trajectory.joint_names = list(self.JOINT_NAMES)
+
+        for joints, t, qd in zip(waypoints, times, velocities):
+            t = float(t) / time_scale
+
+            point = JointTrajectoryPoint()
+            point.positions = [float(q) for q in joints]
+            point.velocities = [float(v) * time_scale for v in qd]
+            nanoseconds = int(round(t * 1e9))
+            point.time_from_start = Duration(
+                sec=nanoseconds // 1000000000,
+                nanosec=nanoseconds % 1000000000,
+            )
+            trajectory.points.append(point)
+
+        robot_trajectory = RobotTrajectory()
+        robot_trajectory.joint_trajectory = trajectory
+
+        return self._execute_trajectory(robot_trajectory)
+
+    def move_joints_linear(
+        self,
+        target,
+        max_velocity_rad_s=config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S,
+        time_scale=1.0,
+    ):
+        """
+        Move along a straight joint-space line to `target`, deterministically.
+
+        Every state along the line (1 deg apart) is collision-checked
+        BEFORE the arm moves; if any collides, nothing moves and this
+        returns False. Timing is minimum-jerk with the fastest joint
+        peaking at max_velocity_rad_s.
+        """
+        current = self.get_current_joints()
+
+        if current is None:
+            return False
+
+        waypoints = densify([current, list(target)])
+
+        if np.abs(waypoints[-1] - waypoints[0]).max() < 1e-4:
+            return True
+
+        bad = self.first_invalid_state(waypoints)
+
+        if bad is not None:
+            self.get_logger().error(
+                'Straight joint move would collide at '
+                f'{100.0 * bad / (len(waypoints) - 1):.0f}% of the way; '
+                'not moving.'
+            )
+            return False
+
+        times, velocities = time_path(waypoints, max_velocity_rad_s)
+
+        return self.execute_joint_path(
+            waypoints, times, velocities, time_scale=time_scale
+        )
 
     # =========================================================
     # PURE LINEAR TOOL-Z MOVEMENT

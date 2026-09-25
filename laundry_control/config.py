@@ -223,6 +223,11 @@ OMPL_PLANNER_ID = 'RRTConnect'
 # a warning when a twist exceeds it.
 JOINT7_MAX_VELOCITY_RAD_S = 2.14
 
+# Peak joint speed for the planner-free straight joint moves
+# (XArm7Controller.move_joints_linear) and the baked end scan: 45
+# deg/s, well inside every xArm7 joint's limit.
+LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S = 0.785
+
 # =============================================================
 # TOF SENSOR (VL53L0X)
 # =============================================================
