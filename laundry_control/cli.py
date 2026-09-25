@@ -15,6 +15,8 @@
     laundry baseline promote scan.csv
     laundry replay scan.csv
     laundry check-flange
+    laundry plan bake [--depth 0.42] [-o scan_plans/endcap.yaml]
+    laundry plan replay [--speed 0.3]
     laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
     laundry run [--dry-run]                                 # everything
     laundry preplanned
@@ -28,7 +30,7 @@ WHAT NEEDS WHAT
     detect, evaluate, baseline promote   nothing: plain files, no ROS
                                          graph, no arm
     replay                               a ROS graph (for RViz)
-    move, check-flange                   MoveIt (real or fake)
+    move, check-flange, plan bake        MoveIt (real or fake)
     scan, grasp, run, preplanned         MoveIt + scan_recorder_node/
                                          tof_sensor/gripper_node - or
                                          --fake-hardware
@@ -507,6 +509,64 @@ def cmd_check_flange(args):
     return 0
 
 
+def cmd_plan(args):
+    """Run `laundry plan bake`: solve and save the end-scan trajectory."""
+    import socket
+
+    from .scan import endcap
+
+    output = args.output or endcap.default_plan_path()
+
+    with _RosSession(args=args) as arm:
+        try:
+            plan = endcap.bake(
+                arm,
+                args.depth,
+                max_velocity_rad_s=math.radians(args.max_joint_speed),
+                log=print,
+            )
+        except endcap.BakeError as exc:
+            print(f'Bake failed: {exc}', file=sys.stderr)
+            return 1
+
+    plan.baked_on = socket.gethostname()
+    plan.save(output)
+
+    print(f'Saved {output}')
+
+    for alpha, low, high in plan.rings:
+        print(f'  ring alpha={alpha:g} deg: phi {low:+g} .. {high:+g} deg')
+
+    print(
+        f'  {plan.duration_s:.1f} s, {len(plan.waypoints)} points. Commit it '
+        'so every scan replays the same motion.'
+    )
+
+    return 0
+
+
+def cmd_plan_replay(args):
+    """Run `laundry plan replay`: the end scan alone, INTER to INTER."""
+    from . import config
+    from .scan import endcap
+
+    plan = endcap.EndcapPlan.load(args.end_plan or endcap.default_plan_path())
+
+    with _RosSession(args=args) as arm:
+        ok = (
+            arm.move_joints(config.INTER)
+            and arm.move_tool_z(plan.depth_m)
+            and endcap.run_plan(arm, plan, plan.depth_m, time_scale=args.speed)
+        )
+
+        # Always try to come back out, even after a failure part-way.
+        arm.move_joints_linear(plan.start, time_scale=args.speed)
+        arm.move_tool_z(-plan.depth_m)
+        arm.move_joints(config.INTER)
+
+    return 0 if ok else 1
+
+
 def cmd_evaluate(args):
     """Run `laundry evaluate`."""
     from .perception import evaluate
@@ -737,6 +797,52 @@ def build_parser():
         help="Report the insertion axis's alignment with the bucket.",
     )
     check.set_defaults(func=cmd_check_flange)
+
+    plan = subparsers.add_parser(
+        'plan', help='Bake planner-free motions (the precession end scan).'
+    )
+    plan_actions = plan.add_subparsers(dest='plan_action', required=True)
+    bake = plan_actions.add_parser(
+        'bake',
+        help=(
+            'Solve, collision-check and save the end-scan trajectory. '
+            'MOVES THE ARM (INTER, in to --depth, back).'
+        ),
+    )
+    from .scan.pattern import DEFAULT_DEPTH_M
+
+    bake.add_argument(
+        '--depth', type=float, default=DEFAULT_DEPTH_M,
+        help=f'Scan depth the plan is for (default: {DEFAULT_DEPTH_M}).',
+    )
+    bake.add_argument(
+        '-o', '--output', type=str, default=None,
+        help='Where to save it (default: <repo>/scan_plans/endcap.yaml).',
+    )
+    bake.add_argument(
+        '--max-joint-speed', type=float, default=45.0,
+        help='Peak joint speed along the plan, deg/s (default: 45).',
+    )
+    _add_observed_state_argument(bake)
+    bake.set_defaults(func=cmd_plan)
+
+    replay_plan = plan_actions.add_parser(
+        'replay',
+        help=(
+            'Run only the end scan: INTER, in to the plan depth, replay, '
+            'back out. For checking clearance on the rig.'
+        ),
+    )
+    replay_plan.add_argument(
+        '--speed', type=float, default=0.3,
+        help='Fraction of the baked speed, (0, 1] (default: 0.3).',
+    )
+    replay_plan.add_argument(
+        '--end-plan', type=str, default=None,
+        help='Plan file (default: <repo>/scan_plans/endcap.yaml).',
+    )
+    _add_fake_arguments(replay_plan)
+    replay_plan.set_defaults(func=cmd_plan_replay)
 
     evaluate = subparsers.add_parser(
         'evaluate', help='Measure false positives / recall of the detector.'

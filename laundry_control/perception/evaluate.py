@@ -458,7 +458,7 @@ def report_synthetic(baseline_scans, detect_kwargs, args):
     print()
 
 
-def report_coverage(surface, baseline_scans):
+def report_coverage(surface, baseline_scans, extra_scans=()):
     """Print measured vs simulated coverage, and candidate scan paths."""
     from ..scan import coverage
     from .synthetic import reconstruct_rays
@@ -491,13 +491,24 @@ def report_coverage(surface, baseline_scans):
         coverage.measured_coverage(surface.profile, baseline_scans),
     )
 
+    for path in extra_scans:
+        line(
+            os.path.basename(path)[:30],
+            coverage.measured_coverage(surface.profile, [path]),
+        )
+
     print()
     print(
         '  Simulated (validate: "velocity 0.1" should match "one scan" '
         'above, if the baselines were taken at 0.1):'
     )
 
-    for label, path in coverage.CANDIDATE_PATHS.items():
+    from ..scan.endcap import default_plan_path, EndcapPlan
+
+    plan_path = default_plan_path()
+    end_plan = EndcapPlan.load(plan_path) if os.path.isfile(plan_path) else None
+
+    for label, path in coverage.candidate_paths(end_plan).items():
         rays = coverage.simulate_path(path, surface.profile)
         line(
             label,
@@ -625,6 +636,18 @@ def add_evaluate_arguments(parser):
     )
 
     parser.add_argument(
+        '--coverage-scan',
+        type=str,
+        action='append',
+        default=[],
+        help=(
+            'With --coverage: also report the coverage of this scan CSV '
+            'on its own (repeatable) - e.g. one precession and one '
+            '--end-scan bottom scan, to compare end scans on the rig.'
+        ),
+    )
+
+    parser.add_argument(
         '--legacy',
         action='store_true',
         help=(
@@ -747,7 +770,7 @@ def run_evaluate(args):
 
     if args.coverage:
         print()
-        report_coverage(full_surface, baseline_scans)
+        report_coverage(full_surface, baseline_scans, args.coverage_scan)
 
     if args.repeat:
         print()

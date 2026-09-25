@@ -12,6 +12,7 @@ Run from the terminal as `laundry scan` (cli.py).
 """
 
 import math
+import os
 
 import rclpy
 
@@ -42,6 +43,12 @@ DEFAULT_CARTESIAN_STEP_M = 0.005
 DEFAULT_PAUSE_SEC = 0.0
 DEFAULT_SAVE_INTERVAL_SEC = 5.0
 
+# How the closed end is covered: 'precession' (default, baked - see
+# scan/endcap.py) or 'bottom' (the old recorded-pose detour, only
+# when asked for).
+END_SCANS = ('precession', 'bottom')
+DEFAULT_END_SCAN = 'precession'
+
 
 def scan(
     arm,
@@ -56,6 +63,9 @@ def scan(
     pause=DEFAULT_PAUSE_SEC,
     recorder=None,
     save_interval=DEFAULT_SAVE_INTERVAL_SEC,
+    end_scan='precession',
+    end_plan=None,
+    end_scan_time_scale=1.0,
 ):
     """
     Perform the complete xArm7 scanning sequence.
@@ -123,6 +133,20 @@ def scan(
         Seconds between fire-and-forget checkpoint saves during the
         scan; <= 0 disables them.
 
+    end_scan:
+        How the closed end is covered at maximum depth: 'precession'
+        (default) replays the baked coning sweep in end_plan (see
+        scan/endcap.py); 'bottom' runs the old recorded-pose BOTTOM
+        detour and is only used when asked for.
+
+    end_plan:
+        The endcap.EndcapPlan to replay. Required for 'precession'.
+
+    end_scan_time_scale:
+        Replay the precession end scan (and its entry/exit moves)
+        slower than baked, in (0, 1] - for cautious first runs on
+        the real arm. Does not change the path.
+
 
     Notes
     -----
@@ -149,35 +173,26 @@ def scan(
         -75 -> +75     while inserting one step
         ...
 
-    Bottom detour (also performs the turnaround phase shift):
+    End scan (also performs the turnaround phase shift):
 
-        At maximum depth, the wrist is mounted such that the
-        end effector keeps the sensor from reaching the very
-        last part of the bucket. To cover that area, the arm
-        raises the TCP angle by moving J1-J6 to the recorded
-        BOTTOM configuration:
+        At maximum depth the gripper stops the sensor reaching the
+        closed end with radial beams, so the end is covered
+        separately.
 
-            Entry : tilt up to BOTTOM while sweeping J7 to the
-                    side OPPOSITE where the inward scan ended
-                    (relative to BOTTOM's own reference).
+        'precession' (default): a baked, collision-checked joint
+            trajectory tilts the tool axis in a cone about the
+            deepest flange position so the beam sweeps concentric
+            arcs over the lower closed end (scan/endcap.py). The
+            arm then returns to the stroke configuration with J7
+            turned to the turnaround target -- the side OPPOSITE
+            where the inward scan ended (relative to INTER's
+            reference).
 
-            At BOTTOM: one stationary full sweep_deg-wide J7
-                    sweep, back to the side matching where the
-                    inward scan ended (relative to BOTTOM's own
-                    reference).
+        'bottom' (only when requested): tilt up to the recorded
+            BOTTOM pose while sweeping J7, sweep again there, and
+            tilt back landing J7 on the same turnaround target.
 
-            Exit  : tilt back down to the pre-detour J1-J6
-                    configuration while landing J7 directly on
-                    the turnaround target -- the side OPPOSITE
-                    where the inward scan ended (relative to
-                    INTER's reference).
-
-        Landing the exit move on the turnaround target performs
-        the phase shift as part of the tilt-down motion, so no
-        separate stationary turnaround rotation is needed
-        afterward.
-
-    Outward:
+        Outward:
 
         Alternate +/-150 degree strokes while retracting
         one step at a time.
@@ -193,6 +208,22 @@ def scan(
         arm.get_logger().error(
             'depth must be greater than zero.'
         )
+        return False
+
+    if end_scan not in END_SCANS:
+        arm.get_logger().error(
+            f'end_scan must be one of {END_SCANS}; got {end_scan!r}.'
+        )
+        return False
+
+    if end_scan == 'precession' and end_plan is None:
+        arm.get_logger().error(
+            "end_scan='precession' needs a baked plan (laundry plan bake)."
+        )
+        return False
+
+    if not 0.0 < end_scan_time_scale <= 1.0:
+        arm.get_logger().error('end_scan_time_scale must be in (0, 1].')
         return False
 
     if step <= 0.0:
@@ -535,7 +566,11 @@ def scan(
     )
 
     # =========================================================
-    # 4. BOTTOM DETOUR (also performs the turnaround phase shift)
+    # 4. END SCAN (also performs the turnaround phase shift)
+    #
+    # Default: the baked precession sweep (scan/endcap.py,
+    # _precession_end_scan). With end_scan='bottom', the old detour
+    # below (_bottom_detour):
     #
     # The sensor is mounted at the wrist, and the end effector
     # keeps the arm from inserting far enough for the sensor to
@@ -566,7 +601,7 @@ def scan(
     # =========================================================
 
     arm.get_logger().info(
-        '========== BOTTOM DETOUR =========='
+        f'========== END SCAN ({end_scan}) =========='
     )
 
     pre_bottom_joints = arm.get_current_joints()
@@ -574,7 +609,7 @@ def scan(
     if pre_bottom_joints is None:
 
         arm.get_logger().error(
-            'Could not read joint state before BOTTOM detour.'
+            'Could not read joint state before the end scan.'
         )
 
         return False
@@ -594,91 +629,33 @@ def scan(
         phase_twist = +sweep_deg
 
     arm.get_logger().info(
-        f'Turnaround phase shift (folded into detour exit): '
+        f'Turnaround phase shift (folded into end-scan exit): '
         f'{phase_twist:+.1f} deg'
     )
 
-    # Entry: sweep to the side OPPOSITE nominal_end_angle,
-    # relative to BOTTOM's own reference angle.
-    entry_joints = list(BOTTOM)
-
-    entry_joints[6] = (
-        BOTTOM[6]
-        + math.radians(-phase_sign * half_sweep)
-    )
-
-    arm.get_logger().info(
-        'Entering BOTTOM configuration (sweeping while tilting).'
-    )
-
-    success = arm.move_joints(
-        entry_joints,
-        velocity=rotation_velocity,
-        acceleration=rotation_acceleration,
-    )
-
-    if not success:
-
-        arm.get_logger().error(
-            'Move to BOTTOM configuration failed.'
+    if end_scan == 'bottom':
+        success = _bottom_detour(
+            arm,
+            pre_bottom_joints,
+            phase_sign,
+            phase_twist,
+            half_sweep,
+            sweep_deg,
+            rotation_velocity,
+            rotation_acceleration,
+            wait_between_movements,
+        )
+    else:
+        success = _precession_end_scan(
+            arm,
+            end_plan,
+            depth,
+            pre_bottom_joints,
+            phase_twist,
+            end_scan_time_scale,
         )
 
-        return False
-
-    wait_between_movements()
-
-    # Stationary full-width sweep at BOTTOM, back to the side
-    # matching nominal_end_angle, relative to BOTTOM's reference.
-    bottom_sweep_twist = phase_sign * sweep_deg
-
-    arm.get_logger().info(
-        f'Stationary BOTTOM sweep: '
-        f'{bottom_sweep_twist:+.1f} deg'
-    )
-
-    success = arm.rotate_joint7(
-        delta_deg=bottom_sweep_twist,
-        velocity=rotation_velocity,
-        acceleration=rotation_acceleration,
-    )
-
     if not success:
-
-        arm.get_logger().error(
-            'Stationary BOTTOM sweep failed.'
-        )
-
-        return False
-
-    wait_between_movements()
-
-    # Exit: revert J1-J6 to the pre-detour configuration while
-    # landing J7 on the turnaround target, so the outward scan
-    # can start immediately with no further stationary rotation.
-    exit_joints = list(pre_bottom_joints)
-
-    exit_joints[6] = (
-        pre_bottom_joints[6]
-        + math.radians(phase_twist)
-    )
-
-    arm.get_logger().info(
-        'Reverting to pre-BOTTOM tilt '
-        '(already turned around for the outward scan).'
-    )
-
-    success = arm.move_joints(
-        exit_joints,
-        velocity=rotation_velocity,
-        acceleration=rotation_acceleration,
-    )
-
-    if not success:
-
-        arm.get_logger().error(
-            'Revert from BOTTOM configuration failed.'
-        )
-
         return False
 
     wait_between_movements()
@@ -831,6 +808,152 @@ def scan(
     return True
 
 
+def _precession_end_scan(
+    arm, plan, depth, pre_end_joints, phase_twist, time_scale
+):
+    """
+    Replay the baked precession end scan, then turn J7 for the way out.
+
+    See scan/endcap.py. Every motion here is planner-free and
+    collision-checked: a straight joint move onto the plan, the plan
+    itself, and a straight joint move to the stroke configuration the
+    inward pass ended at with J7 turned by phase_twist - the same
+    turnaround target the BOTTOM detour's exit landed on.
+    """
+    from .endcap import run_plan
+
+    arm.get_logger().info(
+        f'Precession end scan: {plan.duration_s:.1f} s baked trajectory '
+        f'(rings {", ".join(f"{a:g}deg" for a, _lo, _hi in plan.rings)})'
+        + (f', replayed at {time_scale:g}x speed' if time_scale < 1.0 else '')
+    )
+
+    if not run_plan(arm, plan, depth, time_scale=time_scale):
+        arm.get_logger().error('Precession end scan failed.')
+        return False
+
+    exit_joints = list(pre_end_joints)
+    exit_joints[6] = pre_end_joints[6] + math.radians(phase_twist)
+
+    arm.get_logger().info(
+        'Returning to the stroke configuration, turned around for the '
+        'outward scan.'
+    )
+
+    if not arm.move_joints_linear(exit_joints, time_scale=time_scale):
+        arm.get_logger().error('Return from the end scan failed.')
+        return False
+
+    return True
+
+
+def _bottom_detour(
+    arm,
+    pre_bottom_joints,
+    phase_sign,
+    phase_twist,
+    half_sweep,
+    sweep_deg,
+    rotation_velocity,
+    rotation_acceleration,
+    wait_between_movements,
+):
+    """
+    Cover the closed end the old way: tilt to BOTTOM, sweep J7, tilt back.
+
+    Only used with end_scan='bottom'. Kept for comparison and as a
+    fallback; the precession end scan sees much more of the closed
+    end (scan/endcap.py), and its motion is baked rather than
+    planned, so it is identical every run. These moves go through
+    move_joints(), i.e. Pilz PTP if loaded, else OMPL - which takes a
+    different route every time.
+    """
+    # Entry: sweep to the side OPPOSITE nominal_end_angle,
+    # relative to BOTTOM's own reference angle.
+    entry_joints = list(BOTTOM)
+
+    entry_joints[6] = (
+        BOTTOM[6]
+        + math.radians(-phase_sign * half_sweep)
+    )
+
+    arm.get_logger().info(
+        'Entering BOTTOM configuration (sweeping while tilting).'
+    )
+
+    success = arm.move_joints(
+        entry_joints,
+        velocity=rotation_velocity,
+        acceleration=rotation_acceleration,
+    )
+
+    if not success:
+
+        arm.get_logger().error(
+            'Move to BOTTOM configuration failed.'
+        )
+
+        return False
+
+    wait_between_movements()
+
+    # Stationary full-width sweep at BOTTOM, back to the side
+    # matching nominal_end_angle, relative to BOTTOM's reference.
+    bottom_sweep_twist = phase_sign * sweep_deg
+
+    arm.get_logger().info(
+        f'Stationary BOTTOM sweep: '
+        f'{bottom_sweep_twist:+.1f} deg'
+    )
+
+    success = arm.rotate_joint7(
+        delta_deg=bottom_sweep_twist,
+        velocity=rotation_velocity,
+        acceleration=rotation_acceleration,
+    )
+
+    if not success:
+
+        arm.get_logger().error(
+            'Stationary BOTTOM sweep failed.'
+        )
+
+        return False
+
+    wait_between_movements()
+
+    # Exit: revert J1-J6 to the pre-detour configuration while
+    # landing J7 on the turnaround target, so the outward scan
+    # can start immediately with no further stationary rotation.
+    exit_joints = list(pre_bottom_joints)
+
+    exit_joints[6] = (
+        pre_bottom_joints[6]
+        + math.radians(phase_twist)
+    )
+
+    arm.get_logger().info(
+        'Reverting to pre-BOTTOM tilt '
+        '(already turned around for the outward scan).'
+    )
+
+    success = arm.move_joints(
+        exit_joints,
+        velocity=rotation_velocity,
+        acceleration=rotation_acceleration,
+    )
+
+    if not success:
+
+        arm.get_logger().error(
+            'Revert from BOTTOM configuration failed.'
+        )
+
+        return False
+
+    return True
+
+
 # =============================================================
 # TERMINAL INTERFACE
 #
@@ -841,6 +964,35 @@ def scan(
 
 def add_scan_arguments(parser):
     """Add every scan() tuning option to an argparse parser."""
+    parser.add_argument(
+        '--end-scan',
+        choices=END_SCANS,
+        default=DEFAULT_END_SCAN,
+        help=(
+            "How to cover the closed end: 'precession' (default, the "
+            "baked coning sweep) or 'bottom' (the old BOTTOM-pose "
+            'detour).'
+        ),
+    )
+
+    parser.add_argument(
+        '--end-plan',
+        type=str,
+        default=None,
+        help='Baked end-scan plan (default: <repo>/scan_plans/endcap.yaml).',
+    )
+
+    parser.add_argument(
+        '--end-scan-speed',
+        type=float,
+        default=1.0,
+        help=(
+            'Replay the precession end scan at this fraction of its baked '
+            'speed, (0, 1] (default: 1). Use e.g. 0.3 for first runs on '
+            'the rig.'
+        ),
+    )
+
     parser.add_argument(
         '--depth',
         type=float,
@@ -947,8 +1099,39 @@ def add_scan_arguments(parser):
 
 
 def scan_kwargs_from_args(args):
-    """Turn parsed add_scan_arguments() options into scan() keywords."""
+    """
+    Turn parsed add_scan_arguments() options into scan() keywords.
+
+    Loads the end-scan plan when the precession end scan is selected,
+    so a missing or mismatched plan is reported before the arm moves.
+    """
+    end_plan = None
+
+    if args.end_scan == 'precession':
+        from .endcap import default_plan_path, EndcapPlan
+
+        path = args.end_plan or default_plan_path()
+
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f'No baked end-scan plan at {path}. Bake one '
+                '(`laundry plan bake`, with MoveIt running) or pass '
+                '--end-scan bottom.'
+            )
+
+        end_plan = EndcapPlan.load(path)
+
+        if abs(end_plan.depth_m - args.depth) > 1e-6:
+            raise ValueError(
+                f'{path} was baked for --depth {end_plan.depth_m:.3f}; '
+                f'this scan uses {args.depth:.3f}. Re-bake with '
+                f'`laundry plan bake --depth {args.depth:.3f}`.'
+            )
+
     return {
+        'end_scan': args.end_scan,
+        'end_plan': end_plan,
+        'end_scan_time_scale': args.end_scan_speed,
         'depth': args.depth,
         'step': args.step,
         'sweep_deg': args.sweep,

@@ -109,6 +109,10 @@ class ScanPath:
     # scans are not phase-locked to the strokes, so repeated scans
     # sample slightly different spots; vary this to mimic that.
     sample_phase: float = 0.5
+    # A baked scan.endcap.EndcapPlan: when set (and bottom_detour is
+    # False), its beams replace the BOTTOM detour's, sampled at the
+    # ToF's rate along the plan's own timing.
+    end_plan: object = None
 
 
 def _stroke_beams(path):
@@ -156,7 +160,12 @@ def _stroke_beams(path):
             origins.append(origin)
             directions.append(direction)
 
-    if path.bottom_detour:
+    if path.end_plan is not None and not path.bottom_detour:
+        origins_p, directions_p = plan_beams(path.end_plan)
+        origins.append(origins_p)
+        directions.append(directions_p)
+
+    elif path.bottom_detour:
         samples = max(
             DEFAULT_SAMPLES_PER_BOTTOM_SWEEP,
             int(round(DEFAULT_SAMPLES_PER_BOTTOM_SWEEP * path.sweep_deg / 150.0)),
@@ -241,8 +250,11 @@ def estimated_duration_s(path, rate_hz=20.0):
     """Return a rough scan duration from the path's sampling."""
     strokes = 2 * int(round(path.depth_m / path.step_m))
     per_stroke = path.samples_per_stroke / rate_hz + STROKE_OVERHEAD_S
-    detour = 3 * DEFAULT_SAMPLES_PER_BOTTOM_SWEEP / rate_hz / 2.0
-    return strokes * per_stroke + detour
+    if path.end_plan is not None and not path.bottom_detour:
+        end = path.end_plan.duration_s
+    else:
+        end = 3 * DEFAULT_SAMPLES_PER_BOTTOM_SWEEP / rate_hz / 2.0
+    return strokes * per_stroke + end
 
 
 # The upper part of the bucket is deliberately out of scope (the
@@ -251,13 +263,41 @@ def estimated_duration_s(path, rate_hz=20.0):
 CANDIDATE_PATHS = {
     'velocity 0.1 (old default)': path_for_velocity(0.1),
     'velocity 0.05': path_for_velocity(0.05),
-    'velocity 0.03 (default)': path_for_velocity(0.03),
+    'velocity 0.03 + BOTTOM detour': path_for_velocity(0.03),
     'velocity 0.03, step 2cm': path_for_velocity(0.03, step_m=0.02),
 }
 
 # Regions the scan is meant to cover. The rest is reported for
 # completeness, marked out of scope.
 FOCUS_REGIONS = ('floor', 'lower_wall', 'closed_end_lower')
+
+
+def plan_beams(plan, rate_hz=20.0):
+    """Return (origins, directions) of a baked end scan, sampled at rate_hz."""
+    from .endcap import reference_axes, sample_beams
+
+    sample_times = np.arange(0.0, plan.duration_s, 1.0 / rate_hz)
+
+    alpha_phi = np.stack(
+        [np.interp(sample_times, plan.times, plan.alpha_phi[:, k]) for k in range(2)],
+        axis=1,
+    )
+
+    z0, up, side = reference_axes(plan.tool_z)
+
+    return sample_beams(plan.pivot, z0, up, side, alpha_phi)
+
+
+def candidate_paths(end_plan=None):
+    """Return CANDIDATE_PATHS plus the precession end scan, if a plan is given."""
+    paths = dict(CANDIDATE_PATHS)
+
+    if end_plan is not None:
+        paths['0.03 + precession end scan'] = path_for_velocity(
+            0.03, bottom_detour=False, end_plan=end_plan
+        )
+
+    return paths
 
 
 def cast_rays(origins, directions, profile, step_m=0.001):
@@ -411,11 +451,37 @@ def coverage_by_region(profile, rays):
     return result
 
 
+def rays_from_csv(path):
+    """
+    Return the Rays of a saved scan, using its ray columns if it has them.
+
+    Scans recorded by the current scan_recorder_node carry each
+    reading's beam origin (ox/oy/oz), which is exact for any path -
+    precession end scan included. Older scans do not, and fall back
+    to the stroke/BOTTOM-detour geometry reconstruction.
+    """
+    from ..perception.synthetic import reconstruct_rays
+    from .cloud_io import load_scan_csv
+
+    columns = load_scan_csv(path)
+    points = np.stack([columns['x'], columns['y'], columns['z']], axis=1)
+
+    return reconstruct_rays(points, columns)
+
+
 def measured_coverage(profile, scans):
-    """Return coverage_by_region() for the pooled beams of real scans."""
+    """
+    Return coverage_by_region() for the pooled beams of real scans.
+
+    Each scan is a CSV path (preferred: uses recorded ray columns) or
+    an (N, 3) point array (rays rebuilt from the scan geometry).
+    """
     from ..perception.synthetic import reconstruct_rays
 
-    rays = [reconstruct_rays(scan) for scan in scans]
+    rays = [
+        rays_from_csv(scan) if isinstance(scan, str) else reconstruct_rays(scan)
+        for scan in scans
+    ]
 
     pooled = Rays(
         origin=np.concatenate([r.origin for r in rays]),
