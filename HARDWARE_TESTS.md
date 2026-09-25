@@ -12,6 +12,8 @@ source ~/ros2_ws/src/CDE3301_Laundrobros/env.sh
 
 **Safety:** keep a hand on the e-stop for every motion test.
 
+**ToF timestamps:** readings are now stamped at the middle of each ~33 ms measurement, not at its end. That moves every scan point ~2° of J7 rotation (up to ~7 mm at the wall) compared with the committed baselines, which is one more reason to re-collect them (test 13).
+
 **What changed in the motion:**
 - **Scan speed:** the default scan velocity is now **0.03** (was 0.1).
 - **End scan:** the closed end is covered by the baked precession end scan (test 7), not the BOTTOM detour.
@@ -121,6 +123,16 @@ laundry gripper close && laundry gripper open && laundry gripper 80
 - **Verifies:**
   - open/close go through `gripper_node`'s services.
   - `ANGLE` drives the servo directly. The GPIO library is now loaded on first use rather than at import, so this is the first real check of that change.
+
+**6b. The claw holds when closed.** `gripper_node` now keeps driving the servo after `close`. Close the claw on a rolled towel, then try to pull the towel out by hand:
+
+```bash
+laundry gripper close
+```
+
+Wait 30 s, then feel whether the servo is warm, and run `laundry gripper open`.
+
+- **Paste back:** whether the claw resisted the pull (before this change it went limp 0.7 s after closing), whether the servo buzzes or gets hot while holding, and whether it opens afterwards.
 
 ## C. End scan and scanning
 
@@ -260,6 +272,15 @@ laundry scene check && laundry preplanned --limit 3 --speed 0.3
 - **Paste back:** the `scene check` output, and the claw-to-floor gap at each of the 3 grabs (a rough ruler estimate is fine).
 - **Then:** the full sweep, `laundry preplanned --speed 0.5`, with some laundry in the bucket. Say how many items came out, and which grabs came up empty. `laundry preplanned --recorded` runs the old four poses, for comparison.
 - **If the bucket pose changes** (`config.OBSTACLES`): run `laundry plan bake retrieve` and commit `scan_plans/`.
+
+**17c. `laundry clear`, slowly.** Hand on the e-stop. Put 2–3 items in the bucket. The command runs 3 grid grabs, then scans and grasps until a scan finds nothing:
+
+```bash
+laundry clear --grab-limit 3 --speed 0.3 --max-rounds 5
+```
+
+- **Watch:** detected items on the floor are grabbed like the grid ("Floor grab via grab_NN" in the log), with a straight descent onto the item.
+- **Paste back:** the log from "ROUND 1" on, how many items came out, and whether it stopped with "The bucket is clear".
 
 ## F. Real-cloth validation scans I need
 
