@@ -93,6 +93,23 @@ PLANNING_STAGE_ERROR_CODES = frozenset({
     -31,  # NO_IK_SOLUTION
 })
 
+
+def failure_is_retryable(result):
+    """
+    Return True if a failed MoveGroup result cannot have moved the arm.
+
+    That is a planning-stage error code, or no planned trajectory at
+    all: nothing was planned, so nothing was executed. The second case
+    covers codes MoveIt uses outside the planning-stage list - an
+    unloaded pipeline (Pilz on the stock xArm launches) comes back as
+    0, before anything moves, and must still fall back to OMPL.
+    """
+    return (
+        result.error_code.val in PLANNING_STAGE_ERROR_CODES
+        or not result.planned_trajectory.joint_trajectory.points
+    )
+
+
 # How long spin waits run before handing control back to Python, so
 # a Ctrl+C (KeyboardInterrupt) is noticed promptly. See
 # XArm7Controller._spin_until_done.
@@ -140,7 +157,7 @@ class XArm7Controller(Node):
         pad_obstacles:
             Make sure move_group has the padded bucket/table (see
             arm/scene.py) before anything moves. On by default: without
-            it MoveIt only has the URDF's unpadded copies.
+            it MoveIt has no bucket or table at all.
 
         plan_from_observed_state:
             Give every Cartesian plan an explicit start state - the
@@ -558,8 +575,8 @@ class XArm7Controller(Node):
             interpolation and reports failure if that hits
             something, where a sampling planner would search for a
             way past. That matters here because the bucket and
-            table are real collision geometry (URDF links on
-            link_base - see xarm7.urdf.xacro), so a direct
+            table are real collision geometry (world objects,
+            config.OBSTACLES - see arm/scene.py), so a direct
             interpolation out of a pose deep inside the bucket can
             genuinely be blocked. Recorded-pose transitions (INTER,
             DROP, BOTTOM) are clear direct paths and stay on PTP;
@@ -781,7 +798,7 @@ class XArm7Controller(Node):
 
         reason = describe_moveit_error(error_code)
 
-        retryable = error_code in PLANNING_STAGE_ERROR_CODES
+        retryable = failure_is_retryable(wrapped_result.result)
 
         if retryable:
             report_failure(
@@ -1240,6 +1257,30 @@ class XArm7Controller(Node):
 
         A state MoveIt never answers for counts as invalid.
         """
+        response = self._validity_response(joints)
+
+        return bool(response is not None and response.valid)
+
+    def state_contacts(self, joints):
+        """
+        Return the colliding (body, body) pairs at a joint state.
+
+        [] if the state is valid; None if MoveIt never answered.
+        """
+        response = self._validity_response(joints)
+
+        if response is None:
+            return None
+
+        if response.valid:
+            return []
+
+        return sorted({
+            tuple(sorted((c.contact_body_1, c.contact_body_2)))
+            for c in response.contacts
+        })
+
+    def _validity_response(self, joints):
         client = self._client(
             '_validity_client', GetStateValidity, '/check_state_validity'
         )
@@ -1252,9 +1293,7 @@ class XArm7Controller(Node):
             future = client.call_async(request)
 
             if self._spin_until_done(future, VALIDITY_TIMEOUT_SEC):
-                response = future.result()
-
-                return bool(response is not None and response.valid)
+                return future.result()
 
         self.get_logger().warning(
             'MoveIt did not answer a state-validity check; treating the '
@@ -1262,7 +1301,7 @@ class XArm7Controller(Node):
             throttle_duration_sec=5.0,
         )
 
-        return False
+        return None
 
     def set_arm_padding(self, padding_m):
         """

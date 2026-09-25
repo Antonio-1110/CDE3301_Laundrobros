@@ -185,7 +185,50 @@ JOINT_STATE_TOPIC = '/joint_states'
 # would let the arm complete the motion.
 TRAJECTORY_CONTROLLER_ACTION = '/xarm7_traj_controller/follow_joint_trajectory'
 
-# Clearance MoveIt keeps between the bucket/table and every moving arm
+# =============================================================
+# OBSTACLES (the MoveIt planning scene)
+#
+# The bucket and table are MoveIt WORLD collision objects, added by
+# arm/scene.py whenever `laundry` connects - not URDF links. Their
+# poses live here and nowhere else.
+#
+# Each pose is the mesh origin in link_base: xyz in metres, rpy in
+# radians with the URDF convention (fixed-axis roll about X, then
+# pitch about Y, then yaw about Z) - the same numbers a URDF <origin>
+# would take.
+#
+# AFTER MOVING THE BUCKET OR TABLE:
+#
+#   1. Edit its xyz/rpy below. `laundry scene check` shows the new
+#      scene against every recorded pose and baked route without
+#      moving the arm (run it with the fake controller up, too).
+#   2. Re-record any recorded pose (INTER, RETRIEVE_n, ...) that the
+#      physical move invalidated.
+#   3. `laundry plan bake` and commit scan_plans/. Baked routes
+#      record the scene they were baked against; replaying one baked
+#      against a different scene warns, and one that now collides is
+#      refused.
+#
+# The mesh file is under meshes/. allowed_links lists robot links
+# allowed to touch the object (link_base rests on the table).
+# =============================================================
+
+OBSTACLES = {
+    'bucket': {
+        'mesh': 'bucket.obj',
+        'xyz': [0.14, -0.72, 0.42],
+        'rpy': [1.71, 3.14, -3.14],
+        'allowed_links': [],
+    },
+    'table': {
+        'mesh': 'table.obj',
+        'xyz': [0.19, -0.43, -0.02],
+        'rpy': [3.14, 3.14, 1.57],
+        'allowed_links': ['link_base'],
+    },
+}
+
+# Clearance MoveIt keeps between the obstacles and every moving arm
 # link (link1-link7) - see arm/scene.py. Applied whenever `laundry`
 # connects to MoveIt, so it governs everything: the planner, Cartesian
 # strokes, and our own straight-line and baked-path checks.
@@ -218,6 +261,16 @@ GRIPPER_PADDING_M = 0.0
 # require it.
 BAKE_GRIPPER_CLEARANCE_M = 0.01
 
+# Baked routes (arm/transfers.py) that are solved and replayed with a
+# smaller arm-link padding than OBSTACLE_PADDING_M, like the end scan.
+# BOTTOM tilts the tool 42 deg up at the bottom of the bucket, which
+# brings the elbow (link3) to the rim: measured on the fake controller
+# (2026-09-26), no INTER -> BOTTOM route exists at 3 cm, while at 2 cm
+# it is almost the straight line (1 via, ~1 deg extra travel).
+ROUTE_ARM_PADDING_M = {
+    'bottom': 0.02,
+}
+
 JOINT_NAMES = [
     'joint1',
     'joint2',
@@ -240,8 +293,8 @@ JOINT_NAMES = [
 # OMPL remains the automatic fallback because PTP does not route
 # around obstacles - it collision-checks its straight-line
 # interpolation and fails if that is blocked. The bucket and table
-# ARE collision geometry here (URDF links on link_base, see
-# xarm7.urdf.xacro), so that case is real, not theoretical.
+# ARE collision geometry here (OBSTACLES above), so that case is
+# real, not theoretical.
 #
 # NOTE: move_group must actually LOAD the pilz pipeline for this to
 # work - check with:

@@ -17,10 +17,10 @@ What matters now is the angle between the insertion axis and the
 bucket axis, and how far the sensor therefore drifts relative to the
 bucket over a full-depth scan. The bucket axis is the one fitted
 from baseline_scans/ (perception.bucket_model.fit_cone), falling back
-to the URDF seed when no baselines load.
+to the configured bucket (config.OBSTACLES) when no baselines load.
 
 Measured with the recorded INTER (fake-controller FK): 4.6 deg to the
-URDF seed, ~6 deg to the fitted axis (5.8-6.5 deg across runs, within
+old bucket-model seed, ~6 deg to the fitted axis (5.8-6.5 deg across runs, within
 MoveIt's joint tolerance; the real bucket's axis rises ~7 deg toward
 the mouth while INTER inserts horizontally), i.e. ~4.5cm of drift over
 the 0.42m scan. That is not an error in itself - the baselines were
@@ -82,12 +82,12 @@ def describe_alignment(tool_z, bucket_axis, depth_m=DEFAULT_DEPTH_M):
 
 
 def bucket_axis_for_check():
-    """Return (axis, source): the fitted bucket axis, else the URDF seed."""
+    """Return (axis, source): the fitted bucket axis, else the configured one."""
     try:
         points = np.concatenate(load_baseline_scans(config.baseline_dir()))
         return fit_cone(points).axis_dir, f'fitted from {config.baseline_dir()}'
     except (OSError, ValueError):
-        return seed_axis_direction(), 'URDF seed (no baselines loaded)'
+        return seed_axis_direction(), 'configured bucket (no baselines loaded)'
 
 
 class FlangeChecker(Node):

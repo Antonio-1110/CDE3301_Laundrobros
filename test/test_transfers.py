@@ -11,6 +11,7 @@ import pytest
 INTER = np.array(config.INTER)
 DROP = np.array(config.DROP)
 HOME = np.array(config.HOME)
+BOTTOM = np.array(config.BOTTOM)
 
 
 def test_time_stop_at_each_rests_at_every_waypoint():
@@ -80,6 +81,21 @@ def test_save_and_load_round_trip(tmp_path):
     assert np.allclose(routes['drop'], ROUTES['drop'], atol=1e-6)
 
 
+def test_saved_routes_record_scene_and_paddings(tmp_path):
+    from laundry_control.arm import scene
+
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(
+        path, {'drop': list(ROUTES['drop']), 'bottom': [INTER, BOTTOM]}, 0.7
+    )
+
+    assert transfers.baked_scene(path) == scene.signature()
+    assert transfers.baked_arm_paddings(path) == {
+        'drop': config.OBSTACLE_PADDING_M,
+        'bottom': config.ROUTE_ARM_PADDING_M['bottom'],
+    }
+
+
 def test_missing_file_means_no_routes(tmp_path):
     assert transfers.load(str(tmp_path / 'none.yaml')) == ({}, None)
 
@@ -108,6 +124,9 @@ class _StubArm:
 
     def get_current_joints(self):
         return list(self.at)
+
+    def set_arm_padding(self, padding_m):
+        self.calls.append(('padding', padding_m))
 
     def first_invalid_state(self, waypoints):
         return 3 if self.blocked else None
@@ -145,6 +164,21 @@ def test_go_to_refuses_a_baked_route_that_collides_now():
     )
     # No replay, and no planner fallback either.
     assert arm.calls == []
+
+
+def test_go_to_replays_under_the_routes_padding_then_restores_it():
+    routes = dict(ROUTES, bottom=np.array([INTER, BOTTOM]))
+    arm = _StubArm(DROP)
+
+    assert transfers.go_to(
+        arm, 'bottom', routes=routes, max_velocity_rad_s=0.7,
+        arm_paddings={'drop': 0.03, 'bottom': 0.02},
+    )
+
+    kinds = [call[0] for call in arm.calls]
+    assert kinds == ['padding', 'baked', 'padding']
+    assert arm.calls[0][1] == 0.02
+    assert arm.calls[2][1] == config.OBSTACLE_PADDING_M
 
 
 def test_go_to_uses_a_straight_move_without_a_route():

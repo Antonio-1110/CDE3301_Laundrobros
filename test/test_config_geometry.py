@@ -10,7 +10,6 @@ from laundry_control.arm.geometry import (
     look_at_quaternion,
     tool_z_from_quaternion,
 )
-from laundry_control.perception.bucket_model import seed_axis_direction
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
@@ -92,8 +91,13 @@ def test_inter_insertion_axis_against_the_bucket():
     # Tool +Z measured at INTER on the MoveIt fake controller.
     tool_z = (0.010, -1.000, -0.009)
 
+    # The bucket axis this was measured against (the bucket-model seed
+    # of 2026-09-24); the configured one is checked in
+    # test_bucket_model.
+    bucket_axis = (-0.0014, 0.996, 0.0891)
+
     misalignment, elevation, drift, _verdict = describe_alignment(
-        tool_z, seed_axis_direction()
+        tool_z, bucket_axis
     )
 
     assert abs(elevation) < 1.0

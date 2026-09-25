@@ -34,6 +34,14 @@ cd ~/ros2_ws && rm -rf build/laundry_control install/laundry_control && python3 
   - The package builds on the rig, and `laundry` is on PATH.
   - The shebang line is the venv's `.venv/bin/python3`, not `/usr/bin/python3`. Otherwise `tof_sensor` and `gripper_node` can't import their hardware libraries.
 
+**1b. Switch `xarm_ros2` to the branch without the bucket and table.** The bucket and table are now MoveIt world objects, placed from `config.OBSTACLES`. Branch `world-obstacles` of the fork drops them from the URDF and keeps the gripper.
+
+```bash
+cd ~/ros2_ws/src/xarm_ros2 && git fetch origin && git checkout world-obstacles && cd ~/ros2_ws && python3 -m colcon build --symlink-install --packages-select xarm_description xarm_moveit_config && source install/setup.bash
+```
+
+- **Paste back:** the last line of the build output.
+
 **2. Bring-up starts every node** (leave it running for everything below).
 
 ```bash
@@ -49,6 +57,24 @@ ros2 node list | grep -E "tof_sensor|scan_recorder_node|gripper_node|move_group"
 - **Paste back:** the output.
 - **Verifies:** the new launch file (replaces `real_arm_scan.launch.py`, and now also starts `gripper_node`).
 - **About the second command:** it tells us whether Pilz PTP is loaded. If it prints only `['ompl']`, every joint move falls back to OMPL. That's harmless but slower, and less repeatable.
+- **Also check** that the bring-up log has `laundry-N` printing "move_group has the obstacles." (the one-shot `laundry scene apply`).
+
+**2b. The obstacles against every recorded pose and route** (no motion).
+
+```bash
+laundry scene check
+```
+
+- **Paste back:** the whole output.
+- **Expect:** every pose `ok` except `retrieve_3`, which collides with the modelled bucket even though it was recorded on the real arm. Every route `ok` except `retrieve_3`, which has none.
+
+**2c. Where is the bucket really?** The modelled bucket may be ~3 cm off. `laundry scene fit` measures the bucket from the baseline scans. It puts the bucket axis **3.1 cm further along +x** (away from the arm's centre line, sideways) and 0.5 cm lower at the closed end than `config.OBSTACLES`. At that pose, every recorded pose, RETRIEVE_3 included, is collision-free. The fit depends on the ToF mounting offsets, so a tape measure has the final say:
+
+- With the arm at HOME, measure (in link_base: origin at the centre of the arm's base where it sits on the table, +z up):
+  - **x of the bucket axis:** the sideways distance from the base's centre to the bucket's centre line. Config says 14.0 cm; the scans say 17.1 cm.
+  - **Height of the bucket axis above the table at the closed end.** Config says 42.0 cm; the scans say 41.5 cm.
+- **Paste back:** the two numbers, and which side of the base centre (+x) the bucket axis is on.
+
 
 ## B. Motion and devices
 

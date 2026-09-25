@@ -123,6 +123,9 @@ class _Logger:
     def error(self, *_a, **_k):
         pass
 
+    def warning(self, *_a, **_k):
+        pass
+
 
 class _StubArm:
 

@@ -255,7 +255,7 @@ def report(written, failed, dest):
     print()
     print('Look for all of:')
     print("  - 'closed end : modelled as a flat cap'")
-    print('  - the fitted cone within a few mm of the URDF seed')
+    print('  - the fitted cone within a few mm of the configured bucket (laundry scene fit)')
     print('  - median cell count >= 5, empty cells near 0%')
     print('  - 0 false clusters across the leave-one-out folds')
 

@@ -15,6 +15,19 @@ Visualization Manager:
       TF Prefix: ""
       Visual Enabled: true
       Collision Enabled: false
+    - Class: moveit_rviz_plugin/PlanningScene
+      Name: Obstacles (MoveIt planning scene)
+      Enabled: true
+      Move Group Namespace: ""
+      Planning Scene Topic: /monitored_planning_scene
+      Robot Description: robot_description
+      Scene Geometry:
+        Scene Alpha: 0.5
+        Scene Color: 50; 230; 50
+        Show Scene Geometry: true
+      Scene Robot:
+        Show Robot Collision: false
+        Show Robot Visual: false
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true

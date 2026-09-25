@@ -57,6 +57,27 @@ def test_planning_failure_falls_back_to_ompl():
     assert attempts == [config.PILZ_PIPELINE_ID, config.OMPL_PIPELINE_ID]
 
 
+def test_unplanned_failures_are_retryable_whatever_the_code():
+    from moveit_msgs.action import MoveGroup
+    from trajectory_msgs.msg import JointTrajectoryPoint
+
+    from laundry_control.arm.controller import failure_is_retryable
+
+    unloaded_pipeline = MoveGroup.Result()
+    unloaded_pipeline.error_code.val = 0
+    assert failure_is_retryable(unloaded_pipeline)
+
+    stopped = MoveGroup.Result()
+    stopped.error_code.val = -4  # CONTROL_FAILED, after execution began
+    stopped.planned_trajectory.joint_trajectory.points = [
+        JointTrajectoryPoint()
+    ]
+    assert not failure_is_retryable(stopped)
+
+    stopped.error_code.val = -2  # PLANNING_FAILED
+    assert failure_is_retryable(stopped)
+
+
 def test_execution_failure_is_never_retried():
     ok, attempts = _move_joints_with([(False, '-5 (CONTROL_FAILED)', False)])
 
