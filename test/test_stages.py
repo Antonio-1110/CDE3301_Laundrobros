@@ -253,9 +253,12 @@ def test_preplanned_stops_when_the_gripper_fails(monkeypatch):
 
     arm = _StubArm()
 
-    assert not pipeline.run_preplanned(arm, _StubGripper(arm, fail_close=True))
-    # INTER, the first RETRIEVE pose, close (fails), back to INTER - no DROP.
-    assert _sequence(arm) == ['INTER', 'POSE', 'close', 'INTER']
+    assert not pipeline.run_preplanned(
+        arm, _StubGripper(arm, fail_close=True), recorded=True
+    )
+    # Open, INTER, the first RETRIEVE pose, close (fails), back to INTER
+    # - no DROP.
+    assert _sequence(arm) == ['open', 'INTER', 'POSE', 'close', 'INTER']
 
 
 def test_grasp_best_dry_run_never_approaches(monkeypatch):

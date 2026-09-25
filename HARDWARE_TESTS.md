@@ -201,16 +201,18 @@ time laundry scan --save scan_records/hw_empty_slow_01.csv 2>&1 | grep -cE "twis
 **13. Baselines at the new speed.** Empty bucket, open gripper; takes about 13 minutes.
 
 ```bash
-laundry baseline collect --count 8 --dest baseline_scans_v003 && laundry scan --end-scan bottom --save scan_records/hw_empty_bottom.csv && laundry evaluate --baseline baseline_scans_v003 --sweep --synthetic --coverage --coverage-scan baseline_scans_v003/$(ls baseline_scans_v003 | head -1) --coverage-scan scan_records/hw_empty_bottom.csv
+laundry baseline collect --count 8 --archive && laundry scan --end-scan bottom --save scan_records/hw_empty_bottom.csv && laundry evaluate --sweep --synthetic --coverage --coverage-scan $(ls baseline_scans/*.csv | head -1) --coverage-scan scan_records/hw_empty_bottom.csv && laundry baseline list && laundry scene fit
 ```
 
-- **Paste back:** the evaluate output, plus the 8 CSVs.
+- **Paste back:** the evaluate, `list` and `scene fit` output, plus the 8 CSVs.
+- **`--archive`:** the new scans land straight in `baseline_scans/` once all 8 succeed, and the old 0.1-speed set moves to `baseline_scans/archive/20260924_180836/`. If a scan fails, the old set stays active.
 - **Verifies:**
   - No false clusters in the leave-one-out.
   - How recall, sigma and occupancy compare with the 0.1 baselines (`laundry evaluate --synthetic --coverage` on `baseline_scans/`, which I can run here).
   - These scans carry the real ray columns, so the synthetic evaluation stops depending on the rebuilt rays.
   - The two `--coverage-scan` lines give the measured closed-end coverage of the precession vs the BOTTOM detour, on real data.
-- **If this looks right:** `baseline_scans_v003` replaces `baseline_scans/` (I'll do the swap in a commit), and every later test uses it.
+- **If this looks wrong:** `laundry baseline restore 20260924_180836` brings the old set back (the new one is archived, not lost).
+- **`scene fit`:** a second measurement of where the bucket is, from the new scans (compare with test 2c).
 
 **14. Optional: 2 cm step.**
 
@@ -247,6 +249,17 @@ laundry run --save scan_records/hw_towel_run.csv 2>&1 | grep -vE "joint[0-9]:|Jo
 - **Verifies:** the whole pipeline end to end on the rig.
 
 ---
+
+**17b. The generated grab grid, slowly, empty bucket first.** Hand on the e-stop. It visits 12 spots on the floor, from the mouth inward: centre, then −20° and +20° across the floor. At each spot it descends 8 cm, closes the claw, lifts back up, and drops at DROP.
+
+```bash
+laundry scene check && laundry preplanned --limit 3 --speed 0.3
+```
+
+- **Watch:** the claw's height above the floor at each grab (the target is 2–3 cm), and the side grabs against the walls. Those two depend most on where the bucket really is (tests 2c and 13).
+- **Paste back:** the `scene check` output, and the claw-to-floor gap at each of the 3 grabs (a rough ruler estimate is fine).
+- **Then:** the full sweep, `laundry preplanned --speed 0.5`, with some laundry in the bucket. Say how many items came out, and which grabs came up empty. `laundry preplanned --recorded` runs the old four poses, for comparison.
+- **If the bucket pose changes** (`config.OBSTACLES`): run `laundry plan bake retrieve` and commit `scan_plans/`.
 
 ## F. Real-cloth validation scans I need
 

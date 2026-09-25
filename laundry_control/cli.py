@@ -17,11 +17,11 @@
     laundry replay scan.csv
     laundry check-flange
     laundry scene apply | check
-    laundry plan bake [endcap|transfers|all] [--depth 0.42]
+    laundry plan bake [endcap|transfers|retrieve|all] [--depth 0.42]
     laundry plan replay [--speed 0.3]
     laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
     laundry run [--dry-run]                                 # everything
-    laundry preplanned
+    laundry preplanned [--recorded] [--limit N] [--speed 0.3]
 
 Stages hand off through files - a scan CSV, then a targets JSON - so
 each one can run alone, be rerun offline, or be inspected in
@@ -583,18 +583,41 @@ def cmd_check_flange(args):
 
 
 def cmd_plan(args):
-    """Run `laundry plan bake [endcap|transfers|all]`."""
+    """Run `laundry plan bake [endcap|transfers|retrieve|all]`."""
     import socket
 
+    from . import config
     from .arm import transfers
+    from .grasp import retrieve_grid
     from .scan import endcap
 
     speed = math.radians(args.max_joint_speed)
     status = 0
 
     with _RosSession(args=args) as arm:
-        if args.which in ('transfers', 'all'):
-            routes, clearances, failures = transfers.bake(arm, log=print)
+        if args.which in ('retrieve', 'all'):
+            print('Solving the grab grid (config.RETRIEVE_GRID)...')
+            grabs, misses = retrieve_grid.solve(arm, log=print)
+            retrieve_grid.save(grabs, baked_on=socket.gethostname())
+            print(f'Saved {retrieve_grid.plan_path()} ({len(grabs)} grabs)')
+
+            if misses:
+                print(
+                    f'{len(misses)} grid point(s) unreachable; see above.',
+                    file=sys.stderr,
+                )
+                status = 1
+
+        if args.which in ('transfers', 'retrieve', 'all'):
+            # `retrieve` re-bakes only the grab routes and keeps the
+            # rest of transfers.yaml (if it matches the current scene).
+            targets = (
+                tuple(config.generated_grab_poses())
+                if args.which == 'retrieve' else None
+            )
+            routes, clearances, failures = transfers.bake(
+                arm, targets=targets, log=print
+            )
 
             path = transfers.default_plan_path()
             transfers.save(
@@ -603,6 +626,7 @@ def cmd_plan(args):
                 speed,
                 baked_on=socket.gethostname(),
                 clearances=clearances,
+                keep=transfers.routes_to_keep(path, routes),
             )
             print(f'Saved {path} ({", ".join(routes) or "no routes"})')
 
@@ -774,7 +798,7 @@ def cmd_scene(args):
         if stale:
             print(stale)
 
-        for name in transfers.TRANSFER_TARGETS:
+        for name in transfers.transfer_targets():
             route = routes.get(name)
 
             if route is None:
@@ -798,6 +822,30 @@ def cmd_scene(args):
                 f'  {name:<11} {"ok" if hit is None else "COLLIDES " + hit} '
                 f'({len(route) - 2} via(s), arm links {padding * 100:g} cm)'
             )
+
+        from .grasp import retrieve_grid
+
+        grabs, grab_stamp = retrieve_grid.load()
+
+        if grabs:
+            print(
+                '\nGrab descents (scan_plans/retrieve.yaml, approach -> grab):'
+            )
+
+            stale = scene.stale_plan_message(
+                grab_stamp, '  retrieve.yaml', 'laundry plan bake retrieve'
+            )
+
+            if stale:
+                print(stale)
+
+            for grab in grabs:
+                hit = _check_path(arm, [grab['approach'], grab['grab']])
+                problems += hit is not None
+                print(
+                    f'  {grab["name"]:<11} '
+                    f'{"ok" if hit is None else "COLLIDES " + hit}'
+                )
 
         plan_path = endcap.default_plan_path()
 
@@ -899,7 +947,13 @@ def cmd_preplanned(args):
     from .pipeline import run_preplanned
 
     with _RosSession(args=args) as arm:
-        ok = run_preplanned(arm, _make_gripper(arm, args.fake_hardware))
+        ok = run_preplanned(
+            arm,
+            _make_gripper(arm, args.fake_hardware),
+            recorded=args.recorded,
+            limit=args.limit,
+            time_scale=args.speed,
+        )
 
     return 0 if ok else 1
 
@@ -1165,8 +1219,12 @@ def build_parser():
         ),
     )
     bake.add_argument(
-        'which', nargs='?', choices=('endcap', 'transfers', 'all'),
-        default='all', help='What to bake (default: all).',
+        'which', nargs='?', choices=('endcap', 'transfers', 'retrieve', 'all'),
+        default='all',
+        help=(
+            'What to bake (default: all). retrieve: solve the grab grid '
+            '(config.RETRIEVE_GRID) and bake routes to it.'
+        ),
     )
     from .scan.pattern import DEFAULT_DEPTH_M
 
@@ -1226,7 +1284,23 @@ def build_parser():
     run.set_defaults(func=cmd_run)
 
     preplanned = subparsers.add_parser(
-        'preplanned', help='Sensorless sweep over the recorded RETRIEVE poses.'
+        'preplanned',
+        help=(
+            'Sensorless sweep: grab at each generated grab pose (else the '
+            'recorded RETRIEVE poses) and drop.'
+        ),
+    )
+    preplanned.add_argument(
+        '--recorded', action='store_true',
+        help='Use the hand-recorded RETRIEVE_3..0 instead of the grab grid.',
+    )
+    preplanned.add_argument(
+        '--limit', type=int, default=None,
+        help='Only the first N grabs (they run mouth-first).',
+    )
+    preplanned.add_argument(
+        '--speed', type=float, default=1.0,
+        help='Fraction of the baked speed, (0, 1] (default: 1).',
     )
     _add_fake_arguments(preplanned)
     preplanned.set_defaults(func=cmd_preplanned)

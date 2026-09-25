@@ -73,6 +73,12 @@ TRANSFER_TARGETS = (
     'retrieve_3',
 )
 
+
+def transfer_targets():
+    """Return TRANSFER_TARGETS plus the generated grab_NN approach poses."""
+    return TRANSFER_TARGETS + tuple(config.generated_grab_poses())
+
+
 # Targets outside the bucket. Their routes are baked with extra gripper
 # clearance (config.BAKE_GRIPPER_CLEARANCE_M) on top of the live
 # padding, since nothing on the way there needs the gripper close to
@@ -276,7 +282,7 @@ def bake_transfer(arm, target_name, log=print):
     return path
 
 
-def bake(arm, targets=TRANSFER_TARGETS, log=print):
+def bake(arm, targets=None, log=print):
     """
     Bake every transfer that can be baked.
 
@@ -287,6 +293,8 @@ def bake(arm, targets=TRANSFER_TARGETS, log=print):
     Arm links get route_arm_padding(target).
     """
     from . import scene
+
+    targets = transfer_targets() if targets is None else targets
 
     log('Baking transfers from INTER...')
 
@@ -322,8 +330,37 @@ def bake(arm, targets=TRANSFER_TARGETS, log=print):
     return routes, clearances, failures
 
 
-def save(path, routes, max_velocity_rad_s, baked_on='', clearances=None):
-    """Write baked transfers as YAML, stamped with the current scene."""
+def routes_to_keep(path, replacing):
+    """
+    Return the raw entries of routes a partial bake should carry over.
+
+    Only from a file baked against the current scene, and only routes
+    to poses that still exist and are not being re-baked (`replacing`).
+    """
+    from . import scene
+
+    document = _read(path)
+
+    if not document or document.get('scene') != scene.signature():
+        return {}
+
+    valid = set(transfer_targets()) - set(replacing)
+
+    return {
+        name: route for name, route in document['routes'].items()
+        if name in valid
+    }
+
+
+def save(
+    path, routes, max_velocity_rad_s, baked_on='', clearances=None, keep=None,
+):
+    """
+    Write baked transfers as YAML, stamped with the current scene.
+
+    keep: raw route entries (see routes_to_keep) written unchanged
+    ahead of the new ones.
+    """
     from . import scene
 
     clearances = clearances or {}
@@ -344,7 +381,7 @@ def save(path, routes, max_velocity_rad_s, baked_on='', clearances=None):
         # (arm/scene.py); go_to() warns when config.OBSTACLES differs.
         'scene': scene.signature(),
         'obstacles': scene.describe(),
-        'routes': {
+        'routes': dict(keep or {}, **{
             name: {
                 'waypoints': [[round(float(v), 6) for v in q] for q in waypoints],
                 'per_joint_travel_deg': [
@@ -358,7 +395,7 @@ def save(path, routes, max_velocity_rad_s, baked_on='', clearances=None):
                 },
             }
             for name, waypoints in routes.items()
-        },
+        }),
     }
 
     with open(path, 'w') as handle:

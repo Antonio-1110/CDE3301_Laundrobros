@@ -145,18 +145,18 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
 | `laundry scene apply` / `check` — put the obstacles into MoveIt / also check every recorded pose and baked route against them (no motion) | MoveIt |
 | `laundry scene fit` — the bucket pose the baseline scans measure, as a `config.OBSTACLES` entry | nothing |
-| `laundry plan bake [endcap\|transfers\|all]` — solve, check and save the end scan and/or the routes from INTER to every named pose (**moves the arm**) | MoveIt |
+| `laundry plan bake [endcap\|transfers\|retrieve\|all]` — solve, check and save the end scan, the routes from INTER to every named pose, and/or the grab grid (**moves the arm**) | MoveIt |
 | `laundry plan replay [--speed 0.3]` — the end scan alone, INTER to INTER | MoveIt |
 | `laundry scan [--save scan.csv] [--end-scan precession\|bottom] [--velocity 0.03 ...]` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` | nothing — plain files |
 | `laundry grasp targets.json [--drop] [--dry-run]` | rig, or `--fake-hardware` |
 | `laundry run [--dry-run]` — scan → detect → grasp → drop | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry gripper open` / `close` / `ANGLE` | `gripper_node` (open/close); the servo on this Pi's GPIO (ANGLE) |
-| `laundry baseline collect [--count 8] [-- <scan options>]` | rig, empty bucket |
-| `laundry baseline promote scan.csv` | nothing |
+| `laundry baseline collect [--count 8] [--archive] [-- <scan options>]` — straight into `baseline_scans/`; `--archive` replaces the set | rig, empty bucket |
+| `laundry baseline promote X.csv\|dir ... [--move] [--archive]`, `archive`, `list`, `restore LABEL` | nothing |
 | `laundry replay scan.csv` | a ROS graph (for RViz) |
 | `laundry evaluate [--sweep] [--synthetic] [--coverage] [--laundry X.csv ...]` | nothing |
-| `laundry preplanned` — sensorless sweep over the RETRIEVE poses | rig, or `--fake-hardware` |
+| `laundry preplanned [--limit N] [--speed 0.3] [--recorded]` — sensorless sweep over the grab grid (else the recorded RETRIEVE poses) | rig, or `--fake-hardware` |
 
 `laundry <command> --help` documents every option.
 
@@ -210,11 +210,30 @@ The arm gets on and off it with collision-checked straight joint moves, so nothi
 
 Current numbers and their provenance are in the constants' comments in `perception/detect.py` and in the git log.
 
+## Baseline scans
+
+The detector models the empty bucket from every `*.csv` directly in `baseline_scans/`, and ignores anything in subfolders.
+
+- **New set** (e.g. after moving the bucket): `laundry baseline collect --archive`. The scans are named `baseline_<session>_NN.csv` and go to `baseline_scans/incoming_<session>/`. Only when all of them succeed does the old set move to `baseline_scans/archive/<its session>/` and the new one take its place. A failed run leaves the old set active, so scans of two different scenes are never mixed.
+- **Top up** the current set: `laundry baseline collect` (no `--archive`).
+- **Adopt scans taken earlier:** `laundry baseline promote scan_records/scan_X.csv ... [--move] [--archive]` names them `baseline_<when taken>_NN.csv`.
+- `laundry baseline list` shows the current set and the archive. `laundry baseline restore <label>` brings an archived set back and archives the current one. Nothing is ever deleted.
+
+## Sensorless first pass: the grab grid
+
+Laundry is expected at the start, so `laundry preplanned` grabs at fixed spots without scanning. `laundry plan bake retrieve` generates those spots from `config.RETRIEVE_GRID` in the configured bucket. The default is 4 depths (40, 30, 20, 10 cm from the closed end, mouth first) × 3 positions across the floor (centre, then ±20°).
+
+For each spot, IK finds the lowest gripper height (2 cm above the floor upwards), then the most vertical approach that is collision-free with 1 cm of extra gripper clearance. Each spot is saved to `scan_plans/retrieve.yaml` as two poses:
+- **`grab_NN`**: an approach pose 8 cm up the gripper axis, reached from INTER on a baked route like any named pose (`laundry move grab_03` works).
+- **The grab itself**: a straight descent onto the laundry, then a straight lift back up.
+
+The sweep runs: route in → descend → close → lift → DROP → open, for each grab. Edit the grid (depths, angles, heights, tilts) in `config.py` and re-bake. `--recorded` still runs the hand-recorded RETRIEVE_3..0.
+
 ## Repeatable moves between poses
 
 Named-pose moves (`laundry move <pose>`, and the scan, grasp, drop and preplanned stages) go through `arm/transfers.go_to`, which tries three routes in order:
 
-1. **A baked route** from `scan_plans/transfers.yaml`. INTER is the hub: there is one route from INTER to each of HOME, DROP, BOTTOM and RETRIEVE_0–3 (`laundry scene check` lists which exist).
+1. **A baked route** from `scan_plans/transfers.yaml`. INTER is the hub: there is one route from INTER to each of HOME, DROP, BOTTOM, RETRIEVE_0–3 and the grab_NN poses (`laundry scene check` lists which exist).
    - INTER → pose replays the route; pose → INTER replays it in reverse.
    - Pose → another pose (e.g. RETRIEVE_2 → DROP) goes back to INTER along one route and out along the other, so the arm always leaves the bucket through its mouth.
    - Each route is straight joint-space segments through zero to two intermediate poses (for HOME/DROP, after first backing the gripper straight out of the bucket). Every 1° is collision-checked, and the route with the least joint travel wins, weighted toward J1 and J4–J7, which twist the cables.

@@ -88,7 +88,12 @@ DROP = [
     -2.913362979888916,
 ]
 
-# Fixed grab poses for the sensorless `laundry preplanned` sweep.
+# Hand-recorded grab poses for the sensorless `laundry preplanned`
+# sweep. Superseded by the generated grab grid (RETRIEVE_GRID below,
+# `laundry plan bake retrieve`) once that is baked; kept for
+# `laundry preplanned --recorded`. FK in the configured bucket: all
+# four sit on the floor's centre line, 11-39 cm from the closed end,
+# and RETRIEVE_1/2 grab almost the same spot.
 RETRIEVE_0 = [
     -0.16877898573875427,
     0.3103211522102356,
@@ -142,8 +147,40 @@ _POSE_NAMES = (
 
 
 def named_poses():
-    """Return every recorded pose as {lower-case name: joint list}."""
-    return {name.lower(): list(globals()[name]) for name in _POSE_NAMES}
+    """
+    Return every named pose as {lower-case name: joint list}.
+
+    The recorded poses above, plus the generated grab_NN poses (the
+    approach pose above each grab point) from
+    scan_plans/retrieve.yaml, if it has been baked.
+    """
+    poses = {name.lower(): list(globals()[name]) for name in _POSE_NAMES}
+    poses.update(generated_grab_poses())
+
+    return poses
+
+
+def retrieve_plan_path():
+    """Return <repo>/scan_plans/retrieve.yaml (see grasp/retrieve_grid.py)."""
+    return os.path.join(repo_root(), 'scan_plans', 'retrieve.yaml')
+
+
+def generated_grab_poses():
+    """Return {grab_NN: approach joints} from retrieve.yaml, or {}."""
+    path = retrieve_plan_path()
+
+    if not os.path.isfile(path):
+        return {}
+
+    import yaml
+
+    with open(path) as handle:
+        document = yaml.safe_load(handle) or {}
+
+    return {
+        grab['name']: list(grab['approach'])
+        for grab in document.get('grabs', [])
+    }
 
 
 def get_named_pose(name):
@@ -166,6 +203,52 @@ def get_named_pose(name):
 
     return poses[key]
 
+
+# =============================================================
+# GENERATED GRAB POSES (sensorless first pass)
+#
+# `laundry plan bake retrieve` places one grab on the bucket floor at
+# every (depth, floor angle) below, in the bucket of OBSTACLES, and
+# for each finds - by IK, collision-checked - the LOWEST gripper
+# height in heights_m and then the most vertical tilt in tilts_deg
+# that the arm can reach. Each grab is stored as two joint states in
+# scan_plans/retrieve.yaml:
+#
+#   approach (named pose grab_NN): the gripper approach_m back along
+#       its own axis - reached from INTER on a baked route;
+#   grab: straight down onto the laundry from there, with a straight,
+#       collision-checked joint move, then straight back up.
+#
+# `laundry preplanned` visits them in this order: depths as listed
+# (mouth first - what is nearest is easiest to pull out), and at each
+# depth the floor angles as listed.
+#
+#   depths_m:          from the CLOSED end of the bucket (it is
+#                      ~0.53 m deep; the mouth faces the arm)
+#   floor_angles_deg:  around the bucket axis from the floor's lowest
+#                      line, positive toward link_base +x. The claw
+#                      is ~6 cm wide; 20 deg is ~7 cm to the side.
+#   heights_m:         gripper contact point above the floor, tried
+#                      lowest first
+#   tilts_deg:         tool axis from vertical (straight down onto the
+#                      floor) toward the closed end, tried smallest
+#                      first; deep grabs need some to reach in
+#   clearance_m:       extra gripper padding the grabs are solved
+#                      with, on top of GRIPPER_PADDING_M - margin for
+#                      the bucket model and the arm's accuracy
+#
+# The side grabs are the ones most sensitive to where the bucket
+# really is (`laundry scene fit`): settle OBSTACLES first, then bake.
+# =============================================================
+
+RETRIEVE_GRID = {
+    'depths_m': [0.40, 0.30, 0.20, 0.10],
+    'floor_angles_deg': [0.0, -20.0, 20.0],
+    'heights_m': [0.02, 0.03, 0.04, 0.05, 0.06],
+    'tilts_deg': [0.0, 15.0, 30.0, 45.0, 60.0],
+    'approach_m': 0.08,
+    'clearance_m': 0.01,
+}
 
 # =============================================================
 # FRAMES AND MOVEIT

@@ -198,7 +198,7 @@ def test_go_to_falls_back_to_the_planner_only_when_blocked():
 def test_committed_transfers_are_sane():
     routes, speed = transfers.load()
 
-    assert {'home', 'drop'} <= set(routes) <= set(transfers.TRANSFER_TARGETS)
+    assert {'home', 'drop'} <= set(routes) <= set(transfers.transfer_targets())
     assert speed == pytest.approx(config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S)
 
     for name, route in routes.items():

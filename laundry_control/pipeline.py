@@ -172,9 +172,16 @@ PREPLANNED_SEQUENCE = (
 )
 
 
-def run_preplanned(arm, gripper):
+def run_preplanned(arm, gripper, recorded=False, limit=None, time_scale=1.0):
     """
-    Sensorless "clear the bucket" sweep over fixed recorded poses.
+    Sensorless "clear the bucket" sweep over fixed poses.
+
+    Uses the generated grab grid (grasp/retrieve_grid.py,
+    scan_plans/retrieve.yaml) when it has been baked, unless
+    recorded=True; limit keeps only the first N grabs. Otherwise, the
+    recorded poses below.
+
+    RECORDED POSES
 
     No sensor data and no detection at all - just visits the
     recorded RETRIEVE_n poses, closing the gripper at each one (as if
@@ -189,16 +196,53 @@ def run_preplanned(arm, gripper):
 
     Returns True if every motion succeeded.
     """
+    from .arm import scene
+    from .grasp import retrieve_grid
+
+    grabs, stamp = ([], '') if recorded else retrieve_grid.load()
+
+    if grabs:
+        stale = scene.stale_plan_message(
+            stamp, 'scan_plans/retrieve.yaml', 'laundry plan bake retrieve'
+        )
+
+        if stale:
+            print(f'WARNING: {stale}')
+
+        grabs = grabs[:limit] if limit else grabs
+
+        print(f'Sensorless sweep over {len(grabs)} generated grab(s).')
+
+        if not go_to(arm, 'inter', time_scale=time_scale):
+            print('Failed to reach INTER; aborting.')
+            return False
+
+        return retrieve_grid.run(
+            arm, gripper, grabs, go_to, time_scale=time_scale
+        )
+
+    if not recorded:
+        print('No generated grab grid (laundry plan bake retrieve); using '
+              'the recorded RETRIEVE poses.')
+
+    sequence = PREPLANNED_SEQUENCE[:limit] if limit else PREPLANNED_SEQUENCE
+
+    print('Opening gripper...')
+
+    if not gripper.open_blocking():
+        print('Gripper did not confirm it opened; aborting before any grab.')
+        return False
+
     print('Moving to INTER...')
 
-    if not go_to(arm, 'inter'):
+    if not go_to(arm, 'inter', time_scale=time_scale):
         print('Failed to reach INTER; aborting.')
         return False
 
-    for name in PREPLANNED_SEQUENCE:
+    for name in sequence:
         print(f'Moving to {name}...')
 
-        if not go_to(arm, name):
+        if not go_to(arm, name, time_scale=time_scale):
             print(f'Failed to reach {name}; aborting.')
             return False
 
@@ -207,12 +251,12 @@ def run_preplanned(arm, gripper):
         if not gripper.close_blocking():
             print('Gripper did not confirm it closed; returning to INTER '
                   'and aborting.')
-            go_to(arm, 'inter')
+            go_to(arm, 'inter', time_scale=time_scale)
             return False
 
         print('Moving to DROP...')
 
-        if not go_to(arm, 'drop'):
+        if not go_to(arm, 'drop', time_scale=time_scale):
             print('Failed to reach DROP; aborting.')
             return False
 
@@ -221,9 +265,9 @@ def run_preplanned(arm, gripper):
         if not gripper.open_blocking():
             print('Gripper did not confirm it opened at DROP; returning to '
                   'INTER and aborting.')
-            go_to(arm, 'inter')
+            go_to(arm, 'inter', time_scale=time_scale)
             return False
 
     print('Returning to INTER...')
 
-    return go_to(arm, 'inter')
+    return go_to(arm, 'inter', time_scale=time_scale)
