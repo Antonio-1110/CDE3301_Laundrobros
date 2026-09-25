@@ -18,7 +18,12 @@ from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint, RobotTrajectory
-from moveit_msgs.srv import GetCartesianPath, GetPositionIK, GetStateValidity
+from moveit_msgs.srv import (
+    GetCartesianPath,
+    GetPositionFK,
+    GetPositionIK,
+    GetStateValidity,
+)
 import numpy as np
 import rclpy
 from rclpy.action import ActionClient
@@ -94,6 +99,32 @@ PLANNING_STAGE_ERROR_CODES = frozenset({
 })
 
 
+def usable_attempts(attempts, loaded, logger=None):
+    """
+    Drop (pipeline, planner) attempts whose pipeline move_group lacks.
+
+    loaded None (unknown) keeps every attempt, as before. If nothing
+    would be left, the attempts are kept as they are, so MoveIt's own
+    error explains the failure.
+    """
+    if loaded is None:
+        return attempts
+
+    usable = [attempt for attempt in attempts if attempt[0] in loaded]
+
+    if not usable:
+        return attempts
+
+    if len(usable) < len(attempts) and logger is not None:
+        skipped = ', '.join(p for p, _ in attempts if p not in loaded)
+        logger.info(
+            f'Skipping {skipped} (not loaded in move_group: {loaded}).',
+            once=True,
+        )
+
+    return usable
+
+
 def failure_is_retryable(result):
     """
     Return True if a failed MoveGroup result cannot have moved the arm.
@@ -123,6 +154,17 @@ SPIN_SLICE_SEC = 0.1
 # VALIDITY_ATTEMPTS times, before the state counts as invalid.
 VALIDITY_TIMEOUT_SEC = 1.0
 VALIDITY_ATTEMPTS = 3
+
+# The first /joint_states message can take seconds to arrive after the
+# node starts (DDS discovery), and get_current_joints() only waits 2 s
+# - which is why the first read after `laundry` started sometimes
+# timed out. The controller waits for that first message once, up to
+# this long, before it reports ready.
+FIRST_JOINT_STATE_TIMEOUT_SEC = 15.0
+
+# How long to wait for move_group's parameter service when asking
+# which planning pipelines it loaded.
+PIPELINE_QUERY_TIMEOUT_SEC = 3.0
 
 
 class XArm7Controller(Node):
@@ -273,6 +315,13 @@ class XArm7Controller(Node):
 
         self.execute_client.wait_for_server()
 
+        self._wait_for_first_joint_state()
+
+        # Which planning pipelines move_group loaded; looked up on the
+        # first move_joints() (see loaded_planning_pipelines).
+        self._loaded_pipelines = None
+        self._pipelines_queried = False
+
         if pad_obstacles:
             from . import scene
 
@@ -293,6 +342,71 @@ class XArm7Controller(Node):
 
     def _joint_state_callback(self, msg):
         self._latest_joint_state = msg
+
+    def _wait_for_first_joint_state(
+        self, timeout_sec=FIRST_JOINT_STATE_TIMEOUT_SEC
+    ):
+        """Spin until /joint_states has been heard from once."""
+        deadline = time.monotonic() + timeout_sec
+        next_note = time.monotonic() + 2.0
+
+        while rclpy.ok() and self._latest_joint_state is None:
+            if time.monotonic() > deadline:
+                self.get_logger().warning(
+                    f'No /joint_states after {timeout_sec:g} s; is the arm '
+                    'driver (or the fake controller) running?'
+                )
+                return False
+
+            if time.monotonic() > next_note:
+                self.get_logger().info('Waiting for /joint_states...')
+                next_note += 2.0
+
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        return True
+
+    def loaded_planning_pipelines(self):
+        """
+        Return the planning pipelines move_group loaded, or None if unknown.
+
+        Asked once (move_group's planning_pipelines parameter) and
+        cached. The stock xArm launches load only OMPL, so trying Pilz
+        first cost a failed request - and a warning - on every
+        move_joints(); knowing what is loaded skips it.
+        """
+        if self._pipelines_queried:
+            return self._loaded_pipelines
+
+        self._pipelines_queried = True
+
+        from rcl_interfaces.srv import GetParameters
+
+        client = self.create_client(
+            GetParameters, '/move_group/get_parameters'
+        )
+
+        try:
+            if not client.wait_for_service(
+                timeout_sec=PIPELINE_QUERY_TIMEOUT_SEC
+            ):
+                return None
+
+            request = GetParameters.Request(names=['planning_pipelines'])
+            future = client.call_async(request)
+
+            if not self._spin_until_done(future, PIPELINE_QUERY_TIMEOUT_SEC):
+                return None
+
+            values = future.result().values
+
+            if values and values[0].string_array_value:
+                self._loaded_pipelines = list(values[0].string_array_value)
+
+        finally:
+            self.destroy_client(client)
+
+        return self._loaded_pipelines
 
     def get_current_joints(self, timeout=2.0):
         """
@@ -601,6 +715,10 @@ class XArm7Controller(Node):
             attempts.append(
                 (fallback_pipeline_id, fallback_planner_id)
             )
+
+        attempts = usable_attempts(
+            attempts, self.loaded_planning_pipelines(), self.get_logger()
+        )
 
         for attempt_index, (attempt_pipeline, attempt_planner) in enumerate(
             attempts
@@ -1211,6 +1329,36 @@ class XArm7Controller(Node):
         return JointState(
             name=list(self.JOINT_NAMES),
             position=[float(q) for q in joints],
+        )
+
+    def compute_fk(self, joints):
+        """
+        Return (position, orientation quaternion xyzw) of the flange.
+
+        Pure kinematics from the robot model - independent of where
+        the arm actually is - so anything built on it is repeatable.
+        Returns None if MoveIt refuses.
+        """
+        client = self._client('_fk_client', GetPositionFK, '/compute_fk')
+
+        request = GetPositionFK.Request()
+        request.header.frame_id = self.base_frame
+        request.fk_link_names = [self.flange_link]
+        request.robot_state.joint_state = self._joint_state(joints)
+
+        response = self._call(client, request)
+
+        if response is None or response.error_code.val != 1:
+            return None
+
+        pose = response.pose_stamped[0].pose
+
+        return (
+            np.array([pose.position.x, pose.position.y, pose.position.z]),
+            np.array([
+                pose.orientation.x, pose.orientation.y,
+                pose.orientation.z, pose.orientation.w,
+            ]),
         )
 
     def compute_ik(self, pose, seed, avoid_collisions=True, timeout=0.2):

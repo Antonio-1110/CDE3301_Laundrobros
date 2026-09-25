@@ -127,17 +127,29 @@ class BakeError(RuntimeError):
 
 
 def _retreat(arm, distance_m):
-    """Return the joint state with the flange backed out of INTER, or None."""
-    tf = arm.get_flange_transform()
-    t = tf.transform.translation
-    q = tf.transform.rotation
+    """
+    Return the joint state with the flange backed out of INTER, or None.
 
-    tool_z = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()[:, 2]
+    INTER's flange pose comes from forward kinematics of the recorded
+    joint angles, not from where the arm happens to be, so the same
+    INTER always gives the same retreat - and the same baked route.
+    (Reading the live flange made HOME's route differ between bakes:
+    the arm stops within MoveIt's tolerance of INTER, not exactly on it.)
+    """
+    fk = arm.compute_fk(config.INTER)
+
+    if fk is None:
+        return None
+
+    position, quaternion = fk
+
+    tool_z = Rotation.from_quat(quaternion).as_matrix()[:, 2]
 
     pose = Pose()
-    position = np.array([t.x, t.y, t.z]) - distance_m * tool_z
+    position = position - distance_m * tool_z
     pose.position.x, pose.position.y, pose.position.z = map(float, position)
-    pose.orientation = q
+    pose.orientation.x, pose.orientation.y = map(float, quaternion[:2])
+    pose.orientation.z, pose.orientation.w = map(float, quaternion[2:])
 
     solution = arm.compute_ik(pose, config.INTER)
 
@@ -209,9 +221,9 @@ def bake_transfer(arm, target_name, log=print):
     """
     Find the INTER -> target transfer; returns its joint waypoints.
 
-    MOVES THE ARM to INTER (to read the flange pose for the retreat).
-    Everything is checked against the planning scene as it is now, so
-    the caller sets the padding the route must keep.
+    Does not move the arm: every check is on joint states. Everything
+    is checked against the planning scene as it is now, so the caller
+    sets the padding the route must keep.
     """
     inter = np.array(config.INTER)
     target = np.array(config.get_named_pose(target_name))
@@ -221,9 +233,6 @@ def bake_transfer(arm, target_name, log=print):
             f'{target_name.upper()} itself collides with the bucket/table '
             '(with the current padding); re-record it or check config.OBSTACLES.'
         )
-
-    if not arm.move_joints(config.INTER):
-        raise BakeError('Could not reach INTER.')
 
     if arm.first_invalid_state([inter, target]) is None:
         log(f'  INTER -> {target_name}: the straight line is collision-free.')
@@ -324,8 +333,6 @@ def bake(arm, targets=None, log=print):
         config.OBSTACLE_PADDING_M,
         {'gripper_link': config.GRIPPER_PADDING_M},
     )
-
-    arm.move_joints(config.INTER)
 
     return routes, clearances, failures
 

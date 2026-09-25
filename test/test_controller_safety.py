@@ -25,16 +25,22 @@ class _Self:
     JOINT_NAMES = list(config.JOINT_NAMES)
     _duration_to_seconds = staticmethod(XArm7Controller._duration_to_seconds)
 
+    loaded = None  # planning pipelines move_group reports; None = unknown
+
     def get_logger(self):
         return _Logger()
+
+    def loaded_planning_pipelines(self):
+        return self.loaded
 
 
 # ---------------------------------------------------------------
 # Fix 2: fall back to OMPL only when the first attempt failed to PLAN
 # ---------------------------------------------------------------
 
-def _move_joints_with(outcomes):
+def _move_joints_with(outcomes, loaded=None):
     arm = _Self()
+    arm.loaded = loaded
     arm.attempts = []
 
     def once(joints, **kwargs):
@@ -55,6 +61,25 @@ def test_planning_failure_falls_back_to_ompl():
 
     assert ok
     assert attempts == [config.PILZ_PIPELINE_ID, config.OMPL_PIPELINE_ID]
+
+
+def test_pipelines_move_group_lacks_are_not_tried():
+    ok, attempts = _move_joints_with(
+        [(True, None, False)], loaded=[config.OMPL_PIPELINE_ID]
+    )
+
+    assert ok
+    assert attempts == [config.OMPL_PIPELINE_ID]
+
+
+def test_everything_is_tried_when_nothing_listed_is_loaded():
+    from laundry_control.arm.controller import usable_attempts
+
+    attempts = [('pilz', 'PTP'), ('ompl', 'RRTConnect')]
+
+    assert usable_attempts(attempts, None) == attempts
+    assert usable_attempts(attempts, ['chomp']) == attempts
+    assert usable_attempts(attempts, ['pilz', 'ompl']) == attempts
 
 
 def test_unplanned_failures_are_retryable_whatever_the_code():
