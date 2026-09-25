@@ -16,7 +16,8 @@ effector occludes part of the bucket, so the scan has to be taken in
 the same gripper state the baselines were recorded in, or the
 difference shows up as laundry that isn't there.
 
-Also here: the sensorless `laundry preplanned` sweep.
+Also here: the sensorless `laundry preplanned` sweep, and `laundry
+clear`, which empties the bucket with both (run_clear).
 """
 
 from datetime import datetime
@@ -24,7 +25,7 @@ import os
 
 from . import config
 from .arm.transfers import go_to
-from .grasp.execute import grasp_best
+from .grasp.execute import describe_plan, execute_plan, grasp_best, plan_grasp
 from .perception.bucket_model import build_baseline_surface
 from .perception.detect import detect_on_points, load_baseline_scans
 from .perception.detect import load_points_xyz
@@ -81,19 +82,28 @@ def run_scan(arm, recorder, csv_path, scan_kwargs):
             )
 
 
-def detect_scan(csv_path, baseline, detect_params):
+def build_model(baseline):
+    """Fit the empty-bucket model from the baselines, and report it."""
+    baseline_scans = load_baseline_scans(baseline)
+    surface = build_baseline_surface(baseline_scans)
+
+    print_model_report(surface, baseline_scans, baseline)
+
+    return surface
+
+
+def detect_scan(csv_path, baseline, detect_params, surface=None):
     """
     Build the bucket model, report it, and detect laundry in csv_path.
 
     Returns (clusters, surface). The surface is returned because the
     grasp stage must plan against the SAME model the detection was
     judged against - fitting it twice would waste the expensive step
-    and risk the two disagreeing.
+    and risk the two disagreeing. Pass an already-built surface to
+    skip the fit (run_clear detects many scans against one model).
     """
-    baseline_scans = load_baseline_scans(baseline)
-    surface = build_baseline_surface(baseline_scans)
-
-    print_model_report(surface, baseline_scans, baseline)
+    if surface is None:
+        surface = build_model(baseline)
 
     candidate_xyz = load_points_xyz(csv_path)
 
@@ -105,6 +115,29 @@ def detect_scan(csv_path, baseline, detect_params):
     print()
 
     return clusters, surface
+
+
+def open_for_scan(gripper, dry_run=False):
+    """Open the gripper before a scan; False if that must abort the run."""
+    print('Opening gripper so the scan matches the baseline geometry...')
+
+    if gripper.open_blocking():
+        return True
+
+    if not dry_run:
+        print(
+            'Could not confirm the gripper opened (is gripper_node '
+            'running?). The grasp needs it; aborting before the scan.'
+        )
+        return False
+
+    print(
+        'WARNING: could not confirm the gripper opened. If it is '
+        "closed, this scan's end-effector occlusion differs from "
+        "the baselines' and may produce phantom detections."
+    )
+
+    return True
 
 
 def run_full(
@@ -120,21 +153,8 @@ def run_full(
     """Run scan -> detect -> grasp -> drop; True on success."""
     print('========== SCAN ==========')
 
-    print('Opening gripper so the scan matches the baseline geometry...')
-
-    if not gripper.open_blocking():
-        if not dry_run:
-            print(
-                'Could not confirm the gripper opened (is gripper_node '
-                'running?). The grasp needs it; aborting before the scan.'
-            )
-            return False
-
-        print(
-            'WARNING: could not confirm the gripper opened. If it is '
-            "closed, this scan's end-effector occlusion differs from "
-            "the baselines' and may produce phantom detections."
-        )
+    if not open_for_scan(gripper, dry_run):
+        return False
 
     if not run_scan(arm, recorder, csv_path, scan_kwargs):
         print('Scan failed; aborting.')
@@ -271,3 +291,124 @@ def run_preplanned(arm, gripper, recorded=False, limit=None, time_scale=1.0):
     print('Returning to INTER...')
 
     return go_to(arm, 'inter', time_scale=time_scale)
+
+
+# `laundry clear` gives up after this many scan -> grasp rounds, or
+# after this many grasps in a row that failed (an item nothing can
+# reach, or a gripper problem). One failed grasp is worth a retry: the
+# attempt itself may have moved the pile.
+DEFAULT_CLEAR_MAX_ROUNDS = 15
+DEFAULT_CLEAR_MAX_FAILED = 2
+
+
+def run_clear(
+    arm,
+    recorder,
+    gripper,
+    baseline,
+    scan_kwargs,
+    detect_params,
+    sweep=True,
+    sweep_limit=None,
+    max_rounds=DEFAULT_CLEAR_MAX_ROUNDS,
+    max_failed=DEFAULT_CLEAR_MAX_FAILED,
+    scan_path=None,
+    time_scale=1.0,
+):
+    """
+    Empty the bucket: the sensorless grab sweep, then scan until clear.
+
+        1. the grab-grid sweep (run_preplanned; sweep=False skips it) -
+           laundry is expected at the start, so no scan is needed yet;
+        2. open -> scan -> detect -> grasp the best reachable item ->
+           DROP, repeated until a scan finds nothing.
+
+    The bucket model is fitted once and every scan is judged against
+    it. Stops after max_rounds, or max_failed failed grasps in a row.
+    scan_path(round) names each round's scan CSV. Returns True only if
+    the last scan found the bucket clear.
+    """
+    scan_path = scan_path or (
+        lambda index: timestamped_scan_path(f'clear_{index:02d}')
+    )
+
+    print('========== BUCKET MODEL ==========')
+
+    surface = build_model(baseline)
+
+    if sweep:
+        print('========== GRAB SWEEP ==========')
+
+        if not run_preplanned(
+            arm, gripper, limit=sweep_limit, time_scale=time_scale
+        ):
+            print('The grab sweep failed; stopping before any scan.')
+            return False
+
+    retrieved = 0
+    failed_in_a_row = 0
+
+    for index in range(1, max_rounds + 1):
+        print(f'========== ROUND {index}: SCAN ==========')
+
+        csv_path = scan_path(index)
+
+        if not open_for_scan(gripper):
+            return False
+
+        if not run_scan(arm, recorder, csv_path, scan_kwargs):
+            print('Scan failed; stopping.')
+            return False
+
+        clusters, _surface = detect_scan(
+            csv_path, baseline, detect_params, surface=surface
+        )
+
+        if not clusters:
+            print(
+                f'The bucket is clear: {retrieved} item(s) retrieved after '
+                f'the sweep, in {index} scan(s).'
+            )
+            return True
+
+        print(f'========== ROUND {index}: GRASP ==========')
+
+        if not go_to(arm, 'inter'):
+            print('Failed to reach INTER; stopping.')
+            return False
+
+        plan = plan_grasp(arm, clusters, surface)
+
+        if plan is None:
+            # Nothing moved, so a rescan would see the same pile.
+            print(
+                f'Laundry detected ({len(clusters)} cluster(s)) but none '
+                f'is reachable; stopping. Last scan: {csv_path}'
+            )
+            return False
+
+        print(describe_plan(plan))
+
+        if execute_plan(arm, gripper, plan, drop=True):
+            retrieved += 1
+            failed_in_a_row = 0
+            continue
+
+        failed_in_a_row += 1
+
+        if failed_in_a_row >= max_failed:
+            print(
+                f'{failed_in_a_row} grasps failed in a row; stopping with '
+                'laundry still detected. Check the last scan: '
+                f'{csv_path}'
+            )
+            return False
+
+        print('Grasp failed; rescanning and trying again.')
+
+    print(
+        f'Stopped after {max_rounds} rounds ({retrieved} item(s) retrieved) '
+        'with laundry still detected.'
+    )
+
+    return False

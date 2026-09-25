@@ -36,6 +36,12 @@ from INTER like any other.
 
 run() replays them: baked route to grab_NN, straight down, close,
 straight up, DROP, open.
+
+plan_floor_grab() does the same search for a DETECTED item (the
+sensor-guided grasp): the grab is placed over the item, sunk into it,
+and reached from the nearest baked grab_NN by a short straight,
+collision-checked joint move - so the whole approach is as
+repeatable as the grid's.
 """
 
 import datetime
@@ -47,9 +53,19 @@ import yaml
 
 from .. import config
 from ..arm.geometry import look_at_quaternion
-from ..perception.bucket_model import _axis_basis, seed_cone
+from ..perception.bucket_model import _axis_basis, seed_cone, to_cylindrical
 
 PLAN_VERSION = 1
+
+# Detected items are grabbed this way only on the floor band: within
+# this angle of the floor's lowest line (farther up the wall, the
+# Cartesian grasp in grasp/plan.py is used).
+FLOOR_GRAB_MAX_ANGLE_DEG = 50.0
+
+# How far into a detected pile to sink the grab, as in grasp/plan.py:
+# half the pile's sensed height above the floor, at most 5 cm.
+FLOOR_GRAB_SINK_FRACTION = 0.5
+FLOOR_GRAB_MAX_SINK_M = 0.05
 
 
 def plan_path():
@@ -113,18 +129,20 @@ def _seeds():
     ]
 
 
-def solve_one(arm, depth_m, floor_angle_deg, grid=None):
+def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
     """
     Return the best grab at one grid point as a dict, or None.
 
     Must run with the gripper padded by the grid's clearance (see
     solve). Checks: grab and approach states, and the straight
-    descent between them.
+    descent between them. seeds default to INTER and the recorded
+    RETRIEVE poses.
     """
     from ..arm.transfers import weighted_travel_deg
 
     grid = grid or config.RETRIEVE_GRID
     inter = np.array(config.INTER)
+    seeds = seeds or _seeds()
 
     for height in grid['heights_m']:
         for tilt in grid['tilts_deg']:
@@ -134,7 +152,7 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None):
 
             best = None
 
-            for seed in _seeds():
+            for seed in seeds:
                 grab = arm.compute_ik(_flange_pose(contact, tool_z, claw_x), seed)
 
                 if grab is None:
@@ -219,6 +237,153 @@ def solve(arm, grid=None, log=print):
         )
 
     return grabs, misses
+
+
+def floor_position(point, cone=None):
+    """
+    Return (depth, floor angle deg, height above floor) of a point.
+
+    In the configured bucket, with solve()'s conventions: depth from
+    the closed end, angle from the floor's lowest line (positive toward
+    +x), height inward from the wall.
+    """
+    cone = cone or seed_cone()
+
+    s, theta, r = to_cylindrical(np.asarray(point, dtype=float)[None], cone)
+
+    # theta is measured from "up" toward +x; the floor is at pi.
+    angle = np.degrees(np.pi - theta[0])
+    angle = (angle + 180.0) % 360.0 - 180.0
+
+    return float(s[0]), float(angle), float(cone.radius_at(s[0]) - r[0])
+
+
+def plan_floor_grab(arm, point, grabs, grid=None):
+    """
+    Plan a grid-style grab at a detected item's sensed top, or None.
+
+    Returns the solve_one() dict plus 'via': the baked grab_NN it is
+    reached from. The grab sinks FLOOR_GRAB_SINK_FRACTION of the pile's
+    sensed height into it (at most FLOOR_GRAB_MAX_SINK_M, never lower
+    than the grid's lowest height). None if the item is off the floor
+    band, out of the bucket, or nothing reachable was found.
+    """
+    from ..arm import scene
+
+    grid = dict(grid or config.RETRIEVE_GRID)
+
+    depth, angle, top_height = floor_position(point)
+
+    if abs(angle) > FLOOR_GRAB_MAX_ANGLE_DEG or not (
+        0.0 < depth < max(grid['depths_m']) + 0.15
+    ):
+        return None
+
+    top_height = max(0.0, top_height)
+    sink = min(FLOOR_GRAB_SINK_FRACTION * top_height, FLOOR_GRAB_MAX_SINK_M)
+    lowest = max(min(grid['heights_m']), top_height - sink)
+    grid['heights_m'] = [lowest + 0.01 * k for k in range(4)]
+
+    # Seed IK from the grabs nearest this spot: same elbow, same wrist.
+    nearby = sorted(
+        grabs,
+        key=lambda g: np.hypot(
+            g['depth_m'] - depth, np.radians(g['floor_angle_deg'] - angle) * 0.2
+        ),
+    )
+    seeds = [g['grab'] for g in nearby[:3]] + _seeds()
+
+    scene.set_padding(
+        arm,
+        config.OBSTACLE_PADDING_M,
+        {'gripper_link': config.GRIPPER_PADDING_M + grid['clearance_m']},
+    )
+
+    try:
+        plan = solve_one(arm, depth, angle, grid, seeds=seeds)
+    finally:
+        scene.set_padding(
+            arm,
+            config.OBSTACLE_PADDING_M,
+            {'gripper_link': config.GRIPPER_PADDING_M},
+        )
+
+    if plan is None:
+        return None
+
+    # The nearest (in joint space) grid grab with a clear straight
+    # line to this approach pose.
+    approach = np.array(plan['approach'])
+
+    for grab in sorted(
+        grabs, key=lambda g: np.abs(np.array(g['approach']) - approach).max()
+    ):
+        if arm.first_invalid_state([grab['approach'], plan['approach']]) is None:
+            plan['via'] = grab['name']
+            return plan
+
+    return None
+
+
+def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print):
+    """
+    Execute a plan_floor_grab() plan; True if the item was taken (and dropped).
+
+    via grab_NN (baked) -> approach -> down -> close -> up -> back to
+    grab_NN -> DROP -> open -> INTER. Always lifts back out.
+    """
+    via = plan['via']
+
+    log(
+        f'Floor grab via {via}: {plan["depth_m"] * 100:.0f} cm deep, '
+        f'{plan["floor_angle_deg"]:+.0f} deg, {plan["height_m"] * 100:.1f} cm '
+        f'above the floor, tilt {plan["tilt_deg"]:.0f} deg'
+    )
+
+    if not gripper.open_blocking():
+        log('Gripper did not confirm it opened; aborting before the approach.')
+        return False
+
+    if not (
+        go_to(arm, via)
+        and arm.move_joints_linear(plan['approach'])
+        and arm.move_joints_linear(plan['grab'])
+    ):
+        log('Could not reach the grab; returning to INTER.')
+        arm.move_joints_linear(plan['approach'])
+        go_to(arm, 'inter')
+        return False
+
+    closed = gripper.close_blocking()
+
+    # Back out the way it came, so the route to DROP starts at a
+    # baked pose.
+    if not (
+        arm.move_joints_linear(plan['approach'])
+        and arm.move_joints_linear(config.get_named_pose(via))
+    ):
+        log('Could not lift back out; stopping here.')
+        return False
+
+    if not closed:
+        log('Gripper did not confirm it closed; returning to INTER.')
+        go_to(arm, 'inter')
+        return False
+
+    if not drop:
+        return go_to(arm, 'inter')
+
+    if not go_to(arm, 'drop'):
+        log('Failed to reach DROP.')
+        return False
+
+    released = gripper.open_blocking()
+
+    if not released:
+        log('Gripper did not confirm it opened at DROP; the item may still '
+            'be held.')
+
+    return go_to(arm, 'inter') and released
 
 
 def save(grabs, path=None, baked_on=''):

@@ -184,6 +184,11 @@ def _named_moves_through_stub(monkeypatch):
         return arm.move_joints(config.get_named_pose(name))
 
     monkeypatch.setattr(execute, 'go_to', fake_go_to)
+    # No grab grid: plan_grasp uses the Cartesian reach (floor grabs
+    # need MoveIt; see test_retrieve_grid).
+    monkeypatch.setattr(
+        execute.retrieve_grid, 'load', lambda path=None: ([], '')
+    )
 
 
 def _sequence(arm):
@@ -276,18 +281,34 @@ def test_grasp_best_dry_run_never_approaches(monkeypatch):
     assert _sequence(arm) == ['INTER']
 
 
-def test_plan_first_reachable_skips_unreachable_clusters():
+def test_plan_grasp_skips_unreachable_clusters(monkeypatch):
     big, small = _cluster(3e-4), _cluster(1e-4)
 
     def planner(cluster, surface, arm):
         return None if cluster is big else _Grasp(tcp_position=np.zeros(3))
 
-    chosen, grasp = execute.plan_first_reachable(
-        [small, big], None, None, planner
+    monkeypatch.setattr(execute, 'compute_grasp_target', planner)
+
+    plan = execute.plan_grasp(None, [small, big], None, grabs=[])
+
+    assert plan.kind == 'cartesian'
+    assert plan.cluster is small
+
+
+def test_plan_grasp_prefers_a_floor_grab(monkeypatch):
+    floor = {'via': 'grab_01'}
+    monkeypatch.setattr(
+        execute.retrieve_grid, 'plan_floor_grab',
+        lambda arm, point, grabs: floor,
+    )
+    monkeypatch.setattr(
+        execute, 'compute_grasp_target',
+        lambda *a: pytest.fail('Cartesian reach tried first'),
     )
 
-    assert chosen is small
-    assert grasp is not None
+    plan = execute.plan_grasp(None, [_cluster(1e-4)], None, grabs=[{}])
+
+    assert plan.kind == 'floor' and plan.plan is floor
 
 
 # ------------------------------------------------------------ CLI

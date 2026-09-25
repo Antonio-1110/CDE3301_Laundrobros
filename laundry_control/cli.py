@@ -20,7 +20,8 @@
     laundry plan bake [endcap|transfers|retrieve|all] [--depth 0.42]
     laundry plan replay [--speed 0.3]
     laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
-    laundry run [--dry-run]                                 # everything
+    laundry run [--dry-run]                                 # one item
+    laundry clear [--no-grabs] [--max-rounds N]             # the bucket
     laundry preplanned [--recorded] [--limit N] [--speed 0.3]
 
 Stages hand off through files - a scan CSV, then a targets JSON - so
@@ -34,7 +35,7 @@ WHAT NEEDS WHAT
     replay                               a ROS graph (for RViz)
     move, check-flange, plan bake,       MoveIt (real or fake)
     scene
-    scan, grasp, run, preplanned         MoveIt + scan_recorder_node/
+    scan, grasp, run, clear, preplanned  MoveIt + scan_recorder_node/
                                          tof_sensor/gripper_node - or
                                          --fake-hardware
     gripper open|close                   gripper_node
@@ -190,10 +191,13 @@ def _add_fake_arguments(parser, with_scan_from=False):
         parser.add_argument(
             '--scan-from',
             type=str,
+            nargs='+',
             default=None,
             help=(
                 'With --fake-hardware: a saved scan CSV that stands in '
-                "for the scan's output (the scan motion still runs)."
+                "for the scan's output (the scan motion still runs). "
+                'Several are used one per scan, in order, the last '
+                'repeating.'
             ),
         )
 
@@ -942,6 +946,29 @@ def cmd_run(args):
     return 0 if ok else 1
 
 
+def cmd_clear(args):
+    """Run `laundry clear`: grab sweep, then scan -> grasp until empty."""
+    from .pipeline import run_clear
+    from .scan.pattern import scan_kwargs_from_args
+
+    with _RosSession(args=args) as arm:
+        ok = run_clear(
+            arm,
+            _make_recorder(arm, args),
+            _make_gripper(arm, args.fake_hardware),
+            baseline=_baseline_path(args),
+            scan_kwargs=scan_kwargs_from_args(args),
+            detect_params=_detect_params(args),
+            sweep=not args.no_grabs,
+            sweep_limit=args.grab_limit,
+            max_rounds=args.max_rounds,
+            max_failed=args.max_failed,
+            time_scale=args.speed,
+        )
+
+    return 0 if ok else 1
+
+
 def cmd_preplanned(args):
     """Run `laundry preplanned`."""
     from .pipeline import run_preplanned
@@ -1282,6 +1309,46 @@ def build_parser():
     _add_detector_arguments(run)
     _add_fake_arguments(run, with_scan_from=True)
     run.set_defaults(func=cmd_run)
+
+    from .pipeline import DEFAULT_CLEAR_MAX_FAILED, DEFAULT_CLEAR_MAX_ROUNDS
+
+    clear = subparsers.add_parser(
+        'clear',
+        help=(
+            'Empty the bucket: the grab-grid sweep, then scan -> detect -> '
+            'grasp -> drop until a scan finds nothing.'
+        ),
+    )
+    clear.add_argument(
+        '--no-grabs', action='store_true',
+        help='Skip the sensorless grab-grid pass; start with a scan.',
+    )
+    clear.add_argument(
+        '--grab-limit', type=int, default=None,
+        help='Only the first N grabs of the grid (they run mouth-first).',
+    )
+    clear.add_argument(
+        '--max-rounds', type=int, default=DEFAULT_CLEAR_MAX_ROUNDS,
+        help=(
+            'Give up after this many scan -> grasp rounds '
+            f'(default: {DEFAULT_CLEAR_MAX_ROUNDS}).'
+        ),
+    )
+    clear.add_argument(
+        '--max-failed', type=int, default=DEFAULT_CLEAR_MAX_FAILED,
+        help=(
+            'Give up after this many failed grasps in a row '
+            f'(default: {DEFAULT_CLEAR_MAX_FAILED}).'
+        ),
+    )
+    clear.add_argument(
+        '--speed', type=float, default=1.0,
+        help='Fraction of the baked speed for the grabs, (0, 1] (default: 1).',
+    )
+    add_scan_arguments(clear)
+    _add_detector_arguments(clear)
+    _add_fake_arguments(clear, with_scan_from=True)
+    clear.set_defaults(func=cmd_clear)
 
     preplanned = subparsers.add_parser(
         'preplanned',
