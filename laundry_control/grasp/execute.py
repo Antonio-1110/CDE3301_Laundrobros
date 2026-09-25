@@ -121,7 +121,11 @@ def execute_grasp(arm, gripper, grasp, drop=False):
     """
     print('Opening gripper...')
 
-    gripper.open_blocking()
+    if not gripper.open_blocking():
+        print('Gripper did not confirm it opened (is gripper_node running?); '
+              'aborting before the approach.')
+
+        return False
 
     x, y, z = grasp.tcp_position
 
@@ -132,13 +136,21 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Closing gripper...')
 
-    gripper.close_blocking()
+    closed = gripper.close_blocking()
+
+    if not closed:
+        # Still retract: the arm must not be left down in the bucket.
+        print('Gripper did not confirm it closed; retracting without the '
+              'item.')
 
     print('Retracting to INTER...')
 
     if not go_to(arm, 'inter'):
         print('Failed to retract to INTER; aborting.')
 
+        return False
+
+    if not closed:
         return False
 
     if not drop:
@@ -153,11 +165,15 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Opening gripper to release the item...')
 
-    gripper.open_blocking()
+    released = gripper.open_blocking()
+
+    if not released:
+        print('Gripper did not confirm it opened at DROP; the item may '
+              'still be held.')
 
     print('Returning to INTER...')
 
-    return go_to(arm, 'inter')
+    return go_to(arm, 'inter') and released
 
 
 def grasp_best(arm, gripper, clusters, surface, drop=False, dry_run=False):

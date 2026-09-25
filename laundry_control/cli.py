@@ -220,8 +220,15 @@ class _RosSession:
 
     def __enter__(self):
         import rclpy
+        from rclpy.signals import SignalHandlerOptions
 
-        rclpy.init()
+        # No rclpy SIGINT handler: it shuts the ROS context down the
+        # moment Ctrl+C is pressed, so the MoveIt goal in flight could
+        # no longer be cancelled - and a goal outlives the process
+        # that sent it, so the arm would carry on moving. Python's own
+        # handler raises KeyboardInterrupt instead, and
+        # XArm7Controller cancels the goal before it propagates.
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
 
         if self.need_arm:
             from .arm.controller import XArm7Controller
@@ -524,18 +531,32 @@ def cmd_plan(args):
     from .scan import endcap
 
     speed = math.radians(args.max_joint_speed)
+    status = 0
 
     with _RosSession(args=args) as arm:
         if args.which in ('transfers', 'all'):
-            try:
-                routes = transfers.bake(arm, log=print)
-            except transfers.BakeError as exc:
-                print(f'Transfer bake failed: {exc}', file=sys.stderr)
-                return 1
+            routes, clearances, failures = transfers.bake(arm, log=print)
 
             path = transfers.default_plan_path()
-            transfers.save(path, routes, speed, baked_on=socket.gethostname())
-            print(f'Saved {path}')
+            transfers.save(
+                path,
+                routes,
+                speed,
+                baked_on=socket.gethostname(),
+                clearances=clearances,
+            )
+            print(f'Saved {path} ({", ".join(routes) or "no routes"})')
+
+            if failures:
+                for name, reason in failures.items():
+                    print(f'No route to {name.upper()}: {reason}', file=sys.stderr)
+
+                print(
+                    'Moves to those poses fall back to a straight or planned '
+                    'move, not a baked one.',
+                    file=sys.stderr,
+                )
+                status = 1
 
         if args.which in ('endcap', 'all'):
             try:
@@ -559,7 +580,7 @@ def cmd_plan(args):
 
     print('Commit scan_plans/ so every run replays the same motion.')
 
-    return 0
+    return status
 
 
 def cmd_plan_replay(args):
@@ -835,7 +856,7 @@ def build_parser():
         'bake',
         help=(
             'Solve, collision-check and save the end-scan trajectory and/or '
-            'the INTER<->HOME/DROP transfers. MOVES THE ARM.'
+            'the transfers from INTER to every named pose. MOVES THE ARM.'
         ),
     )
     bake.add_argument(

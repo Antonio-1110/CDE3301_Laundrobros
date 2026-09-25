@@ -165,16 +165,18 @@ class _StubArm:
 
 class _StubGripper:
 
-    def __init__(self, arm):
+    def __init__(self, arm, fail_open=False, fail_close=False):
         self.arm = arm
+        self.fail_open = fail_open
+        self.fail_close = fail_close
 
     def open_blocking(self):
         self.arm.calls.append(('gripper', 'open'))
-        return True
+        return not self.fail_open
 
     def close_blocking(self):
         self.arm.calls.append(('gripper', 'close'))
-        return True
+        return not self.fail_close
 
 
 @pytest.fixture(autouse=True)
@@ -221,6 +223,41 @@ def test_execute_grasp_stops_if_target_unreachable():
 
     assert not execute.execute_grasp(arm, _StubGripper(arm), grasp, drop=True)
     assert _sequence(arm) == ['open', 'POSE']
+
+
+def test_execute_grasp_never_approaches_if_the_gripper_did_not_open():
+    arm = _StubArm()
+    grasp = _Grasp(tcp_position=np.array([0.1, -0.3, 0.4]))
+
+    assert not execute.execute_grasp(
+        arm, _StubGripper(arm, fail_open=True), grasp, drop=True
+    )
+    assert _sequence(arm) == ['open']
+
+
+def test_execute_grasp_retracts_but_never_drops_if_not_closed():
+    arm = _StubArm()
+    grasp = _Grasp(tcp_position=np.array([0.1, -0.3, 0.4]))
+
+    assert not execute.execute_grasp(
+        arm, _StubGripper(arm, fail_close=True), grasp, drop=True
+    )
+    assert _sequence(arm) == ['open', 'POSE', 'close', 'INTER']
+
+
+def test_preplanned_stops_when_the_gripper_fails(monkeypatch):
+    from laundry_control import pipeline
+
+    def fake_go_to(arm, name, **_kwargs):
+        return arm.move_joints(config.get_named_pose(name))
+
+    monkeypatch.setattr(pipeline, 'go_to', fake_go_to)
+
+    arm = _StubArm()
+
+    assert not pipeline.run_preplanned(arm, _StubGripper(arm, fail_close=True))
+    # INTER, the first RETRIEVE pose, close (fails), back to INTER - no DROP.
+    assert _sequence(arm) == ['INTER', 'POSE', 'close', 'INTER']
 
 
 def test_grasp_best_dry_run_never_approaches(monkeypatch):

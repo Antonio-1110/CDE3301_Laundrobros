@@ -176,6 +176,48 @@ BASE_FRAME = 'link_base'
 FLANGE_LINK = 'link7'
 JOINT_STATE_TOPIC = '/joint_states'
 
+# The ros2_control trajectory controller that actually drives the
+# joints - the same name on the real arm and the fake controller
+# (xarm_controller/config/xarm7_controllers.yaml). Ctrl+C in `laundry`
+# cancels its goals directly: move_group does not act on a cancel
+# until the execution it is running has finished (measured on the
+# fake controller, MoveIt 2.12), so cancelling only the MoveIt goal
+# would let the arm complete the motion.
+TRAJECTORY_CONTROLLER_ACTION = '/xarm7_traj_controller/follow_joint_trajectory'
+
+# Clearance MoveIt keeps between the bucket/table and every moving arm
+# link (link1-link7) - see arm/scene.py. Applied whenever `laundry`
+# connects to MoveIt, so it governs everything: the planner, Cartesian
+# strokes, and our own straight-line and baked-path checks.
+#
+# Measured on the fake controller (2026-09-25): at 3 cm the committed
+# HOME/DROP transfers and every recorded pose still pass; the end
+# scan's last ring brought the elbow (link3) within 2 cm of the rim,
+# so it was re-baked with this padding.
+OBSTACLE_PADDING_M = 0.03
+
+# Arm-link padding the baked end scan is solved and replayed with, in
+# place of OBSTACLE_PADDING_M, for its ~30 s at the bottom of the
+# bucket (scan/endcap.py). The precession tilts the tool up to 55 deg,
+# which swings the elbow (link3) toward the bucket rim; with 3 cm the
+# outer rings are infeasible and simulated coverage of the closed
+# end's lower half drops from 86% to 57%, no better than the old
+# BOTTOM detour. Changing arm-link padding is quick (~0.3 s).
+ENDCAP_PADDING_M = 0.01
+
+# The gripper's own live padding. It is the part that works INSIDE the
+# bucket: the RETRIEVE poses put it within 1-2 cm of the floor and
+# walls by design, and the scan and grasp need it there, so it gets
+# none. Changing it is also slow - MoveIt rebuilds the padded gripper
+# mesh (3-6 s) - so it stays fixed at runtime.
+GRIPPER_PADDING_M = 0.0
+
+# Extra gripper clearance the routes that LEAVE the bucket (INTER <->
+# HOME/DROP) are baked with, so the gripper clears the bucket mouth by
+# at least this much on its way out, although the live check does not
+# require it.
+BAKE_GRIPPER_CLEARANCE_M = 0.01
+
 JOINT_NAMES = [
     'joint1',
     'joint2',
@@ -215,14 +257,17 @@ PILZ_PTP_PLANNER_ID = 'PTP'
 OMPL_PIPELINE_ID = 'ompl'
 OMPL_PLANNER_ID = 'RRTConnect'
 
-# J7's velocity limit from xarm_moveit_config/config/xarm7/
-# joint_limits.yaml (2.14 rad/s = 123 deg/s). The scan's J7 twist is
-# added to trajectory POSITIONS after MoveIt time-parameterises the
-# stroke, so MoveIt never enforces this on it: at scan velocity 0.1
-# (the default until 2026-09) a 150 deg twist over a 0.95s stroke ran
-# at ~157 deg/s; the 0.03 default runs ~56 deg/s. The controller logs
-# a warning when a twist exceeds it.
+# J7's velocity and acceleration limits from xarm_moveit_config/
+# config/xarm7/joint_limits.yaml (2.14 rad/s = 123 deg/s, 10 rad/s^2).
+# The scan's J7 twist is added to a stroke AFTER MoveIt has
+# time-parameterised it, so MoveIt never enforces these on it: at
+# scan velocity 0.1 (the default until 2026-09) a 150 deg twist over
+# a 0.95s stroke averaged ~157 deg/s; the 0.03 default averages ~56
+# deg/s. XArm7Controller._add_joint7_twist checks the twisted
+# stroke's peak J7 speed and acceleration against these and slows
+# the whole stroke down when either would be exceeded.
 JOINT7_MAX_VELOCITY_RAD_S = 2.14
+JOINT7_MAX_ACCELERATION_RAD_S2 = 10.0
 
 # Peak joint speed for the planner-free straight joint moves
 # (XArm7Controller.move_joints_linear) and the baked end scan: 45

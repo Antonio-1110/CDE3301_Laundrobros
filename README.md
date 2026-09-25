@@ -143,7 +143,7 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry move inter` / `home` / `bottom` / `drop` / `retrieve_0..3` `[--speed 0.3]` | MoveIt |
 | `laundry move joints J1 .. J7 [--degrees]`, `joint6 DEG`, `joint7 DEG`, `linear M`, `twist M DEG` | MoveIt |
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
-| `laundry plan bake [endcap\|transfers\|all]` — solve, check and save the end scan and/or the INTER↔HOME/DROP transfers (**moves the arm**) | MoveIt |
+| `laundry plan bake [endcap\|transfers\|all]` — solve, check and save the end scan and/or the routes from INTER to every named pose (**moves the arm**) | MoveIt |
 | `laundry plan replay [--speed 0.3]` — the end scan alone, INTER to INTER | MoveIt |
 | `laundry scan [--save scan.csv] [--end-scan precession\|bottom] [--velocity 0.03 ...]` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` | nothing — plain files |
@@ -210,18 +210,25 @@ Current numbers and their provenance are in the constants' comments in `percepti
 
 ## Repeatable moves between poses
 
-Named-pose moves (`laundry move <pose>`, and the scan, grasp and drop stages) go through `arm/transfers.go_to`, which tries three routes in order:
+Named-pose moves (`laundry move <pose>`, and the scan, grasp, drop and preplanned stages) go through `arm/transfers.go_to`, which tries three routes in order:
 
-1. **INTER ↔ HOME and INTER ↔ DROP:** a baked path from `scan_plans/transfers.yaml`.
-   - The gripper first backs straight out of the bucket.
-   - Then come straight joint-space segments through one or two intermediate poses, every 1° collision-checked.
-   - The path is chosen to minimise joint travel, weighted toward J1 and J4–J7, which twist the cables.
-   - Going back to INTER replays it in reverse.
-   - J7 turns exactly its direct amount. On the fake controller, the planner had once turned it 536° on DROP → INTER.
+1. **A baked route** from `scan_plans/transfers.yaml`. INTER is the hub: there is one route from INTER to each of HOME, DROP, BOTTOM and RETRIEVE_0–3.
+   - INTER → pose replays the route; pose → INTER replays it in reverse.
+   - Pose → another pose (e.g. RETRIEVE_2 → DROP) goes back to INTER along one route and out along the other, so the arm always leaves the bucket through its mouth.
+   - Each route is straight joint-space segments through zero to two intermediate poses (for HOME/DROP, after first backing the gripper straight out of the bucket). Every 1° is collision-checked, and the route with the least joint travel wins, weighted toward J1 and J4–J7, which twist the cables.
+   - Before every replay the whole route is re-checked against the current planning scene. A route that now collides is refused, with a message to re-bake.
 2. **Otherwise:** a straight, collision-checked joint move, which is the minimum twist.
 3. **Only if that collides:** the planner, with a warning.
 
-Re-bake (`laundry plan bake transfers`) after changing INTER, HOME, DROP or the URDF.
+Re-bake (`laundry plan bake transfers`) after changing a recorded pose, the padding or the URDF.
+
+### Padding around the bucket and table
+
+The bucket and table are links in the `xarm_ros2` fork's URDF, and MoveIt checks robot-vs-robot contact **unpadded**, so padding never applied to them. `arm/scene.py` therefore gives move_group padded copies of both meshes as world objects, anchored to the URDF links' frames (the URDF is still the one place their poses are set), and has it ignore the URDF copies. Every `laundry` command does this on connect, if it isn't set already. If it never ran, MoveIt still has the URDF's unpadded copies.
+
+- **Arm links (link1–link7): 3 cm** (`config.OBSTACLE_PADDING_M`), for everything: the planner, Cartesian strokes, and the straight and baked moves.
+- **Gripper: 0 cm** (`config.GRIPPER_PADDING_M`), because it works inside the bucket on purpose: the RETRIEVE poses put it within 1–2 cm of the floor.
+- **Routes that leave the bucket** (to HOME and DROP) are baked with an extra 1 cm on the gripper (`config.BAKE_GRIPPER_CLEARANCE_M`), so it clears the bucket mouth on the way out.
 
 ## Frames and offsets
 

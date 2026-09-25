@@ -1,4 +1,4 @@
-"""Tests for the baked INTER <-> HOME/DROP transfers (arm/transfers.py)."""
+"""Tests for the baked transfers from INTER (arm/transfers.py)."""
 
 import math
 
@@ -43,6 +43,25 @@ def test_route_applies_from_inter_and_reverses_back_to_inter():
 
     back = transfers.route_for(DROP, 'inter', ROUTES)
     assert np.allclose(back[0], DROP) and np.allclose(back[-1], INTER)
+
+
+def test_route_between_two_targets_goes_through_inter():
+    routes = {
+        'drop': np.array([INTER, INTER + 0.1, DROP]),
+        'home': np.array([INTER, INTER - 0.1, HOME]),
+    }
+
+    path = transfers.route_for(HOME, 'drop', routes)
+
+    # Back along HOME's route to INTER, then out along DROP's.
+    assert np.allclose(path[0], HOME)
+    assert np.allclose(path[2], INTER)
+    assert np.allclose(path[-1], DROP)
+    assert len(path) == 5
+
+
+def test_route_to_where_the_arm_already_is_is_none():
+    assert transfers.route_for(DROP, 'drop', ROUTES) is None
 
 
 def test_route_does_not_apply_elsewhere():
@@ -118,6 +137,16 @@ def test_go_to_replays_the_baked_route():
     assert np.allclose(waypoints[-1], DROP)
 
 
+def test_go_to_refuses_a_baked_route_that_collides_now():
+    arm = _StubArm(INTER, blocked=True)
+
+    assert not transfers.go_to(
+        arm, 'drop', routes=ROUTES, max_velocity_rad_s=0.7
+    )
+    # No replay, and no planner fallback either.
+    assert arm.calls == []
+
+
 def test_go_to_uses_a_straight_move_without_a_route():
     arm = _StubArm(HOME)
 
@@ -135,7 +164,7 @@ def test_go_to_falls_back_to_the_planner_only_when_blocked():
 def test_committed_transfers_are_sane():
     routes, speed = transfers.load()
 
-    assert set(routes) == {'home', 'drop'}
+    assert {'home', 'drop'} <= set(routes) <= set(transfers.TRANSFER_TARGETS)
     assert speed == pytest.approx(config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S)
 
     for name, route in routes.items():

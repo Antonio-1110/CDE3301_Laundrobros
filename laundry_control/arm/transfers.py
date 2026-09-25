@@ -59,8 +59,26 @@ from .. import config
 
 PLAN_VERSION = 1
 
-# Targets reached from INTER through a baked transfer.
-TRANSFER_TARGETS = ('home', 'drop')
+# Targets reached from INTER through a baked transfer. INTER is the
+# hub: a move between two of these (RETRIEVE_n -> DROP, say) replays
+# one route back to INTER and the other out from it - through the
+# bucket mouth, never across the rim.
+TRANSFER_TARGETS = (
+    'home',
+    'drop',
+    'bottom',
+    'retrieve_0',
+    'retrieve_1',
+    'retrieve_2',
+    'retrieve_3',
+)
+
+# Targets outside the bucket. Their routes are baked with extra gripper
+# clearance (config.BAKE_GRIPPER_CLEARANCE_M) on top of the live
+# padding, since nothing on the way there needs the gripper close to
+# the bucket. Routes into it (BOTTOM, RETRIEVE_n) end with the gripper
+# at the floor on purpose, so they are baked at the live padding.
+OUTSIDE_TARGETS = ('home', 'drop')
 
 # Joint-travel weights for choosing a route: J1 and J4-J7 twist the
 # cables running down the arm, so their travel costs more.
@@ -68,7 +86,9 @@ TRAVEL_WEIGHTS = np.array([2.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0])
 
 # How far the gripper backs out of the bucket along the tool axis
 # before swinging away, tried in this order (metres).
-RETREAT_DISTANCES_M = (0.05, 0.10, 0.15)
+# 0 means no retreat: vias straight from INTER, which is what targets
+# INSIDE the bucket usually want.
+RETREAT_DISTANCES_M = (0.0, 0.05, 0.10, 0.15)
 
 # Via-pose sampling: poses placed along the direct line, then jittered.
 SAMPLES_PER_CONFIG = 400
@@ -118,12 +138,14 @@ def _retreat(arm, distance_m):
     return None if solution is None else np.array(solution)
 
 
-def _refine(arm, path):
+def _refine(arm, path, first_free=2):
     """
     Pull via poses toward monotone joint values, then drop spare vias.
 
     Only changes that keep the whole path collision-free AND lower
-    the weighted travel are kept, so the result is never worse.
+    the weighted travel are kept, so the result is never worse. Poses
+    before index first_free (INTER, and the retreat if there is one)
+    and the target are never moved.
     """
     def valid(candidate):
         return arm.first_invalid_state(candidate) is None
@@ -137,8 +159,7 @@ def _refine(arm, path):
         improved = False
         rounds += 1
 
-        # Never move the endpoints or the retreat (index 1).
-        for index in range(2, len(path) - 1):
+        for index in range(first_free, len(path) - 1):
             before, after = path[index - 1], path[index + 1]
 
             for joint in range(7):
@@ -163,7 +184,7 @@ def _refine(arm, path):
                         improved = True
                         break
 
-    index = 2
+    index = first_free
     while index < len(path) - 1:
         candidate = path[:index] + path[index + 1:]
 
@@ -183,9 +204,17 @@ def bake_transfer(arm, target_name, log=print):
     Find the INTER -> target transfer; returns its joint waypoints.
 
     MOVES THE ARM to INTER (to read the flange pose for the retreat).
+    Everything is checked against the planning scene as it is now, so
+    the caller sets the padding the route must keep.
     """
     inter = np.array(config.INTER)
     target = np.array(config.get_named_pose(target_name))
+
+    if not arm.state_is_valid(target):
+        raise BakeError(
+            f'{target_name.upper()} itself collides with the bucket/table '
+            '(with the current padding); re-record it or check the URDF.'
+        )
 
     if not arm.move_joints(config.INTER):
         raise BakeError('Could not reach INTER.')
@@ -199,35 +228,43 @@ def bake_transfer(arm, target_name, log=print):
     best = None
 
     for distance in RETREAT_DISTANCES_M:
-        retreat = _retreat(arm, distance)
+        if distance > 0.0:
+            retreat = _retreat(arm, distance)
 
-        if retreat is None or arm.first_invalid_state([inter, retreat]) is not None:
-            continue
+            if (
+                retreat is None
+                or arm.first_invalid_state([inter, retreat]) is not None
+            ):
+                continue
+
+            start = [inter, retreat]
+        else:
+            start = [inter]
 
         for via_count in (1, 2):
             for _ in range(SAMPLES_PER_CONFIG):
                 along = np.sort(rng.uniform(0.15, 0.85, via_count))
 
                 vias = [
-                    retreat
-                    + u * (target - retreat)
+                    start[-1]
+                    + u * (target - start[-1])
                     + rng.normal(0.0, VIA_JITTER_RAD, 7)
                     for u in along
                 ]
 
-                path = [inter, retreat] + vias + [target]
+                path = start + vias + [target]
                 cost = weighted_travel_deg(path)
 
                 if best is not None and cost >= best[0]:
                     continue
 
                 if arm.first_invalid_state(path) is None:
-                    best = (cost, path)
+                    best = (cost, path, len(start))
 
     if best is None:
         raise BakeError(f'No collision-free route found from INTER to {target_name}.')
 
-    path = _refine(arm, best[1])
+    path = _refine(arm, best[1], first_free=best[2])
 
     excess = per_joint_travel_deg(path) - np.degrees(np.abs(target - inter))
 
@@ -240,18 +277,54 @@ def bake_transfer(arm, target_name, log=print):
 
 
 def bake(arm, targets=TRANSFER_TARGETS, log=print):
-    """Bake every transfer; returns {target: [joint waypoints]}."""
+    """
+    Bake every transfer that can be baked.
+
+    Returns ({target: [joint waypoints]}, {target: gripper clearance
+    used, metres}, {target: reason it failed}). Routes to
+    OUTSIDE_TARGETS are found with the gripper padded by
+    config.BAKE_GRIPPER_CLEARANCE_M; the rest at the live padding.
+    """
+    from . import scene
+
     log('Baking transfers from INTER...')
 
-    routes = {name: bake_transfer(arm, name, log=log) for name in targets}
+    routes = {}
+    clearances = {}
+    failures = {}
+
+    for name in targets:
+        extra = (
+            config.BAKE_GRIPPER_CLEARANCE_M if name in OUTSIDE_TARGETS
+            else config.GRIPPER_PADDING_M
+        )
+
+        scene.set_padding(
+            arm, config.OBSTACLE_PADDING_M, {'gripper_link': extra}
+        )
+
+        try:
+            routes[name] = bake_transfer(arm, name, log=log)
+            clearances[name] = extra
+        except BakeError as exc:
+            failures[name] = str(exc)
+            log(f'  INTER -> {name}: FAILED - {exc}')
+
+    scene.set_padding(
+        arm,
+        config.OBSTACLE_PADDING_M,
+        {'gripper_link': config.GRIPPER_PADDING_M},
+    )
 
     arm.move_joints(config.INTER)
 
-    return routes
+    return routes, clearances, failures
 
 
-def save(path, routes, max_velocity_rad_s, baked_on=''):
+def save(path, routes, max_velocity_rad_s, baked_on='', clearances=None):
     """Write baked transfers as YAML."""
+    clearances = clearances or {}
+
     directory = os.path.dirname(path)
 
     if directory:
@@ -270,6 +343,12 @@ def save(path, routes, max_velocity_rad_s, baked_on=''):
                 'per_joint_travel_deg': [
                     round(float(v), 1) for v in per_joint_travel_deg(waypoints)
                 ],
+                'padding_m': {
+                    'arm_links': float(config.OBSTACLE_PADDING_M),
+                    'gripper': float(
+                        clearances.get(name, config.GRIPPER_PADDING_M)
+                    ),
+                },
             }
             for name, waypoints in routes.items()
         },
@@ -277,10 +356,10 @@ def save(path, routes, max_velocity_rad_s, baked_on=''):
 
     with open(path, 'w') as handle:
         handle.write(
-            '# Baked INTER <-> HOME/DROP transfers (laundry_control/arm/'
-            'transfers.py).\n'
+            '# Baked transfers from INTER to the named poses '
+            '(laundry_control/arm/transfers.py).\n'
             '# Generated by `laundry plan bake transfers` - re-bake after '
-            'changing\n# INTER, HOME, DROP or the URDF.\n'
+            'changing\n# a recorded pose, the padding or the URDF.\n'
         )
         yaml.safe_dump(document, handle, sort_keys=False, width=100)
 
@@ -317,20 +396,42 @@ def route_for(current, target_name, routes):
     """
     Return the baked waypoints from `current` to target_name, or None.
 
-    Applies when the arm is at INTER heading for a baked target, or at
-    a baked target heading for INTER (the same route, reversed). The
-    first waypoint is the pose itself; callers bridge the small gap
-    from `current` with a straight move.
+    INTER is the hub every route starts from:
+
+      - at INTER, heading for a baked target: that route;
+      - at a baked target, heading for INTER: the same route reversed;
+      - at one baked target, heading for another: back to INTER along
+        the first route, then out along the second (the arm stops at
+        INTER in between).
+
+    The first waypoint is the pose itself; callers bridge the small
+    gap from `current` with a straight move.
     """
     target_name = target_name.lower()
 
-    if target_name in routes and _at(current, config.INTER):
-        return routes[target_name]
+    here = None
+
+    if _at(current, config.INTER):
+        here = 'inter'
+    else:
+        for name in routes:
+            if _at(current, config.get_named_pose(name)):
+                here = name
+                break
+
+    if here is None or here == target_name:
+        return None
+
+    if here == 'inter':
+        return routes.get(target_name)
+
+    back = routes[here][::-1]
 
     if target_name == 'inter':
-        for name, waypoints in routes.items():
-            if _at(current, config.get_named_pose(name)):
-                return waypoints[::-1]
+        return back
+
+    if target_name in routes:
+        return np.concatenate([back, routes[target_name][1:]])
 
     return None
 
@@ -339,7 +440,8 @@ def go_to(arm, target_name, routes=None, max_velocity_rad_s=None, time_scale=1.0
     """
     Move to a named pose along the most repeatable route available.
 
-    1. A baked transfer (INTER <-> HOME/DROP), replayed exactly.
+    1. A baked transfer (see route_for), re-checked against the
+       current planning scene, then replayed exactly.
     2. Otherwise a straight, collision-checked joint move.
     3. Only if that would collide: the planner (move_joints), with a
        warning, since its route is not repeatable.
@@ -363,17 +465,30 @@ def go_to(arm, target_name, routes=None, max_velocity_rad_s=None, time_scale=1.0
     if route is not None:
         arm.get_logger().info(
             f'Baked transfer to {target_name.upper()} '
-            f'({len(route) - 2} via(s)).'
+            f'({len(route) - 2} via(s), stopping at each).'
         )
 
-        # Bridge the (< 2 deg) gap from where the arm actually is to the
-        # route's own first pose - checked like everything else.
-        if arm.first_invalid_state([current, route[0]]) is not None:
-            arm.get_logger().error('Start of the baked transfer is blocked.')
+        path = [current] + [list(q) for q in route]
+
+        # Re-check the WHOLE route - including the (< 2 deg) bridge from
+        # where the arm actually is - against the planning scene loaded
+        # NOW. The route was checked when it was baked, but possibly on
+        # another machine or against an older URDF bucket/table pose;
+        # replaying it unchecked would trust geometry that may have
+        # moved since.
+        bad = arm.first_invalid_state(path)
+
+        if bad is not None:
+            arm.get_logger().error(
+                f'Baked transfer to {target_name.upper()} collides with the '
+                f'current planning scene (at checked state {bad}); the URDF '
+                'or scene changed since it was baked. Not moving. Re-bake: '
+                'laundry plan bake transfers'
+            )
             return False
 
         waypoints, times, velocities = time_stop_at_each(
-            [current] + [list(q) for q in route], max_velocity_rad_s
+            path, max_velocity_rad_s
         )
 
         return arm.execute_joint_path(

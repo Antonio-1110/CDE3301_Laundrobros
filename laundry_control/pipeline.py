@@ -123,6 +123,13 @@ def run_full(
     print('Opening gripper so the scan matches the baseline geometry...')
 
     if not gripper.open_blocking():
+        if not dry_run:
+            print(
+                'Could not confirm the gripper opened (is gripper_node '
+                'running?). The grasp needs it; aborting before the scan.'
+            )
+            return False
+
         print(
             'WARNING: could not confirm the gripper opened. If it is '
             "closed, this scan's end-effector occlusion differs from "
@@ -197,7 +204,11 @@ def run_preplanned(arm, gripper):
 
         print('Closing gripper...')
 
-        gripper.close_blocking()
+        if not gripper.close_blocking():
+            print('Gripper did not confirm it closed; returning to INTER '
+                  'and aborting.')
+            go_to(arm, 'inter')
+            return False
 
         print('Moving to DROP...')
 
@@ -207,7 +218,11 @@ def run_preplanned(arm, gripper):
 
         print('Opening gripper...')
 
-        gripper.open_blocking()
+        if not gripper.open_blocking():
+            print('Gripper did not confirm it opened at DROP; returning to '
+                  'INTER and aborting.')
+            go_to(arm, 'inter')
+            return False
 
     print('Returning to INTER...')
 

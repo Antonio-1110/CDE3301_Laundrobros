@@ -175,6 +175,11 @@ class EndcapPlan:
     joint_names: list = field(default_factory=lambda: list(config.JOINT_NAMES))
     created: str = ''
     baked_on: str = ''
+    # Arm-link padding the plan was solved with (see
+    # config.ENDCAP_PADDING_M); run_plan() replays it under the same.
+    # Plans from before padding existed were solved against the bare
+    # URDF: 0.
+    padding_m: float = 0.0
 
     @property
     def duration_s(self):
@@ -203,6 +208,7 @@ class EndcapPlan:
             'created': self.created,
             'baked_on': self.baked_on,
             'depth_m': float(self.depth_m),
+            'padding_m': float(self.padding_m),
             'pivot': [float(v) for v in self.pivot],
             'tool_z': [float(v) for v in self.tool_z],
             'max_velocity_rad_s': float(self.max_velocity_rad_s),
@@ -270,6 +276,7 @@ class EndcapPlan:
             joint_names=list(document['joint_names']),
             created=document.get('created', ''),
             baked_on=document.get('baked_on', ''),
+            padding_m=float(document.get('padding_m', 0.0)),
         )
 
 
@@ -293,8 +300,28 @@ def bake(
     depth_m,
     rings=DEFAULT_RINGS,
     max_velocity_rad_s=config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S,
+    padding_m=config.ENDCAP_PADDING_M,
     log=print,
 ):
+    """
+    Bake the end scan under its own arm-link padding (see _bake).
+
+    padding_m (default config.ENDCAP_PADDING_M) is recorded in the plan,
+    and the usual config.OBSTACLE_PADDING_M is restored afterwards.
+    """
+    arm.set_arm_padding(padding_m)
+
+    try:
+        plan = _bake(arm, depth_m, rings, max_velocity_rad_s, log)
+    finally:
+        arm.set_arm_padding(config.OBSTACLE_PADDING_M)
+
+    plan.padding_m = float(padding_m)
+
+    return plan
+
+
+def _bake(arm, depth_m, rings, max_velocity_rad_s, log):
     """
     Solve, check and time the end scan against a running MoveIt.
 
@@ -460,8 +487,11 @@ def run_plan(arm, plan, depth_m, time_scale=1.0):
     """
     Replay a baked end scan from wherever the strokes left the arm.
 
-    Refuses a plan baked for a different depth. Gets onto the plan's
-    start with a collision-checked straight joint move, replays the
+    Refuses a plan baked for a different depth, or one that collides
+    with the current planning scene. Runs under the arm-link padding
+    the plan was baked with (plan.padding_m), then restores the usual
+    config.OBSTACLE_PADDING_M. Gets onto the plan's start with a
+    collision-checked straight joint move, replays the
     fixed trajectory, and leaves the arm at the plan's start (the
     pivot, INTER's orientation) - the caller turns J7 for the outward
     pass from there.
@@ -473,10 +503,33 @@ def run_plan(arm, plan, depth_m, time_scale=1.0):
             f'laundry plan bake --depth {depth_m:.3f}'
         )
 
-    if not arm.move_joints_linear(plan.start, time_scale=time_scale):
-        arm.get_logger().error('Could not reach the end-scan start state.')
-        return False
+    # The plan was collision-checked when it was baked - possibly on
+    # another machine, against an older URDF bucket pose. Re-check
+    # every state against the planning scene loaded NOW, under the
+    # padding it was baked with, before the arm moves at all.
+    arm.set_arm_padding(plan.padding_m)
 
-    return arm.execute_joint_path(
-        plan.waypoints, plan.times, plan.velocities, time_scale=time_scale
-    )
+    try:
+        bad = arm.first_invalid_state(plan.waypoints)
+
+        if bad is not None:
+            arm.get_logger().error(
+                f'The baked end scan collides with the current planning '
+                f'scene (at checked state {bad}); the URDF or scene changed '
+                f'since it was baked. Not moving. Re-bake: laundry plan '
+                f'bake endcap --depth {plan.depth_m:.3f}'
+            )
+            return False
+
+        if not arm.move_joints_linear(plan.start, time_scale=time_scale):
+            arm.get_logger().error(
+                'Could not reach the end-scan start state.'
+            )
+            return False
+
+        return arm.execute_joint_path(
+            plan.waypoints, plan.times, plan.velocities, time_scale=time_scale
+        )
+
+    finally:
+        arm.set_arm_padding(config.OBSTACLE_PADDING_M)
