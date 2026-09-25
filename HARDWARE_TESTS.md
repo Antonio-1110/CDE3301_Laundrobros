@@ -279,7 +279,7 @@ laundry scene check && laundry preplanned --limit 3 --speed 0.3
 laundry clear --grab-limit 3 --speed 0.3 --max-rounds 5
 ```
 
-- **Watch:** detected items on the floor are grabbed like the grid ("Floor grab via grab_NN" in the log), with a straight descent onto the item.
+- **Watch:** detected items anywhere in the lower half (floor and lower walls) are grabbed like the grid: "Floor grab via grab_NN" in the log, with a straight descent onto the item. Put one item partway up a lower wall to check that case.
 - **Paste back:** the log from "ROUND 1" on, how many items came out, and whether it stopped with "The bucket is clear".
 
 ## F. Real-cloth validation scans I need

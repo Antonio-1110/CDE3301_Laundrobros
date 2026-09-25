@@ -250,6 +250,19 @@ RETRIEVE_GRID = {
     'clearance_m': 0.01,
 }
 
+# DETECTED items are grabbed the same way (IK over the item, straight
+# descent, reached from the nearest grab_NN - grasp/retrieve_grid.
+# plan_floor_grab) anywhere up to this angle from the floor's lowest
+# line on either side: 90 = the whole lower half of the drum, the
+# project's scope. Measured on the fake controller (2026-09-26), grabs
+# solve everywhere from 0 to +/-90 deg at depths 3-48 cm. Items beyond
+# it fall back to the Cartesian reach (grasp/plan.py).
+#
+# The sensorless grid above stays on the floor, where laundry pools;
+# add angles to floor_angles_deg (e.g. -45.0, 45.0) to also grab blind
+# on the lower walls, at ~15 s per extra grab.
+DETECTED_GRAB_MAX_ANGLE_DEG = 90.0
+
 # =============================================================
 # FRAMES AND MOVEIT
 # =============================================================

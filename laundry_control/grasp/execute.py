@@ -170,10 +170,11 @@ def plan_grasp(arm, clusters, surface, grabs=None):
 
     Assumes the arm is at INTER. Per cluster, best first:
 
-      1. a floor grab like the grab grid's - IK over the item, a
-         straight descent, reached from the nearest baked grab_NN -
-         when the grid is baked (grabs defaults to retrieve.yaml's)
-         and the item is on the floor band. Measured on the fake
+      1. a grab like the grab grid's - IK over the item, a straight
+         descent, reached from the nearest baked grab_NN - when the
+         grid is baked (grabs defaults to retrieve.yaml's) and the
+         item is within config.DETECTED_GRAB_MAX_ANGLE_DEG of the
+         floor's lowest line (default: the whole lower half). Measured on the fake
          controller, the Cartesian reach below could not get to a
          towel in the middle of the floor at any sink depth: its one
          straight tool line from INTER runs into the wall.
@@ -227,7 +228,8 @@ def describe_plan(plan):
 
     return (
         f'Floor grab via {grab["via"]}: contact={grab["contact"]}, '
-        f'{grab["height_m"] * 100:.1f} cm above the floor, '
+        f'{grab["floor_angle_deg"]:+.0f} deg, '
+        f'{grab["height_m"] * 100:.1f} cm from the wall, '
         f'tilt {grab["tilt_deg"]:.0f} deg'
     )
 

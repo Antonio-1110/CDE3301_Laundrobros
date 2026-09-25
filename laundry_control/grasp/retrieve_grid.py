@@ -57,11 +57,6 @@ from ..perception.bucket_model import _axis_basis, seed_cone, to_cylindrical
 
 PLAN_VERSION = 1
 
-# Detected items are grabbed this way only on the floor band: within
-# this angle of the floor's lowest line (farther up the wall, the
-# Cartesian grasp in grasp/plan.py is used).
-FLOOR_GRAB_MAX_ANGLE_DEG = 50.0
-
 # How far into a detected pile to sink the grab, as in grasp/plan.py:
 # half the pile's sensed height above the floor, at most 5 cm.
 FLOOR_GRAB_SINK_FRACTION = 0.5
@@ -262,11 +257,14 @@ def plan_floor_grab(arm, point, grabs, grid=None):
     """
     Plan a grid-style grab at a detected item's sensed top, or None.
 
-    Returns the solve_one() dict plus 'via': the baked grab_NN it is
-    reached from. The grab sinks FLOOR_GRAB_SINK_FRACTION of the pile's
-    sensed height into it (at most FLOOR_GRAB_MAX_SINK_M, never lower
-    than the grid's lowest height). None if the item is off the floor
-    band, out of the bucket, or nothing reachable was found.
+    Returns the solve_one() dict plus 'via': the baked grab_NN (or
+    INTER, as a last resort) it is reached from by a straight joint
+    move. The grab sinks FLOOR_GRAB_SINK_FRACTION of the pile's sensed
+    height into it (at most FLOOR_GRAB_MAX_SINK_M, never lower than
+    the grid's lowest height); on a wall, "height" is the distance in
+    from the wall. None if the item is beyond
+    config.DETECTED_GRAB_MAX_ANGLE_DEG, out of the bucket, or nothing
+    reachable was found.
     """
     from ..arm import scene
 
@@ -274,7 +272,7 @@ def plan_floor_grab(arm, point, grabs, grid=None):
 
     depth, angle, top_height = floor_position(point)
 
-    if abs(angle) > FLOOR_GRAB_MAX_ANGLE_DEG or not (
+    if abs(angle) > config.DETECTED_GRAB_MAX_ANGLE_DEG or not (
         0.0 < depth < max(grid['depths_m']) + 0.15
     ):
         return None
@@ -312,14 +310,20 @@ def plan_floor_grab(arm, point, grabs, grid=None):
         return None
 
     # The nearest (in joint space) grid grab with a clear straight
-    # line to this approach pose.
+    # line to this approach pose; INTER last.
     approach = np.array(plan['approach'])
 
-    for grab in sorted(
-        grabs, key=lambda g: np.abs(np.array(g['approach']) - approach).max()
-    ):
-        if arm.first_invalid_state([grab['approach'], plan['approach']]) is None:
-            plan['via'] = grab['name']
+    vias = [
+        (grab['name'], grab['approach'])
+        for grab in sorted(
+            grabs,
+            key=lambda g: np.abs(np.array(g['approach']) - approach).max(),
+        )
+    ] + [('inter', config.INTER)]
+
+    for name, joints in vias:
+        if arm.first_invalid_state([joints, plan['approach']]) is None:
+            plan['via'] = name
             return plan
 
     return None
@@ -337,7 +341,7 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print):
     log(
         f'Floor grab via {via}: {plan["depth_m"] * 100:.0f} cm deep, '
         f'{plan["floor_angle_deg"]:+.0f} deg, {plan["height_m"] * 100:.1f} cm '
-        f'above the floor, tilt {plan["tilt_deg"]:.0f} deg'
+        f'from the wall, tilt {plan["tilt_deg"]:.0f} deg'
     )
 
     if not gripper.open_blocking():
