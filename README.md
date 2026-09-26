@@ -2,7 +2,7 @@
 
 ROS 2 Jazzy package (`laundry_control`) that drives a UFactory xArm7 to pull laundry out of a bucket lying on its side (a stand-in for a washer drum). A wrist-mounted VL53L0X time-of-flight sensor is swept through the bucket, the readings become a point cloud, laundry is found by comparing that cloud against a fitted model of the empty bucket, and a servo gripper retrieves it.
 
-It uses our fork of the manufacturer's `xarm_ros2`, which adds the gripper to the URDF/SRDF. The bucket and table are **not** in the URDF: they're MoveIt world objects whose poses are set in `config.OBSTACLES` (see [Obstacles](#obstacles-the-bucket-and-table)).
+It uses the manufacturer's `xarm_ros2` **unmodified**. The gripper and the joint limits are passed in as that package's own launch arguments. The bucket and table are MoveIt world objects whose poses are set in `config.OBSTACLES` (see [Obstacles](#obstacles-the-bucket-and-table)).
 
 - **Everything runs through one command, `laundry`** — see [Using it](#using-it).
 - **Commands that need the real rig** are collected in [HARDWARE_TESTS.md](HARDWARE_TESTS.md), with what to paste back.
@@ -11,14 +11,14 @@ It uses our fork of the manufacturer's `xarm_ros2`, which adds the gripper to th
 
 ## Workspace layout
 
-This repo is one package inside a colcon workspace, next to the `xarm_ros2` fork:
+This repo is one package inside a colcon workspace, next to the manufacturer's `xarm_ros2`:
 
 ```text
 <workspace>/            # any name; nothing depends on it being ros2_ws
 ├── .venv/              # Python virtual environment
 ├── src/
 │   ├── CDE3301_Laundrobros/   # this repo
-│   └── xarm_ros2/             # our fork (tracked via workspace.repos, not a submodule)
+│   └── xarm_ros2/             # the manufacturer's, unmodified (pinned in workspace.repos)
 ├── build/  install/  log/
 ```
 
@@ -274,7 +274,7 @@ All of these live in `config.py`, with comments on how each was measured.
 
 ---
 
-## `xarm_ros2` (our fork)
+## `xarm_ros2` (unmodified)
 
 Useful launches outside the bring-up:
 
@@ -285,14 +285,12 @@ ros2 launch xarm_moveit_config xarm7_moveit_gazebo.launch.py               # Mov
 ros2 launch xarm_moveit_config xarm7_moveit_realmove.launch.py robot_ip:=<ARM_IP>
 ```
 
-Our changes (the gripper link, J7's ±2π limit, J7's initial state) live on branch `world-obstacles` of https://github.com/Antonio-1110/xarm_ros2-cde3301.git (`workspace.repos` pins it). The modified files are `xarm_description/urdf/xarm7/*.xacro` and `xarm_moveit_config/srdf/_xarm7_macro.srdf.xacro`. The older `my-obstacle-changes` branch also has the bucket and table as URDF links. `arm/scene.py` still works with it, and disables those links in favour of the world objects.
+We use the manufacturer's `jazzy` branch as it is, pinned in `workspace.repos` to the commit it was tested with. Everything the rig needs from the robot description is passed through the package's own launch arguments, built by `config.xarm_description_arguments()`:
 
-In a checkout made with `vcs import`, `origin` is our fork. Add the manufacturer's repo as `upstream` to pull their fixes:
+- **The gripper:** `add_other_geometry:=true` with our STL (`config.GRIPPER_MESH`), turned `config.GRIPPER_MESH_RPY` about link7. Its link is `other_geometry_link` (`config.GRIPPER_LINK`), and the stock SRDF already exempts it from colliding with link3, link6 and link7.
+- **Joint limits:** `limited:=false` gives the xArm7's true hardware ranges, J7 ±360° included. The scan and the grabs turn J7 past −180°. The manufacturer's default narrows J7 to ±178°.
+- **Fake controller only:** the mock hardware starts at all-zeros, where the modelled gripper is in the table. `laundry scene apply --fake-start-home`, run by bring-up with `fake:=true`, moves the fake arm to HOME.
 
-```bash
-cd ~/ros2_ws/src/xarm_ros2
-git remote add upstream https://github.com/xArm-Developer/xarm_ros2.git   # once
-git fetch upstream
-git rebase upstream/jazzy
-git push origin world-obstacles --force-with-lease   # only after an intentional rebase
-```
+Our old fork (https://github.com/Antonio-1110/xarm_ros2-cde3301, branches `my-obstacle-changes` and `world-obstacles`) is no longer needed. `arm/scene.py` still copes with a build of it: the bucket and table links are disabled in favour of the world objects. But the gripper link name differs, so switch back to the stock repo (HARDWARE_TESTS 1b).
+
+To update to a newer manufacturer release, change the pinned commit in `workspace.repos`. Then run `laundry scene check`, and a fake-controller run of `laundry preplanned --limit 3`.

@@ -315,7 +315,7 @@ def bake(arm, targets=None, log=print):
         extra = expected_gripper_clearance(name)
 
         scene.set_padding(
-            arm, route_arm_padding(name), {'gripper_link': extra}
+            arm, route_arm_padding(name), {config.GRIPPER_LINK: extra}
         )
 
         try:
@@ -328,7 +328,7 @@ def bake(arm, targets=None, log=print):
     scene.set_padding(
         arm,
         config.OBSTACLE_PADDING_M,
-        {'gripper_link': config.GRIPPER_PADDING_M},
+        {config.GRIPPER_LINK: config.GRIPPER_PADDING_M},
     )
 
     return routes, clearances, failures
