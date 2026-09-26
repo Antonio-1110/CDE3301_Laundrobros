@@ -272,6 +272,52 @@ BASE_FRAME = 'link_base'
 FLANGE_LINK = 'link7'
 JOINT_STATE_TOPIC = '/joint_states'
 
+# =============================================================
+# ROBOT DESCRIPTION (passed to the UNMODIFIED manufacturer xarm_ros2)
+#
+# laundry_bringup.launch.py hands these to xarm_moveit_config's own
+# launch arguments, so nothing in xarm_ros2 is edited:
+#
+#   - The gripper is the manufacturer's "other geometry": our STL,
+#     attached to link_eef (= link7, no offset), turned GRIPPER_MESH_RPY
+#     about link7. Its link is called other_geometry_link, and the
+#     stock SRDF already exempts it from colliding with link3/6/7.
+#   - XARM_LIMITED False gives the xArm7's true hardware joint ranges
+#     (the URDF defaults), including J7 +/-360 deg - the scan and grabs
+#     turn J7 past -180 deg (INTER is -155, grabs reach ~-197). The
+#     manufacturer's default, limited:=true, narrows J7 to +/-178 deg.
+#     It also narrows J2 to -118..+120 deg (was +/-125).
+# =============================================================
+
+GRIPPER_LINK = 'other_geometry_link'
+GRIPPER_MESH = 'xArm7_Gripper_2Plate_Assembled_RevH_ROS2_Meters.stl'
+GRIPPER_MESH_XYZ = (0.0, 0.0, 0.0)
+GRIPPER_MESH_RPY = (0.0, 0.0, 1.57)
+XARM_LIMITED = False
+
+
+def xarm_description_arguments():
+    """Return the xarm_moveit_config launch arguments for our robot."""
+    def triple(values):
+        # The xacro takes a quoted "x y z" string.
+        return '"' + ' '.join(f'{v:g}' for v in values) + '"'
+
+    return {
+        'dof': '7',
+        'robot_type': 'xarm',
+        'hw_ns': 'xarm',
+        'no_gui_ctrl': 'false',
+        'limited': 'true' if XARM_LIMITED else 'false',
+        'add_other_geometry': 'true',
+        'geometry_type': 'mesh',
+        'geometry_mesh_filename': (
+            f'package://laundry_control/meshes/{GRIPPER_MESH}'
+        ),
+        'geometry_mesh_origin_xyz': triple(GRIPPER_MESH_XYZ),
+        'geometry_mesh_origin_rpy': triple(GRIPPER_MESH_RPY),
+    }
+
+
 # The ros2_control trajectory controller that actually drives the
 # joints - the same name on the real arm and the fake controller
 # (xarm_controller/config/xarm7_controllers.yaml). Ctrl+C in `laundry`

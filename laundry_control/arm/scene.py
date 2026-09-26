@@ -67,8 +67,9 @@ LEGACY_OBJECT_IDS = ('bucket_obstacle', 'table_obstacle')
 # left as is (metres, and quaternion components).
 POSE_TOLERANCE = 1e-6
 
-# Arm links that get padded. link_base is left out: it is bolted to
-# the table, so any padding would put it in permanent contact.
+# Arm links that get padded, plus the gripper (config.GRIPPER_LINK).
+# link_base is left out: it is bolted to the table, so any padding
+# would put it in permanent contact.
 PADDED_LINKS = (
     'link1',
     'link2',
@@ -77,7 +78,7 @@ PADDED_LINKS = (
     'link5',
     'link6',
     'link7',
-    'gripper_link',
+    config.GRIPPER_LINK,
 )
 
 
@@ -447,7 +448,7 @@ def apply(arm, padding_m, gripper_padding_m=0.0, log=None, obstacles=None):
     Install the padded obstacles in move_group, if not already there.
 
     Obstacles default to config.OBSTACLES. Arm links get padding_m,
-    gripper_link gripper_padding_m. A scene that already has these
+    the gripper gripper_padding_m. A scene that already has these
     obstacles at these poses, with exactly these paddings, is left
     alone (changing the gripper's padding costs a seconds-long mesh
     rebuild). Returns True if anything changed. Raises SceneError if
@@ -455,7 +456,7 @@ def apply(arm, padding_m, gripper_padding_m=0.0, log=None, obstacles=None):
     """
     obstacles = config.OBSTACLES if obstacles is None else obstacles
 
-    paddings = _paddings(padding_m, {'gripper_link': gripper_padding_m})
+    paddings = _paddings(padding_m, {config.GRIPPER_LINK: gripper_padding_m})
 
     current = _get_scene(
         arm,

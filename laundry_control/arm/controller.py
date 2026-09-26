@@ -1462,7 +1462,7 @@ class XArm7Controller(Node):
         from . import scene
 
         scene.set_padding(
-            self, padding_m, {'gripper_link': config.GRIPPER_PADDING_M}
+            self, padding_m, {config.GRIPPER_LINK: config.GRIPPER_PADDING_M}
         )
 
     def first_invalid_state(self, waypoints):

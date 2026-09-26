@@ -60,17 +60,17 @@ def _allowed(acm, a, b):
 
 
 def test_allowed_links_and_legacy_urdf_copies():
-    names = ['link_base', 'link3', 'gripper_link', 'laundry_bucket_link',
+    names = ['link_base', 'link3', config.GRIPPER_LINK, 'laundry_bucket_link',
              'table_link']
 
     acm = scene._configure_acm(_acm(names), config.OBSTACLES)
 
     # An older xarm_ros2 build's URDF copies no longer collide...
-    assert _allowed(acm, 'laundry_bucket_link', 'gripper_link')
+    assert _allowed(acm, 'laundry_bucket_link', config.GRIPPER_LINK)
     assert _allowed(acm, 'table_link', 'link3')
     assert _allowed(acm, 'laundry_bucket_link', 'bucket')
     # ...while the padded world objects still do.
-    assert not _allowed(acm, 'bucket', 'gripper_link')
+    assert not _allowed(acm, 'bucket', config.GRIPPER_LINK)
     assert not _allowed(acm, 'table', 'link3')
     # Except the base, which sits on the table.
     assert _allowed(acm, 'link_base', 'table')
@@ -80,7 +80,7 @@ def test_allowed_links_and_legacy_urdf_copies():
 
 
 def test_without_legacy_links_only_allowed_links_change():
-    names = ['link_base', 'link3', 'gripper_link']
+    names = ['link_base', 'link3', config.GRIPPER_LINK]
 
     acm = scene._configure_acm(_acm(names), config.OBSTACLES)
 
@@ -120,7 +120,7 @@ def _scene(objects, paddings):
 
 
 def test_an_already_configured_scene_is_left_alone():
-    wanted = scene._paddings(0.03, {'gripper_link': 0.0})
+    wanted = scene._paddings(0.03, {config.GRIPPER_LINK: 0.0})
     obstacles = config.OBSTACLES
 
     assert scene._is_configured(_scene(obstacles, wanted), wanted, obstacles)
@@ -157,4 +157,4 @@ def test_stale_plan_message():
 
 def test_link_base_is_never_padded():
     assert 'link_base' not in scene._paddings(0.03)
-    assert scene._paddings(0.03, {'gripper_link': 0.0})['gripper_link'] == 0.0
+    assert scene._paddings(0.03, {config.GRIPPER_LINK: 0.0})[config.GRIPPER_LINK] == 0.0

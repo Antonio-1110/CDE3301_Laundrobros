@@ -36,13 +36,16 @@ cd ~/ros2_ws && rm -rf build/laundry_control install/laundry_control && python3 
   - The package builds on the rig, and `laundry` is on PATH.
   - The shebang line is the venv's `.venv/bin/python3`, not `/usr/bin/python3`. Otherwise `tof_sensor` and `gripper_node` can't import their hardware libraries.
 
-**1b. Switch `xarm_ros2` to the branch without the bucket and table.** The bucket and table are now MoveIt world objects, placed from `config.OBSTACLES`. Branch `world-obstacles` of the fork drops them from the URDF and keeps the gripper.
+**1b. Switch `xarm_ros2` back to the manufacturer's unmodified code.** Our fork isn't needed any more:
+- **The bucket and table** are MoveIt world objects, placed from `config.OBSTACLES`.
+- **The gripper and the joint limits** go in as the stock launch arguments.
 
 ```bash
-cd ~/ros2_ws/src/xarm_ros2 && git fetch origin && git checkout world-obstacles && cd ~/ros2_ws && python3 -m colcon build --symlink-install --packages-select xarm_description xarm_moveit_config && source install/setup.bash
+cd ~/ros2_ws/src/xarm_ros2 && (git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/xArm-Developer/xarm_ros2.git) && git fetch upstream && git checkout 3dc2b5e8294758d96b54b15fa5920d581b7cbb3d && git status -s && cd ~/ros2_ws && python3 -m colcon build --symlink-install --packages-select xarm_description xarm_moveit_config && source install/setup.bash
 ```
 
-- **Paste back:** the last line of the build output.
+- **Paste back:** the `git status -s` output (expect nothing: no local edits) and the last line of the build output.
+- **Check in test 2's bring-up log:** "move_group has the obstacles.", with no errors about `other_geometry_link` or the mesh file.
 
 **2. Bring-up starts every node** (leave it running for everything below).
 
