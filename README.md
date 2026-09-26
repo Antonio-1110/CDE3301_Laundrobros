@@ -2,7 +2,7 @@
 
 ROS 2 Jazzy package (`laundry_control`) that drives a UFactory xArm7 to pull laundry out of a bucket lying on its side (a stand-in for a washer drum). A wrist-mounted VL53L0X time-of-flight sensor is swept through the bucket, the readings become a point cloud, laundry is found by comparing that cloud against a fitted model of the empty bucket, and a servo gripper retrieves it.
 
-It uses our fork of the manufacturer's `xarm_ros2`, which adds the bucket/table as collision geometry in the URDF/SRDF.
+It uses our fork of the manufacturer's `xarm_ros2`, which adds the gripper to the URDF/SRDF. The bucket and table are **not** in the URDF: they're MoveIt world objects whose poses are set in `config.OBSTACLES` (see [Obstacles](#obstacles-the-bucket-and-table)).
 
 - **Everything runs through one command, `laundry`** — see [Using it](#using-it).
 - **Commands that need the real rig** are collected in [HARDWARE_TESTS.md](HARDWARE_TESTS.md), with what to paste back.
@@ -143,18 +143,21 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry move inter` / `home` / `bottom` / `drop` / `retrieve_0..3` `[--speed 0.3]` | MoveIt |
 | `laundry move joints J1 .. J7 [--degrees]`, `joint6 DEG`, `joint7 DEG`, `linear M`, `twist M DEG` | MoveIt |
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
-| `laundry plan bake [endcap\|transfers\|all]` — solve, check and save the end scan and/or the INTER↔HOME/DROP transfers (**moves the arm**) | MoveIt |
+| `laundry scene apply` / `check` — put the obstacles into MoveIt / also check every recorded pose and baked route against them (no motion) | MoveIt |
+| `laundry scene fit` — the bucket pose the baseline scans measure, as a `config.OBSTACLES` entry | nothing |
+| `laundry plan bake [endcap\|transfers\|retrieve\|all]` — solve, check and save the end scan, the routes from INTER to every named pose, and/or the grab grid (**moves the arm**) | MoveIt |
 | `laundry plan replay [--speed 0.3]` — the end scan alone, INTER to INTER | MoveIt |
 | `laundry scan [--save scan.csv] [--end-scan precession\|bottom] [--velocity 0.03 ...]` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` | nothing — plain files |
 | `laundry grasp targets.json [--drop] [--dry-run]` | rig, or `--fake-hardware` |
-| `laundry run [--dry-run]` — scan → detect → grasp → drop | rig, or `--fake-hardware --scan-from X.csv` |
+| `laundry run [--dry-run]` — scan → detect → grasp → drop, one item | rig, or `--fake-hardware --scan-from X.csv` |
+| `laundry clear [--no-grabs] [--grab-limit N] [--max-rounds 15]` — empty the bucket: the grab grid, then scan → grasp → drop until a scan finds nothing | rig, or `--fake-hardware --scan-from A.csv B.csv ...` |
 | `laundry gripper open` / `close` / `ANGLE` | `gripper_node` (open/close); the servo on this Pi's GPIO (ANGLE) |
-| `laundry baseline collect [--count 8] [-- <scan options>]` | rig, empty bucket |
-| `laundry baseline promote scan.csv` | nothing |
+| `laundry baseline collect [--count 8] [--archive] [-- <scan options>]` — straight into `baseline_scans/`; `--archive` replaces the set | rig, empty bucket |
+| `laundry baseline promote X.csv\|dir ... [--move] [--archive]`, `archive`, `list`, `restore LABEL` | nothing |
 | `laundry replay scan.csv` | a ROS graph (for RViz) |
 | `laundry evaluate [--sweep] [--synthetic] [--coverage] [--laundry X.csv ...]` | nothing |
-| `laundry preplanned` — sensorless sweep over the RETRIEVE poses | rig, or `--fake-hardware` |
+| `laundry preplanned [--limit N] [--speed 0.3] [--recorded]` — sensorless sweep over the grab grid (else the recorded RETRIEVE poses) | rig, or `--fake-hardware` |
 
 `laundry <command> --help` documents every option.
 
@@ -178,7 +181,7 @@ laundry replay scan_records/<scan>.csv                    # a saved scan
 laundry detect scan_records/<scan>.csv --publish          # detected clusters, coloured by index
 ```
 
-The bucket and table in RViz are only as accurate as our URDF edits. The detector fits its own bucket model from data, and `laundry detect` prints how far that fit sits from the URDF.
+The bucket and table in RViz (the "Obstacles" display) are only as accurate as `config.OBSTACLES`. The detector fits its own bucket model from data; `laundry scene fit` prints how far that fit sits from the configured pose.
 
 ---
 
@@ -198,7 +201,7 @@ The sweep is solved once by `laundry plan bake` and replayed as a fixed joint tr
 - out-and-back legs that retrace the same joint states;
 - every step collision-checked.
 
-The arm gets on and off it with collision-checked straight joint moves, so nothing is planned at scan time and the motion is identical every run. **Re-bake after changing INTER, the URDF bucket/gripper, or `--depth`**; the scan refuses a plan baked for another depth. The old detour is available with `--end-scan bottom`.
+The arm gets on and off it with collision-checked straight joint moves, so nothing is planned at scan time and the motion is identical every run. **Re-bake after changing INTER, `config.OBSTACLES`, the gripper, or `--depth`**; the scan refuses a plan baked for another depth. The old detour is available with `--end-scan bottom`.
 
 `laundry evaluate` measures all of this:
 - **Leave-one-out** over the empty baselines: every reported cluster is a false positive.
@@ -208,20 +211,58 @@ The arm gets on and off it with collision-checked straight joint moves, so nothi
 
 Current numbers and their provenance are in the constants' comments in `perception/detect.py` and in the git log.
 
+## Baseline scans
+
+The detector models the empty bucket from every `*.csv` directly in `baseline_scans/`, and ignores anything in subfolders.
+
+- **New set** (e.g. after moving the bucket): `laundry baseline collect --archive`. The scans are named `baseline_<session>_NN.csv` and go to `baseline_scans/incoming_<session>/`. Only when all of them succeed does the old set move to `baseline_scans/archive/<its session>/` and the new one take its place. A failed run leaves the old set active, so scans of two different scenes are never mixed.
+- **Top up** the current set: `laundry baseline collect` (no `--archive`).
+- **Adopt scans taken earlier:** `laundry baseline promote scan_records/scan_X.csv ... [--move] [--archive]` names them `baseline_<when taken>_NN.csv`.
+- `laundry baseline list` shows the current set and the archive. `laundry baseline restore <label>` brings an archived set back and archives the current one. Nothing is ever deleted.
+
+## Sensorless first pass: the grab grid
+
+Laundry is expected at the start, so `laundry preplanned` grabs at fixed spots without scanning. `laundry plan bake retrieve` generates those spots from `config.RETRIEVE_GRID` in the configured bucket. The default is 4 depths (40, 30, 20, 10 cm from the closed end, mouth first) × 3 positions across the floor (centre, then ±20°).
+
+For each spot, IK finds the lowest gripper height (2 cm above the floor upwards), then the most vertical approach that is collision-free with 1 cm of extra gripper clearance. Each spot is saved to `scan_plans/retrieve.yaml` as two poses:
+- **`grab_NN`**: an approach pose 8 cm up the gripper axis, reached from INTER on a baked route like any named pose (`laundry move grab_03` works).
+- **The grab itself**: a straight descent onto the laundry, then a straight lift back up.
+
+The sweep runs: route in → descend → close → lift → DROP → open, for each grab. Edit the grid (depths, angles, heights, tilts) in `config.py` and re-bake. `--recorded` still runs the hand-recorded RETRIEVE_3..0.
+
+**Detected items are grabbed the same way.** When the grid is baked, a detected item anywhere in the lower half of the drum (within `config.DETECTED_GRAB_MAX_ANGLE_DEG` = 90° of the floor's lowest line, so the lower walls too) gets a grab placed over it. The grab sinks halfway into the pile (at most 5 cm) and is solved with the same IK search. The arm takes the baked route to the nearest `grab_NN`, makes a short straight collision-checked move from there, then descends, closes and lifts. Items beyond that angle use the older Cartesian reach from INTER. On the fake controller, that reach couldn't get to a towel in the middle of the floor at any depth; the floor grab could.
+
+**`laundry clear`** chains it all. It fits the bucket model once and runs the grab grid (`--no-grabs` skips it). Then it repeats open → scan → detect → grasp the best reachable item → DROP until a scan finds nothing. It stops early if nothing detected is reachable (a rescan would see the same pile), after 2 failed grasps in a row, or after `--max-rounds`.
+
 ## Repeatable moves between poses
 
-Named-pose moves (`laundry move <pose>`, and the scan, grasp and drop stages) go through `arm/transfers.go_to`, which tries three routes in order:
+Named-pose moves (`laundry move <pose>`, and the scan, grasp, drop and preplanned stages) go through `arm/transfers.go_to`, which tries three routes in order:
 
-1. **INTER ↔ HOME and INTER ↔ DROP:** a baked path from `scan_plans/transfers.yaml`.
-   - The gripper first backs straight out of the bucket.
-   - Then come straight joint-space segments through one or two intermediate poses, every 1° collision-checked.
-   - The path is chosen to minimise joint travel, weighted toward J1 and J4–J7, which twist the cables.
-   - Going back to INTER replays it in reverse.
-   - J7 turns exactly its direct amount. On the fake controller, the planner had once turned it 536° on DROP → INTER.
+1. **A baked route** from `scan_plans/transfers.yaml`. INTER is the hub: there is one route from INTER to each of HOME, DROP, BOTTOM, RETRIEVE_0–3 and the grab_NN poses (`laundry scene check` lists which exist).
+   - INTER → pose replays the route; pose → INTER replays it in reverse.
+   - Pose → another pose (e.g. RETRIEVE_2 → DROP) goes back to INTER along one route and out along the other, so the arm always leaves the bucket through its mouth.
+   - Each route is straight joint-space segments through zero to two intermediate poses (for HOME/DROP, after first backing the gripper straight out of the bucket). Every 1° is collision-checked, and the route with the least joint travel wins, weighted toward J1 and J4–J7, which twist the cables.
+   - Before every replay the whole route is re-checked against the current planning scene. A route that now collides is refused, with a message to re-bake. A route baked against different obstacle poses still runs if it's clear, with a warning to re-bake.
 2. **Otherwise:** a straight, collision-checked joint move, which is the minimum twist.
 3. **Only if that collides:** the planner, with a warning.
 
-Re-bake (`laundry plan bake transfers`) after changing INTER, HOME, DROP or the URDF.
+Re-bake (`laundry plan bake transfers`) after changing a recorded pose, the padding or `config.OBSTACLES`.
+
+### Obstacles: the bucket and table
+
+The bucket and table are MoveIt **world objects**, not robot links. `arm/scene.py` adds `meshes/bucket.obj` and `meshes/table.obj` at the poses in `config.OBSTACLES`, which is the only place those poses are set. Bring-up adds them at start-up (`laundry scene apply`), and every `laundry` command re-checks on connect. (They used to be URDF links in the `xarm_ros2` fork, and MoveIt checks robot-vs-robot contact without padding, so padding never kept the arm away from them.)
+
+**After moving the bucket (or table):**
+
+1. Edit its `xyz` / `rpy` in `config.OBSTACLES`: metres and radians in link_base, with the same convention as a URDF `<origin>`. To measure it, collect fresh baselines (`laundry baseline collect`), then run `laundry scene fit`. It prints the pose that the scans put the bucket at. That pose depends on the ToF extrinsics, so check it with a tape measure.
+2. `laundry scene check` (bring-up running, fake or real) lists every recorded pose and baked route that now collides, and what it hits. Nothing moves.
+3. Re-record any pose the move invalidated, then run `laundry plan bake` and commit `scan_plans/`. Baked files record the scene they were baked against.
+
+**Padding:**
+
+- **Arm links (link1–link7): 3 cm** (`config.OBSTACLE_PADDING_M`), for everything: the planner, Cartesian strokes, and the straight and baked moves. The exceptions are the end scan (1 cm, `config.ENDCAP_PADDING_M`) and the route to BOTTOM (2 cm, `config.ROUTE_ARM_PADDING_M`), whose tilted tool brings the elbow to the rim. Each is baked and replayed under its own padding.
+- **Gripper: 0 cm** (`config.GRIPPER_PADDING_M`), because it works inside the bucket on purpose: the RETRIEVE poses put it within 1–2 cm of the floor.
+- **Routes that leave the bucket** (to HOME and DROP) are baked with an extra 1 cm on the gripper (`config.BAKE_GRIPPER_CLEARANCE_M`), so it clears the bucket mouth on the way out.
 
 ## Frames and offsets
 
@@ -244,7 +285,7 @@ ros2 launch xarm_moveit_config xarm7_moveit_gazebo.launch.py               # Mov
 ros2 launch xarm_moveit_config xarm7_moveit_realmove.launch.py robot_ip:=<ARM_IP>
 ```
 
-Our obstacle changes live on branch `my-obstacle-changes` of https://github.com/Antonio-1110/xarm_ros2-cde3301.git. The modified files are `xarm_description/urdf/xarm7/*.xacro` and `xarm_moveit_config/srdf/_xarm7_macro.srdf.xacro`.
+Our changes (the gripper link, J7's ±2π limit, J7's initial state) live on branch `world-obstacles` of https://github.com/Antonio-1110/xarm_ros2-cde3301.git (`workspace.repos` pins it). The modified files are `xarm_description/urdf/xarm7/*.xacro` and `xarm_moveit_config/srdf/_xarm7_macro.srdf.xacro`. The older `my-obstacle-changes` branch also has the bucket and table as URDF links. `arm/scene.py` still works with it, and disables those links in favour of the world objects.
 
 In a checkout made with `vcs import`, `origin` is our fork. Add the manufacturer's repo as `upstream` to pull their fixes:
 
@@ -253,5 +294,5 @@ cd ~/ros2_ws/src/xarm_ros2
 git remote add upstream https://github.com/xArm-Developer/xarm_ros2.git   # once
 git fetch upstream
 git rebase upstream/jazzy
-git push origin my-obstacle-changes --force-with-lease   # only after an intentional rebase
+git push origin world-obstacles --force-with-lease   # only after an intentional rebase
 ```

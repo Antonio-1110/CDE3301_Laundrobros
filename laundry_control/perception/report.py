@@ -9,7 +9,7 @@ Every report starts with the two sanity gates the model rests on,
 because they are cheap and because a bad cone fit or a starved
 occupancy grid silently poisons every number below them:
 
-    - how far the fitted cone had to move from the URDF/mesh seed
+    - how far the fitted cone had to move from the configured bucket (config.OBSTACLES)
     - how well the (u, theta) grid is actually covered
 
 Look at both before believing a result, especially the first few
@@ -31,8 +31,8 @@ def print_model_report(surface, baseline_scans, baseline_path):
     Print the cone fit and grid occupancy.
 
     Both are sanity gates, not decoration. A fit that moved
-    centimetres from the URDF/mesh seed means the bucket pose or
-    the sensor extrinsics are wrong; a grid whose median cell count
+    centimetres from the configured bucket (config.OBSTACLES) means
+    the bucket pose or the sensor extrinsics are wrong; a grid whose median cell count
     is far below the confidence threshold means the per-cell sigma
     is mostly the pooled fallback in disguise, and the bins want
     widening.

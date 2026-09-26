@@ -9,8 +9,12 @@ scan recorder (scan/recorder_node.py).
 
 Services (std_srvs/Trigger):
 
-    open_gripper  - move the servo to the `open_angle_deg` param.
-    close_gripper - move the servo to the `close_angle_deg` param.
+    open_gripper  - move the servo to the `open_angle_deg` param,
+                    then stop driving it.
+    close_gripper - move the servo to the `close_angle_deg` param,
+                    and KEEP driving it, so the claw holds what it
+                    grabbed until the next open (see servo.py). The
+                    servo is released when the node shuts down.
 
 Which raw servo angle actually opens/closes the physical claw
 depends on how it's linked to the servo horn - the defaults
@@ -49,27 +53,34 @@ class GripperNode(Node):
             Trigger, CLOSE_SERVICE, self._close_callback
         )
 
+        # One driver for the node's lifetime, so a closed claw keeps
+        # its PWM between service calls. Created lazily: see _move_to.
+        self._driver = None
+
         self.get_logger().info('gripper_node ready.')
 
     def _open_callback(self, request, response):
         return self._move_to(
-            self.get_parameter('open_angle_deg').value, response
+            self.get_parameter('open_angle_deg').value, response, hold=False
         )
 
     def _close_callback(self, request, response):
         return self._move_to(
-            self.get_parameter('close_angle_deg').value, response
+            self.get_parameter('close_angle_deg').value, response, hold=True
         )
 
-    def _move_to(self, angle, response):
+    def _move_to(self, angle, response, hold):
         try:
             # Inside the try: the first servo call is what actually
             # initialises the GPIO pin factory (see servo.py), so a
             # hardware/permission problem there must fail this one
             # service call, not crash the whole node.
-            from .servo import set_servo_angle
+            if self._driver is None:
+                from .servo import ServoDriver
 
-            set_servo_angle(angle)
+                self._driver = ServoDriver()
+
+            self._driver.move(angle, hold=hold)
 
         except Exception as exc:
             response.success = False
@@ -78,8 +89,15 @@ class GripperNode(Node):
             return response
 
         response.success = True
-        response.message = f'Servo set to {angle} deg.'
+        response.message = (
+            f'Servo set to {angle} deg' + (', holding.' if hold else '.')
+        )
         return response
+
+    def release(self):
+        """Stop driving the servo and free the pin (on shutdown)."""
+        if self._driver is not None:
+            self._driver.close()
 
 
 def main(args=None):
@@ -92,6 +110,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.release()
         node.destroy_node()
         rclpy.shutdown()
 

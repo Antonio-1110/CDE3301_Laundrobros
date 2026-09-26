@@ -11,12 +11,19 @@ top of a planned tool-Z stroke.
 """
 
 import math
+import time
 
+from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint, RobotTrajectory
-from moveit_msgs.srv import GetCartesianPath, GetPositionIK, GetStateValidity
+from moveit_msgs.srv import (
+    GetCartesianPath,
+    GetPositionFK,
+    GetPositionIK,
+    GetStateValidity,
+)
 import numpy as np
 import rclpy
 from rclpy.action import ActionClient
@@ -72,6 +79,94 @@ def describe_moveit_error(code):
     return f"{code} ({MOVEIT_ERROR_CODES.get(code, 'UNKNOWN')})"
 
 
+# Error codes MoveIt returns before anything has moved: the request
+# could not be planned. Only these justify retrying on the fallback
+# pipeline. Anything else (CONTROL_FAILED, PREEMPTED, TIMED_OUT, a
+# plan invalidated mid-motion, ...) can mean the arm was stopped
+# part-way - by its own collision detection, the e-stop or a cancel -
+# and must never be answered by commanding the motion again.
+PLANNING_STAGE_ERROR_CODES = frozenset({
+    -2,   # PLANNING_FAILED
+    -3,   # INVALID_MOTION_PLAN
+    -11,  # START_STATE_VIOLATES_PATH_CONSTRAINTS
+    -12,  # GOAL_IN_COLLISION
+    -13,  # GOAL_VIOLATES_PATH_CONSTRAINTS
+    -14,  # GOAL_CONSTRAINTS_VIOLATED
+    -15,  # INVALID_GROUP_NAME
+    -16,  # INVALID_GOAL_CONSTRAINTS
+    -17,  # INVALID_ROBOT_STATE (Pilz: non-zero start velocity)
+    -31,  # NO_IK_SOLUTION
+})
+
+
+def usable_attempts(attempts, loaded, logger=None):
+    """
+    Drop (pipeline, planner) attempts whose pipeline move_group lacks.
+
+    loaded None (unknown) keeps every attempt, as before. If nothing
+    would be left, the attempts are kept as they are, so MoveIt's own
+    error explains the failure.
+    """
+    if loaded is None:
+        return attempts
+
+    usable = [attempt for attempt in attempts if attempt[0] in loaded]
+
+    if not usable:
+        return attempts
+
+    if len(usable) < len(attempts) and logger is not None:
+        skipped = ', '.join(p for p, _ in attempts if p not in loaded)
+        logger.info(
+            f'Skipping {skipped} (not loaded in move_group: {loaded}).',
+            once=True,
+        )
+
+    return usable
+
+
+def failure_is_retryable(result):
+    """
+    Return True if a failed MoveGroup result cannot have moved the arm.
+
+    That is a planning-stage error code, or no planned trajectory at
+    all: nothing was planned, so nothing was executed. The second case
+    covers codes MoveIt uses outside the planning-stage list - an
+    unloaded pipeline (Pilz on the stock xArm launches) comes back as
+    0, before anything moves, and must still fall back to OMPL.
+    """
+    return (
+        result.error_code.val in PLANNING_STAGE_ERROR_CODES
+        or not result.planned_trajectory.joint_trajectory.points
+    )
+
+
+# How long spin waits run before handing control back to Python, so
+# a Ctrl+C (KeyboardInterrupt) is noticed promptly. See
+# XArm7Controller._spin_until_done.
+SPIN_SLICE_SEC = 0.1
+
+# State-validity requests are sent ONE AT A TIME. With several in
+# flight at once, move_group (rmw_fastrtps, Jazzy) intermittently never
+# answers some of them - measured: most multi-request checks lost at
+# least one after the first. Sequential checks cost ~5 ms per state.
+# A request unanswered after VALIDITY_TIMEOUT_SEC is re-sent, up to
+# VALIDITY_ATTEMPTS times, before the state counts as invalid.
+VALIDITY_TIMEOUT_SEC = 1.0
+VALIDITY_ATTEMPTS = 3
+
+# The first /joint_states message can take seconds to arrive after the
+# node starts (DDS discovery), and get_current_joints() only waits 2 s
+# - which is why the first read after `laundry` started sometimes
+# timed out. The controller waits for that first message once, up to
+# this long, before it reports ready.
+FIRST_JOINT_STATE_TIMEOUT_SEC = 15.0
+
+# How long to wait for move_group's parameter service when asking
+# which planning pipelines it loaded.
+PIPELINE_QUERY_TIMEOUT_SEC = 3.0
+
+
 class XArm7Controller(Node):
     """
     Unified xArm7 motion controller.
@@ -96,9 +191,15 @@ class XArm7Controller(Node):
         flange_link=config.FLANGE_LINK,
         joint_state_topic=config.JOINT_STATE_TOPIC,
         plan_from_observed_state=False,
+        pad_obstacles=True,
     ):
         """
         Connect to MoveIt (blocks until its interfaces are up).
+
+        pad_obstacles:
+            Make sure move_group has the padded bucket/table (see
+            arm/scene.py) before anything moves. On by default: without
+            it MoveIt has no bucket or table at all.
 
         plan_from_observed_state:
             Give every Cartesian plan an explicit start state - the
@@ -185,6 +286,17 @@ class XArm7Controller(Node):
         )
 
         # =====================================================
+        # Emergency cancel of the trajectory controller's goals,
+        # for Ctrl+C (see _stop_after_interrupt). Created now so
+        # it is already connected when it is needed.
+        # =====================================================
+
+        self._controller_cancel_client = self.create_client(
+            CancelGoal,
+            config.TRAJECTORY_CONTROLLER_ACTION + '/_action/cancel_goal',
+        )
+
+        # =====================================================
         # Wait for MoveIt
         # =====================================================
 
@@ -203,6 +315,23 @@ class XArm7Controller(Node):
 
         self.execute_client.wait_for_server()
 
+        self._wait_for_first_joint_state()
+
+        # Which planning pipelines move_group loaded; looked up on the
+        # first move_joints() (see loaded_planning_pipelines).
+        self._loaded_pipelines = None
+        self._pipelines_queried = False
+
+        if pad_obstacles:
+            from . import scene
+
+            scene.apply(
+                self,
+                config.OBSTACLE_PADDING_M,
+                config.GRIPPER_PADDING_M,
+                log=self.get_logger().info,
+            )
+
         self.get_logger().info(
             'XArm7Controller ready.'
         )
@@ -213,6 +342,71 @@ class XArm7Controller(Node):
 
     def _joint_state_callback(self, msg):
         self._latest_joint_state = msg
+
+    def _wait_for_first_joint_state(
+        self, timeout_sec=FIRST_JOINT_STATE_TIMEOUT_SEC
+    ):
+        """Spin until /joint_states has been heard from once."""
+        deadline = time.monotonic() + timeout_sec
+        next_note = time.monotonic() + 2.0
+
+        while rclpy.ok() and self._latest_joint_state is None:
+            if time.monotonic() > deadline:
+                self.get_logger().warning(
+                    f'No /joint_states after {timeout_sec:g} s; is the arm '
+                    'driver (or the fake controller) running?'
+                )
+                return False
+
+            if time.monotonic() > next_note:
+                self.get_logger().info('Waiting for /joint_states...')
+                next_note += 2.0
+
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        return True
+
+    def loaded_planning_pipelines(self):
+        """
+        Return the planning pipelines move_group loaded, or None if unknown.
+
+        Asked once (move_group's planning_pipelines parameter) and
+        cached. The stock xArm launches load only OMPL, so trying Pilz
+        first cost a failed request - and a warning - on every
+        move_joints(); knowing what is loaded skips it.
+        """
+        if self._pipelines_queried:
+            return self._loaded_pipelines
+
+        self._pipelines_queried = True
+
+        from rcl_interfaces.srv import GetParameters
+
+        client = self.create_client(
+            GetParameters, '/move_group/get_parameters'
+        )
+
+        try:
+            if not client.wait_for_service(
+                timeout_sec=PIPELINE_QUERY_TIMEOUT_SEC
+            ):
+                return None
+
+            request = GetParameters.Request(names=['planning_pipelines'])
+            future = client.call_async(request)
+
+            if not self._spin_until_done(future, PIPELINE_QUERY_TIMEOUT_SEC):
+                return None
+
+            values = future.result().values
+
+            if values and values[0].string_array_value:
+                self._loaded_pipelines = list(values[0].string_array_value)
+
+        finally:
+            self.destroy_client(client)
+
+        return self._loaded_pipelines
 
     def get_current_joints(self, timeout=2.0):
         """
@@ -292,10 +486,7 @@ class XArm7Controller(Node):
             rclpy.time.Time(),
         )
 
-        rclpy.spin_until_future_complete(
-            self,
-            future,
-        )
+        self._spin_until_done(future)
 
         return self.tf_buffer.lookup_transform(
             self.base_frame,
@@ -310,6 +501,148 @@ class XArm7Controller(Node):
             float(duration.sec)
             + float(duration.nanosec) * 1e-9
         )
+
+    # =========================================================
+    # WAITING, AND STOPPING ON CTRL+C
+    #
+    # Every wait spins in short slices so Python regains control
+    # regularly and a Ctrl+C arrives as KeyboardInterrupt at once.
+    # (The `laundry` CLI starts rclpy WITHOUT its own SIGINT handler,
+    # which would shut the ROS context down before we could cancel
+    # anything - see cli._RosSession.)
+    #
+    # A MoveIt goal outlives the process that sent it, so exiting on
+    # Ctrl+C is not enough: _run_goal stops the arm first (see
+    # _stop_after_interrupt).
+    # =========================================================
+
+    def _spin_until_done(self, future, timeout_sec=None):
+        """Spin until `future` is done (or timeout); True if it is done."""
+        deadline = (
+            None if timeout_sec is None else time.monotonic() + timeout_sec
+        )
+
+        while not future.done() and rclpy.ok():
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+
+            rclpy.spin_until_future_complete(
+                self, future, timeout_sec=SPIN_SLICE_SEC
+            )
+
+        return future.done()
+
+    def _run_goal(self, client, goal, what):
+        """
+        Send an action goal and wait for its result; stop the arm on Ctrl+C.
+
+        Returns (goal_handle, wrapped_result): goal_handle is None if
+        MoveIt never answered, wrapped_result None if the goal was
+        rejected or returned nothing. KeyboardInterrupt is re-raised
+        once the arm has been stopped (see _stop_after_interrupt).
+        """
+        send_future = client.send_goal_async(goal)
+        result_future = None
+
+        try:
+            self._spin_until_done(send_future)
+
+            goal_handle = send_future.result()
+
+            if goal_handle is None or not goal_handle.accepted:
+                return goal_handle, None
+
+            result_future = goal_handle.get_result_async()
+
+            self._spin_until_done(result_future)
+
+            return goal_handle, result_future.result()
+
+        except KeyboardInterrupt:
+            self._stop_after_interrupt(send_future, result_future, what)
+            raise
+
+    def _cancel_controller_goals(self):
+        """Cancel every goal on the trajectory controller; True if any was."""
+        client = self._controller_cancel_client
+
+        if not client.service_is_ready():
+            return False
+
+        # An all-zero goal id and stamp means "cancel every goal".
+        future = client.call_async(CancelGoal.Request())
+
+        if not self._spin_until_done(future, timeout_sec=1.0):
+            return False
+
+        response = future.result()
+
+        return response is not None and len(response.goals_canceling) > 0
+
+    def _stop_after_interrupt(
+        self, send_future, result_future, what, timeout_sec=10.0
+    ):
+        """
+        Stop the arm after Ctrl+C, and keep it stopped until MoveIt lets go.
+
+        move_group does not act on a cancel while it is executing (see
+        config.TRAJECTORY_CONTROLLER_ACTION), so the motion is stopped
+        at the trajectory controller itself, which then holds position.
+        The MoveIt goal is cancelled too, and the controller cancel is
+        repeated until MoveIt reports the goal finished: a Ctrl+C
+        during PLANNING would otherwise let execution start after this
+        process has exited.
+        """
+        self.get_logger().warning(f'Interrupted: stopping {what}...')
+
+        try:
+            if self._spin_until_done(send_future, timeout_sec=1.0):
+                goal_handle = send_future.result()
+
+                if goal_handle is not None and goal_handle.accepted:
+                    goal_handle.cancel_goal_async()
+
+                    if result_future is None:
+                        result_future = goal_handle.get_result_async()
+
+            stopped = False
+            deadline = time.monotonic() + timeout_sec
+
+            while True:
+                stopped = self._cancel_controller_goals() or stopped
+
+                if result_future is None or result_future.done():
+                    break
+
+                if time.monotonic() >= deadline:
+                    break
+
+                self._spin_until_done(result_future, timeout_sec=0.2)
+
+            if result_future is not None and not result_future.done():
+                self.get_logger().error(
+                    f'{what}: MoveIt has not released the goal after '
+                    f'{timeout_sec:g}s; the arm may still move - use the '
+                    'e-stop.'
+                )
+            elif stopped:
+                self.get_logger().warning(
+                    'Trajectory controller stopped; the arm is holding '
+                    'position.'
+                )
+            elif not self._controller_cancel_client.service_is_ready():
+                self.get_logger().error(
+                    f"Cannot reach '{config.TRAJECTORY_CONTROLLER_ACTION}' "
+                    'to stop the arm - use the e-stop.'
+                )
+            else:
+                self.get_logger().warning(f'{what} was not moving the arm.')
+
+        except KeyboardInterrupt:
+            self.get_logger().error(
+                'Interrupted again before the arm was confirmed stopped; '
+                'it may still be moving - use the e-stop.'
+            )
 
     # =========================================================
     # GENERIC JOINT MOVEMENT
@@ -347,15 +680,17 @@ class XArm7Controller(Node):
 
         fallback_pipeline_id / fallback_planner_id:
             Retried once, automatically, if the first attempt
-            fails. Pass fallback_pipeline_id=None to disable.
+            fails to PLAN. A failure during execution is never
+            retried (see PLANNING_STAGE_ERROR_CODES). Pass
+            fallback_pipeline_id=None to disable.
 
             The fallback exists because PTP does not route AROUND
             anything: it collision-checks its straight-line
             interpolation and reports failure if that hits
             something, where a sampling planner would search for a
             way past. That matters here because the bucket and
-            table are real collision geometry (URDF links on
-            link_base - see xarm7.urdf.xacro), so a direct
+            table are real collision geometry (world objects,
+            config.OBSTACLES - see arm/scene.py), so a direct
             interpolation out of a pose deep inside the bucket can
             genuinely be blocked. Recorded-pose transitions (INTER,
             DROP, BOTTOM) are clear direct paths and stay on PTP;
@@ -381,6 +716,10 @@ class XArm7Controller(Node):
                 (fallback_pipeline_id, fallback_planner_id)
             )
 
+        attempts = usable_attempts(
+            attempts, self.loaded_planning_pipelines(), self.get_logger()
+        )
+
         for attempt_index, (attempt_pipeline, attempt_planner) in enumerate(
             attempts
         ):
@@ -393,7 +732,7 @@ class XArm7Controller(Node):
                     f'{attempt_pipeline}/{attempt_planner}.'
                 )
 
-            succeeded, failure_reason = self._move_joints_once(
+            succeeded, failure_reason, retryable = self._move_joints_once(
                 joint_angles,
                 velocity=velocity,
                 acceleration=acceleration,
@@ -409,6 +748,16 @@ class XArm7Controller(Node):
 
             if succeeded:
                 return True
+
+            if not retryable:
+                # Failed during or after execution: the arm may have
+                # been stopped part-way on purpose. Never re-command.
+                self.get_logger().error(
+                    f'Joint movement failed with {attempt_pipeline}/'
+                    f'{attempt_planner} after planning: {failure_reason}. '
+                    'Not retrying - the arm may have been stopped part-way.'
+                )
+                return False
 
             if attempt_index == 0:
                 first_failure_reason = failure_reason
@@ -432,10 +781,13 @@ class XArm7Controller(Node):
         """
         One planning/execution attempt with a specific pipeline.
 
-        Returns (succeeded, reason): reason is None on success, and
-        otherwise a short human-readable description of what went
-        wrong, so move_joints() can say WHY a fallback happened
-        rather than assuming a cause.
+        Returns (succeeded, reason, retryable): reason is None on
+        success, and otherwise a short human-readable description of
+        what went wrong, so move_joints() can say WHY a fallback
+        happened rather than assuming a cause. retryable is True only
+        when the failure happened before anything moved (see
+        PLANNING_STAGE_ERROR_CODES) - the only case a fallback
+        pipeline may be tried.
 
         quiet_failure downgrades the failure log to a debug line,
         so a first attempt that is about to be retried on another
@@ -509,18 +861,9 @@ class XArm7Controller(Node):
                 f'{math.degrees(angle):+.2f} deg'
             )
 
-        send_future = (
-            self.move_group_client.send_goal_async(
-                goal
-            )
+        goal_handle, wrapped_result = self._run_goal(
+            self.move_group_client, goal, 'joint-space move'
         )
-
-        rclpy.spin_until_future_complete(
-            self,
-            send_future,
-        )
-
-        goal_handle = send_future.result()
 
         def report_failure(message):
 
@@ -529,12 +872,14 @@ class XArm7Controller(Node):
             else:
                 self.get_logger().error(message)
 
+        # Nothing has moved in the first two cases: the goal never
+        # reached MoveIt, or MoveIt refused it outright.
         if goal_handle is None:
 
             reason = 'no response from MoveIt'
             report_failure('Failed to communicate with MoveIt.')
 
-            return False, reason
+            return False, reason, True
 
         if not goal_handle.accepted:
 
@@ -548,25 +893,14 @@ class XArm7Controller(Node):
                 f'({pipeline_id}/{planner_id}): {reason}'
             )
 
-            return False, reason
-
-        result_future = (
-            goal_handle.get_result_async()
-        )
-
-        rclpy.spin_until_future_complete(
-            self,
-            result_future,
-        )
-
-        wrapped_result = result_future.result()
+            return False, reason, True
 
         if wrapped_result is None:
 
             reason = 'MoveIt returned no result'
             report_failure(reason + '.')
 
-            return False, reason
+            return False, reason, False
 
         error_code = (
             wrapped_result.result.error_code.val
@@ -578,16 +912,19 @@ class XArm7Controller(Node):
                 'Joint movement completed successfully.'
             )
 
-            return True, None
+            return True, None, False
 
         reason = describe_moveit_error(error_code)
 
-        report_failure(
-            f'Joint movement failed with '
-            f'{pipeline_id}/{planner_id}: {reason}'
-        )
+        retryable = failure_is_retryable(wrapped_result.result)
 
-        return False, reason
+        if retryable:
+            report_failure(
+                f'Joint movement failed with '
+                f'{pipeline_id}/{planner_id}: {reason}'
+            )
+
+        return False, reason, retryable
 
     # =========================================================
     # RELATIVE SINGLE-JOINT MOVEMENT
@@ -777,10 +1114,7 @@ class XArm7Controller(Node):
             request
         )
 
-        rclpy.spin_until_future_complete(
-            self,
-            future,
-        )
+        self._spin_until_done(future)
 
         response = future.result()
 
@@ -914,18 +1248,9 @@ class XArm7Controller(Node):
 
         goal.trajectory = trajectory
 
-        send_future = (
-            self.execute_client.send_goal_async(
-                goal
-            )
+        goal_handle, wrapped_result = self._run_goal(
+            self.execute_client, goal, 'trajectory execution'
         )
-
-        rclpy.spin_until_future_complete(
-            self,
-            send_future,
-        )
-
-        goal_handle = send_future.result()
 
         if goal_handle is None:
 
@@ -943,17 +1268,6 @@ class XArm7Controller(Node):
             )
 
             return False
-
-        result_future = (
-            goal_handle.get_result_async()
-        )
-
-        rclpy.spin_until_future_complete(
-            self,
-            result_future,
-        )
-
-        wrapped_result = result_future.result()
 
         if wrapped_result is None:
 
@@ -994,7 +1308,7 @@ class XArm7Controller(Node):
     # =========================================================
 
     def _client(self, attribute, service_type, name):
-        client = getattr(self, attribute)
+        client = getattr(self, attribute, None)
 
         if client is None:
             client = self.create_client(service_type, name)
@@ -1008,13 +1322,43 @@ class XArm7Controller(Node):
 
     def _call(self, client, request):
         future = client.call_async(request)
-        rclpy.spin_until_future_complete(self, future)
+        self._spin_until_done(future)
         return future.result()
 
     def _joint_state(self, joints):
         return JointState(
             name=list(self.JOINT_NAMES),
             position=[float(q) for q in joints],
+        )
+
+    def compute_fk(self, joints):
+        """
+        Return (position, orientation quaternion xyzw) of the flange.
+
+        Pure kinematics from the robot model - independent of where
+        the arm actually is - so anything built on it is repeatable.
+        Returns None if MoveIt refuses.
+        """
+        client = self._client('_fk_client', GetPositionFK, '/compute_fk')
+
+        request = GetPositionFK.Request()
+        request.header.frame_id = self.base_frame
+        request.fk_link_names = [self.flange_link]
+        request.robot_state.joint_state = self._joint_state(joints)
+
+        response = self._call(client, request)
+
+        if response is None or response.error_code.val != 1:
+            return None
+
+        pose = response.pose_stamped[0].pose
+
+        return (
+            np.array([pose.position.x, pose.position.y, pose.position.z]),
+            np.array([
+                pose.orientation.x, pose.orientation.y,
+                pose.orientation.z, pose.orientation.w,
+            ]),
         )
 
     def compute_ik(self, pose, seed, avoid_collisions=True, timeout=0.2):
@@ -1056,7 +1400,35 @@ class XArm7Controller(Node):
         return [solution[name] for name in self.JOINT_NAMES]
 
     def state_is_valid(self, joints):
-        """Return True if MoveIt finds this joint state collision-free."""
+        """
+        Return True if MoveIt finds this joint state collision-free.
+
+        A state MoveIt never answers for counts as invalid.
+        """
+        response = self._validity_response(joints)
+
+        return bool(response is not None and response.valid)
+
+    def state_contacts(self, joints):
+        """
+        Return the colliding (body, body) pairs at a joint state.
+
+        [] if the state is valid; None if MoveIt never answered.
+        """
+        response = self._validity_response(joints)
+
+        if response is None:
+            return None
+
+        if response.valid:
+            return []
+
+        return sorted({
+            tuple(sorted((c.contact_body_1, c.contact_body_2)))
+            for c in response.contacts
+        })
+
+    def _validity_response(self, joints):
         client = self._client(
             '_validity_client', GetStateValidity, '/check_state_validity'
         )
@@ -1065,9 +1437,33 @@ class XArm7Controller(Node):
         request.group_name = self.group_name
         request.robot_state.joint_state = self._joint_state(joints)
 
-        response = self._call(client, request)
+        for _attempt in range(VALIDITY_ATTEMPTS):
+            future = client.call_async(request)
 
-        return bool(response is not None and response.valid)
+            if self._spin_until_done(future, VALIDITY_TIMEOUT_SEC):
+                return future.result()
+
+        self.get_logger().warning(
+            'MoveIt did not answer a state-validity check; treating the '
+            'state as invalid.',
+            throttle_duration_sec=5.0,
+        )
+
+        return None
+
+    def set_arm_padding(self, padding_m):
+        """
+        Set the arm links' obstacle padding in move_group (metres).
+
+        The gripper keeps config.GRIPPER_PADDING_M: changing its padding
+        makes MoveIt rebuild its large mesh, which takes seconds, while
+        arm links take ~0.3 s. See arm/scene.py.
+        """
+        from . import scene
+
+        scene.set_padding(
+            self, padding_m, {'gripper_link': config.GRIPPER_PADDING_M}
+        )
 
     def first_invalid_state(self, waypoints):
         """Return the index of the first colliding densified state, or None."""
@@ -1281,23 +1677,34 @@ class XArm7Controller(Node):
         twist_deg,
     ):
         """
-        Add deliberate J7 rotation ON TOP OF MoveIt's orientation-preserving J7 trajectory.
+        Add a J7 rotation that tracks the stroke's own progress.
 
-        IMPORTANT - the final J7 trajectory is
+        The final J7 trajectory is
 
-            q7_final(t)
-                =
-            q7_moveit(t)
-                +
-            desired_twist(t)
+            q7(t) = q7_moveit(t) + twist * p(t)
 
-        We intentionally modify POSITIONS ONLY.
+        where p(t) in [0, 1] is the stroke's progress along its path:
+        its cumulative joint-space arc length, normalised. Because
+        the stroke is a straight tool-Z line, J7 therefore turns a
+        fixed angle per centimetre of insertion - a true helix, which
+        is what scan/coverage.py models.
 
-        During testing with the fake xArm controller, manually
-        modifying J7 velocities caused CONTROL_FAILED (-4).
+        Velocities and accelerations get the matching derivatives
+        (twist * dp/dt, and its time derivative), so positions,
+        velocities and accelerations stay consistent. That matters on
+        the real arm: its trajectory controller interpolates BETWEEN
+        points using the velocities, and the xArm driver streams the
+        result to the joints at 150 Hz (servo mode). Editing positions
+        alone - what this used to do - left J7's velocity near zero
+        at every waypoint, so J7 would stop and start at each 5 mm
+        point with peaks well above its average speed. MoveIt's
+        profile already starts and ends at rest, so dp/dt does too.
 
-        Therefore MoveIt's velocity/acceleration fields are
-        left untouched.
+        MoveIt never checks the added twist against J7's limits, so
+        this does: if the twisted stroke would exceed
+        config.JOINT7_MAX_VELOCITY_RAD_S or
+        JOINT7_MAX_ACCELERATION_RAD_S2, the whole stroke is slowed
+        uniformly (same path, longer duration) until it fits.
         """
         traj = trajectory.joint_trajectory
 
@@ -1325,16 +1732,44 @@ class XArm7Controller(Node):
             'joint7'
         )
 
-        total_time = (
-            self._duration_to_seconds(
-                traj.points[-1].time_from_start
-            )
-        )
+        times = np.array([
+            self._duration_to_seconds(point.time_from_start)
+            for point in traj.points
+        ])
 
-        if total_time <= 0.0:
+        if times[-1] <= 0.0 or np.any(np.diff(times) <= 0.0):
 
             self.get_logger().error(
-                'Trajectory duration is zero or invalid.'
+                'Trajectory timing is invalid; cannot add a twist.'
+            )
+
+            return False
+
+        positions = np.array([list(p.positions) for p in traj.points])
+
+        dof = positions.shape[1]
+
+        if all(len(p.velocities) == dof for p in traj.points):
+            velocities = np.array([list(p.velocities) for p in traj.points])
+        else:
+            velocities = np.gradient(positions, times, axis=0)
+
+        has_accelerations = all(
+            len(p.accelerations) == dof for p in traj.points
+        )
+
+        # Progress along the stroke: normalised joint-space arc
+        # length. ds/dt is the joint-space speed, taken from MoveIt's
+        # own (consistent) velocities rather than differenced.
+        arc = np.concatenate(
+            [[0.0], np.cumsum(np.linalg.norm(np.diff(positions, axis=0), axis=1))]
+        )
+        length = float(arc[-1])
+
+        if length <= 1e-9:
+
+            self.get_logger().error(
+                'Stroke does not move; cannot add a twist.'
             )
 
             return False
@@ -1343,38 +1778,45 @@ class XArm7Controller(Node):
             twist_deg
         )
 
-        # The twist bypasses MoveIt's time parameterisation (see
-        # config.JOINT7_MAX_VELOCITY_RAD_S), so say so when it asks
-        # J7 for more than its configured limit.
-        twist_rate = abs(twist_rad) / total_time
+        progress = arc / length
+        speed = np.linalg.norm(velocities, axis=1)
 
-        if twist_rate > config.JOINT7_MAX_VELOCITY_RAD_S:
-            self.get_logger().warning(
-                f'J7 twist runs at {math.degrees(twist_rate):.0f} deg/s, '
-                f'above the configured '
-                f'{math.degrees(config.JOINT7_MAX_VELOCITY_RAD_S):.0f} '
-                'deg/s limit (MoveIt does not check added twist). '
-                'Lower --velocity or --sweep for margin.',
-                throttle_duration_sec=30.0,
+        q7_added = twist_rad * progress
+        v7_added = twist_rad * speed / length
+        a7_added = np.gradient(v7_added, times)
+
+        v7_total = velocities[:, j7_index] + v7_added
+
+        if has_accelerations:
+            a7_total = (
+                np.array([p.accelerations[j7_index] for p in traj.points])
+                + a7_added
             )
+        else:
+            a7_total = a7_added
+
+        # Slowing a trajectory by k divides velocities by k and
+        # accelerations by k^2.
+        peak_velocity = float(np.abs(v7_total).max())
+        peak_acceleration = float(np.abs(a7_total).max())
+
+        slowdown = max(
+            1.0,
+            peak_velocity / config.JOINT7_MAX_VELOCITY_RAD_S,
+            math.sqrt(
+                peak_acceleration / config.JOINT7_MAX_ACCELERATION_RAD_S2
+            ),
+        )
 
         # Diagnostic baseline
-        q7_start = (
-            traj.points[0].positions[j7_index]
-        )
-
-        q7_end = (
-            traj.points[-1].positions[j7_index]
-        )
-
         self.get_logger().info(
             'J7 synchronized twist:'
         )
 
         self.get_logger().info(
             f'  MoveIt baseline: '
-            f'{math.degrees(q7_start):+.2f} -> '
-            f'{math.degrees(q7_end):+.2f} deg'
+            f'{math.degrees(positions[0, j7_index]):+.2f} -> '
+            f'{math.degrees(positions[-1, j7_index]):+.2f} deg'
         )
 
         self.get_logger().info(
@@ -1384,51 +1826,46 @@ class XArm7Controller(Node):
 
         self.get_logger().info(
             f'  Final target: '
-            f'{math.degrees(q7_end + twist_rad):+.2f} deg'
+            f'{math.degrees(positions[-1, j7_index] + twist_rad):+.2f} deg'
         )
 
-        # -----------------------------------------------------
-        # Add twist according to normalized trajectory time.
-        #
-        # This guarantees:
-        #
-        #   translation starts when twist starts
-        #   translation ends when twist ends
-        #
-        # It does NOT yet guarantee exact angular displacement
-        # per physical centimetre throughout the stroke.
-        # -----------------------------------------------------
+        self.get_logger().info(
+            f'  J7 peak: {math.degrees(peak_velocity / slowdown):.0f} deg/s, '
+            f'{peak_acceleration / slowdown ** 2:.1f} rad/s^2 '
+            f'over {times[-1] * slowdown:.2f} s'
+        )
 
-        for point in traj.points:
-
-            t = self._duration_to_seconds(
-                point.time_from_start
+        if slowdown > 1.0:
+            self.get_logger().warning(
+                f'J7 twist would peak at {math.degrees(peak_velocity):.0f} '
+                f'deg/s / {peak_acceleration:.1f} rad/s^2, over the J7 '
+                f'limits; stroke slowed {slowdown:.2f}x to fit '
+                '(lower --velocity or --sweep to avoid this).',
+                throttle_duration_sec=30.0,
             )
 
-            progress = t / total_time
+        for index, point in enumerate(traj.points):
 
-            progress = max(
-                0.0,
-                min(1.0, progress),
+            point_positions = list(point.positions)
+            point_positions[j7_index] += float(q7_added[index])
+            point.positions = point_positions
+
+            point_velocities = list(velocities[index])
+            point_velocities[j7_index] = float(v7_total[index])
+            point.velocities = [v / slowdown for v in point_velocities]
+
+            if has_accelerations:
+                point_accelerations = list(point.accelerations)
+                point_accelerations[j7_index] = float(a7_total[index])
+                point.accelerations = [
+                    a / slowdown ** 2 for a in point_accelerations
+                ]
+
+            nanoseconds = int(round(times[index] * slowdown * 1e9))
+            point.time_from_start = Duration(
+                sec=nanoseconds // 1000000000,
+                nanosec=nanoseconds % 1000000000,
             )
-
-            positions = list(
-                point.positions
-            )
-
-            q7_moveit = (
-                positions[j7_index]
-            )
-
-            q7_added = (
-                twist_rad * progress
-            )
-
-            positions[j7_index] = (
-                q7_moveit + q7_added
-            )
-
-            point.positions = positions
 
         return True
 

@@ -1,0 +1,44 @@
+# Unit tests, flake8 and pep257 on every push and pull request.
+#
+# Runs in the official ROS 2 Jazzy image. No arm, sensor, GPIO or MoveIt
+# server is needed: the tests stub those, and the hardware libraries
+# (gpiozero, lgpio, adafruit) are only imported on real hardware.
+name: tests
+
+# Pushes to main, and every pull request (a push to a PR branch runs
+# once, as the pull_request event).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    container: ros:jazzy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ros-jazzy-moveit-msgs \
+            ros-jazzy-tf2-ros \
+            ros-jazzy-tf2-geometry-msgs \
+            ros-jazzy-sensor-msgs-py \
+            ros-jazzy-std-srvs \
+            ros-jazzy-ament-flake8 \
+            ros-jazzy-ament-pep257 \
+            ros-jazzy-ament-copyright \
+            python3-pytest \
+            python3-numpy \
+            python3-scipy \
+            python3-yaml
+
+      - name: Run tests
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          PYTHONPATH="$GITHUB_WORKSPACE:$PYTHONPATH" \
+            python3 -m pytest test -q -p no:cacheprovider

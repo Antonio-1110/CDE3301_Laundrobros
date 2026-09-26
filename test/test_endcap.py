@@ -123,14 +123,26 @@ class _Logger:
     def error(self, *_a, **_k):
         pass
 
+    def warning(self, *_a, **_k):
+        pass
+
 
 class _StubArm:
 
-    def __init__(self):
+    def __init__(self, blocked=False):
         self.calls = []
+        self.paddings = []
+        self.blocked = blocked
 
     def get_logger(self):
         return _Logger()
+
+    def first_invalid_state(self, waypoints):
+        self.calls.append(('check', len(waypoints)))
+        return 3 if self.blocked else None
+
+    def set_arm_padding(self, padding_m):
+        self.paddings.append(padding_m)
 
     def move_joints_linear(self, target, time_scale=1.0):
         self.calls.append(('linear', list(target), time_scale))
@@ -146,6 +158,28 @@ def test_run_plan_refuses_a_different_depth():
         endcap.run_plan(_StubArm(), _small_plan(depth=0.42), 0.40)
 
 
+def test_run_plan_refuses_a_plan_that_collides_now():
+    arm = _StubArm(blocked=True)
+
+    assert not endcap.run_plan(arm, _small_plan(), 0.42)
+    # Checked the whole plan, then never moved.
+    assert arm.calls == [('check', len(_small_plan().waypoints))]
+
+
+def test_run_plan_uses_the_plans_padding_then_restores_it():
+    arm = _StubArm()
+    plan = _small_plan()
+    plan.padding_m = 0.01
+
+    assert endcap.run_plan(arm, plan, 0.42)
+    assert arm.paddings == [0.01, config.OBSTACLE_PADDING_M]
+
+    blocked = _StubArm(blocked=True)
+    assert not endcap.run_plan(blocked, plan, 0.42)
+    # Restored even when the plan is refused.
+    assert blocked.paddings == [0.01, config.OBSTACLE_PADDING_M]
+
+
 def test_precession_end_scan_gets_on_replays_and_turns_around():
     arm = _StubArm()
     plan = _small_plan()
@@ -154,11 +188,11 @@ def test_precession_end_scan_gets_on_replays_and_turns_around():
     assert pattern._precession_end_scan(arm, plan, 0.42, pre, 150.0, 0.5)
 
     kinds = [call[0] for call in arm.calls]
-    assert kinds == ['linear', 'plan', 'linear']
-    assert arm.calls[0][1] == pytest.approx(plan.start)
-    assert all(call[-1] == 0.5 for call in arm.calls)
+    assert kinds == ['check', 'linear', 'plan', 'linear']
+    assert arm.calls[1][1] == pytest.approx(plan.start)
+    assert all(call[-1] == 0.5 for call in arm.calls[1:])
 
-    exit_joints = arm.calls[2][1]
+    exit_joints = arm.calls[3][1]
     assert exit_joints[:6] == pre[:6]
     assert exit_joints[6] == pytest.approx(-2.0 + math.radians(150.0))
 

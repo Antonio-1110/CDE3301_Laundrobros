@@ -54,14 +54,29 @@ class FakeRecorder:
     """
 
     def __init__(self, node, source_csv, csv_path=None):
-        if not os.path.isfile(source_csv):
-            raise FileNotFoundError(
-                f'--scan-from file not found: {source_csv!r}'
-            )
+        """
+        source_csv: one scan CSV, or a list used one per scan, in order.
+
+        With a list, each save uses the next file and the last repeats
+        - so `laundry clear` can be fed "laundry, then empty".
+        """
+        sources = [source_csv] if isinstance(source_csv, str) else list(
+            source_csv
+        )
+
+        for path in sources:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f'--scan-from file not found: {path!r}')
 
         self.node = node
-        self.source_csv = source_csv
+        self._sources = sources
+        self._saves = 0
         self.csv_path = csv_path
+
+    @property
+    def source_csv(self):
+        """Return the scan the next save stands in with."""
+        return self._sources[min(self._saves, len(self._sources) - 1)]
 
     def set_csv_path(self, csv_path, timeout_sec=5.0):
         """Record where the final save should land."""
@@ -97,5 +112,7 @@ class FakeRecorder:
         self.node.get_logger().info(
             f'[fake recorder] {self.source_csv} -> {self.csv_path}'
         )
+
+        self._saves += 1
 
         return True

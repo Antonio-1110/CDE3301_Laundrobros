@@ -1,7 +1,6 @@
 """Tests for the stage plumbing: targets JSON, fakes, CLI, grasp sequence."""
 
 from dataclasses import dataclass
-import os
 
 from laundry_control import cli, config
 from laundry_control.grasp import execute
@@ -9,7 +8,6 @@ from laundry_control.grasp.targets_io import load_targets, save_targets
 from laundry_control.hardware.fake import FakeRecorder
 from laundry_control.perception.detect import ClusterSummary
 from laundry_control.pipeline import run_scan
-from laundry_control.scan.baselines import promote
 import numpy as np
 import pytest
 
@@ -165,16 +163,18 @@ class _StubArm:
 
 class _StubGripper:
 
-    def __init__(self, arm):
+    def __init__(self, arm, fail_open=False, fail_close=False):
         self.arm = arm
+        self.fail_open = fail_open
+        self.fail_close = fail_close
 
     def open_blocking(self):
         self.arm.calls.append(('gripper', 'open'))
-        return True
+        return not self.fail_open
 
     def close_blocking(self):
         self.arm.calls.append(('gripper', 'close'))
-        return True
+        return not self.fail_close
 
 
 @pytest.fixture(autouse=True)
@@ -184,6 +184,11 @@ def _named_moves_through_stub(monkeypatch):
         return arm.move_joints(config.get_named_pose(name))
 
     monkeypatch.setattr(execute, 'go_to', fake_go_to)
+    # No grab grid: plan_grasp uses the Cartesian reach (floor grabs
+    # need MoveIt; see test_retrieve_grid).
+    monkeypatch.setattr(
+        execute.retrieve_grid, 'load', lambda path=None: ([], '')
+    )
 
 
 def _sequence(arm):
@@ -223,6 +228,44 @@ def test_execute_grasp_stops_if_target_unreachable():
     assert _sequence(arm) == ['open', 'POSE']
 
 
+def test_execute_grasp_never_approaches_if_the_gripper_did_not_open():
+    arm = _StubArm()
+    grasp = _Grasp(tcp_position=np.array([0.1, -0.3, 0.4]))
+
+    assert not execute.execute_grasp(
+        arm, _StubGripper(arm, fail_open=True), grasp, drop=True
+    )
+    assert _sequence(arm) == ['open']
+
+
+def test_execute_grasp_retracts_but_never_drops_if_not_closed():
+    arm = _StubArm()
+    grasp = _Grasp(tcp_position=np.array([0.1, -0.3, 0.4]))
+
+    assert not execute.execute_grasp(
+        arm, _StubGripper(arm, fail_close=True), grasp, drop=True
+    )
+    assert _sequence(arm) == ['open', 'POSE', 'close', 'INTER']
+
+
+def test_preplanned_stops_when_the_gripper_fails(monkeypatch):
+    from laundry_control import pipeline
+
+    def fake_go_to(arm, name, **_kwargs):
+        return arm.move_joints(config.get_named_pose(name))
+
+    monkeypatch.setattr(pipeline, 'go_to', fake_go_to)
+
+    arm = _StubArm()
+
+    assert not pipeline.run_preplanned(
+        arm, _StubGripper(arm, fail_close=True), recorded=True
+    )
+    # Open, INTER, the first RETRIEVE pose, close (fails), back to INTER
+    # - no DROP.
+    assert _sequence(arm) == ['open', 'INTER', 'POSE', 'close', 'INTER']
+
+
 def test_grasp_best_dry_run_never_approaches(monkeypatch):
     arm = _StubArm()
 
@@ -238,37 +281,34 @@ def test_grasp_best_dry_run_never_approaches(monkeypatch):
     assert _sequence(arm) == ['INTER']
 
 
-def test_plan_first_reachable_skips_unreachable_clusters():
+def test_plan_grasp_skips_unreachable_clusters(monkeypatch):
     big, small = _cluster(3e-4), _cluster(1e-4)
 
     def planner(cluster, surface, arm):
         return None if cluster is big else _Grasp(tcp_position=np.zeros(3))
 
-    chosen, grasp = execute.plan_first_reachable(
-        [small, big], None, None, planner
+    monkeypatch.setattr(execute, 'compute_grasp_target', planner)
+
+    plan = execute.plan_grasp(None, [small, big], None, grabs=[])
+
+    assert plan.kind == 'cartesian'
+    assert plan.cluster is small
+
+
+def test_plan_grasp_prefers_a_floor_grab(monkeypatch):
+    floor = {'via': 'grab_01'}
+    monkeypatch.setattr(
+        execute.retrieve_grid, 'plan_floor_grab',
+        lambda arm, point, grabs: floor,
+    )
+    monkeypatch.setattr(
+        execute, 'compute_grasp_target',
+        lambda *a: pytest.fail('Cartesian reach tried first'),
     )
 
-    assert chosen is small
-    assert grasp is not None
+    plan = execute.plan_grasp(None, [_cluster(1e-4)], None, grabs=[{}])
 
-
-# ------------------------------------------------------------ baselines
-
-
-def test_promote_accumulates_into_directory(tmp_path):
-    source = tmp_path / 'scan_a.csv'
-    source.write_text('x,y,z\n')
-    dest = tmp_path / 'baselines'
-
-    written = promote(str(source), dest=str(dest))
-
-    assert written == str(dest / 'scan_a.csv')
-
-    with pytest.raises(FileExistsError):
-        promote(str(source), dest=str(dest))
-
-    promote(str(source), dest=str(dest), force=True)
-    assert os.listdir(dest) == ['scan_a.csv']
+    assert plan.kind == 'floor' and plan.plan is floor
 
 
 # ------------------------------------------------------------ CLI

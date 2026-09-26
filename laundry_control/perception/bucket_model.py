@@ -87,26 +87,31 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 from scipy.optimize import least_squares
 
+from .. import config
+
 # ---------------------------------------------------------------
 # Seed geometry
 #
-# Taken from the fixed base_to_bucket_joint in
-# xarm_description/urdf/xarm7/xarm7.urdf.xacro and from the extents
-# of meshes/bucket.obj. Both READMEs caveat that this pose is
-# approximate and not ground truth - which is precisely why it is
-# only a SEED here. fit_cone() refines it against real scan data,
-# and fit_report() reports how far it had to move, making this the
-# first thing in the package capable of telling you whether the
-# URDF pose (or the sensor extrinsics) is wrong.
+# Taken from the bucket's pose in config.OBSTACLES - the same pose
+# MoveIt collision-checks against - and from the extents of
+# meshes/bucket.obj. That pose is hand-placed, not ground truth,
+# which is precisely why it is only a SEED here. fit_cone() refines
+# it against real scan data, and fit_report() reports how far it had
+# to move (`laundry scene fit` turns that into a corrected pose),
+# making this the first thing in the package capable of telling you
+# whether the modelled pose (or the sensor extrinsics) is wrong.
 # ---------------------------------------------------------------
 
-# base_to_bucket_joint origin xyz - the centre of the bucket's
-# CLOSED end, which is also where s = 0.
-URDF_BUCKET_ORIGIN = np.array([0.163, -0.72, 0.42])
 
-# base_to_bucket_joint origin rpy, applied to the mesh's local +Z
-# (the bucket's depth axis) to get the axis direction in link_base.
-URDF_BUCKET_RPY = (1.66, 3.14, -3.14)
+def seed_origin() -> np.ndarray:
+    """
+    Return the configured bucket origin in link_base.
+
+    The mesh origin: the centre of the bucket's CLOSED end, which is
+    also where s = 0.
+    """
+    return np.array(config.OBSTACLES['bucket']['xyz'], dtype=np.float64)
+
 
 # meshes/bucket.obj extents: a truncated cone, narrow at the closed
 # end, opening toward the mouth.
@@ -165,13 +170,13 @@ def seed_axis_direction() -> np.ndarray:
     """
     Return the bucket's seed axis direction in link_base.
 
-    The bucket's axis direction in link_base, from the URDF joint's
-    rpy applied to the mesh's local +Z.
+    The bucket's axis direction in link_base: config.OBSTACLES'
+    bucket rpy applied to the mesh's local +Z (its depth axis).
 
     Points from the closed end toward the mouth (i.e. toward the
     robot), so s increases as you come out of the bucket.
     """
-    roll, pitch, yaw = URDF_BUCKET_RPY
+    roll, pitch, yaw = config.OBSTACLES['bucket']['rpy']
 
     cr, sr = np.cos(roll), np.sin(roll)
     cp, sp = np.cos(pitch), np.sin(pitch)
@@ -188,6 +193,39 @@ def seed_axis_direction() -> np.ndarray:
     )
 
     return axis / np.linalg.norm(axis)
+
+
+def bucket_pose_from_fit(model: 'ConeModel', spec=None):
+    """
+    Return (xyz, rpy) placing the bucket mesh on a fitted cone.
+
+    spec defaults to config.OBSTACLES['bucket']. The mesh origin goes
+    to the fitted axis point and its depth axis (+Z) onto the fitted
+    axis by the smallest rotation, so the mesh keeps its roll about
+    its own axis. The axial position cannot be measured from the wall
+    alone, so it stays the configured one (fit_cone moves the axis
+    point only perpendicular to the seed axis).
+    """
+    from scipy.spatial.transform import Rotation
+
+    spec = spec or config.OBSTACLES['bucket']
+
+    rotation = Rotation.from_euler('xyz', spec['rpy'])
+    current_axis = rotation.apply([0.0, 0.0, 1.0])
+
+    # Smallest rotation taking the configured axis onto the fitted one.
+    fitted_axis = np.asarray(model.axis_dir, dtype=np.float64)
+    cross = np.cross(current_axis, fitted_axis)
+    angle = np.arctan2(np.linalg.norm(cross), current_axis @ fitted_axis)
+
+    align = Rotation.from_rotvec(
+        cross / np.linalg.norm(cross) * angle
+        if np.linalg.norm(cross) > 1e-12 else np.zeros(3)
+    )
+
+    rpy = (align * rotation).as_euler('xyz')
+
+    return np.asarray(model.axis_point, dtype=np.float64), rpy
 
 
 def _axis_basis(axis_dir: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -264,7 +302,7 @@ class ConeModel:
 
 def seed_cone() -> ConeModel:
     """
-    Return the starting guess for fit_cone(), from the URDF and the mesh.
+    Return the starting guess for fit_cone(), from the config and the mesh.
 
     This is a strong seed - it is already within centimetres and a
     couple of degrees of the truth - which is why fit_cone() can use
@@ -276,7 +314,7 @@ def seed_cone() -> ConeModel:
     taper = (MESH_RADIUS_MOUTH_M - MESH_RADIUS_CLOSED_M) / MESH_DEPTH_M
 
     return ConeModel(
-        axis_point=URDF_BUCKET_ORIGIN.copy(),
+        axis_point=seed_origin(),
         axis_dir=axis_dir,
         r0=MESH_RADIUS_CLOSED_M,
         taper=taper,
@@ -492,7 +530,7 @@ def fit_report(model: ConeModel, seed: Optional[ConeModel] = None) -> str:
     r_closed = float(model.radius_at(model.s_min))
 
     return (
-        'Cone fit vs. URDF/mesh seed:\n'
+        'Cone fit vs. configured bucket (config.OBSTACLES):\n'
         f'  axis point   : {np.round(model.axis_point, 4)} '
         f'(moved {axis_shift * 100:.2f} cm)\n'
         f'  axis dir     : {np.round(model.axis_dir, 4)} '

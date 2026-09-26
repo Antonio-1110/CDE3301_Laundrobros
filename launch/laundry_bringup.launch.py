@@ -16,10 +16,12 @@ the ToF sensor and the gripper servo:
                            save_scan / clear_scan.
     - gripper_node       - owns the servo GPIO, serves
                            open_gripper / close_gripper.
+    - `laundry scene apply` - adds the padded bucket and table
+      (config.OBSTACLES) to MoveIt as world objects, then exits.
     - RViz with scan_visualization.rviz (rviz:=false to skip).
 
-No hardware (fake:=true) - only the MoveIt fake controller (and
-RViz if asked for), for use with `laundry ... --fake-hardware`, which
+No hardware (fake:=true) - only the MoveIt fake controller, the
+obstacles (and RViz if asked for), for use with `laundry ... --fake-hardware`, which
 replaces the ToF recorder and the gripper with in-process stand-ins:
 
     ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
@@ -182,6 +184,17 @@ def generate_launch_description():
         condition=UnlessCondition(fake),
     )
 
+    # One-shot: waits for move_group, adds the obstacles, exits. Every
+    # `laundry` command does the same on connect (skipped when already
+    # there); doing it here too means RViz and hand planning see them
+    # from the start.
+    scene_node = Node(
+        package='laundry_control',
+        executable='laundry',
+        arguments=['scene', 'apply'],
+        output='screen',
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -213,6 +226,7 @@ def generate_launch_description():
             tof_sensor_node,
             scan_recorder_node,
             gripper_node,
+            scene_node,
             delayed_rviz,
         ]
     )

@@ -3,10 +3,30 @@
 """
 Build the empty-bucket baseline set the detector models the bucket from.
 
-Two ways in:
+    laundry baseline collect [--archive]  - run N empty-bucket scans
+                                           in a row, straight into
+                                           baseline_scans/
+    laundry baseline promote X [--move]   - add already-saved scans
+                                           (files or a directory)
+    laundry baseline archive              - shelve the current set
+    laundry baseline list                 - the current set and archives
+    laundry baseline restore LABEL        - bring an archived set back
 
-    laundry baseline collect   - run N empty-bucket scans in a row
-    laundry baseline promote   - add an already-saved scan after the fact
+THE SET AND ITS ARCHIVE
+-----------------------
+The detector uses every *.csv directly in baseline_scans/ - nothing
+else, subdirectories included. So an old set is shelved by moving it
+into baseline_scans/archive/<label>/, where the label is the
+collection session(s) it came from (baseline_<YYYYmmdd_HHMMSS>_NN.csv
+-> 20260924_180836). Nothing is ever deleted.
+
+`collect --archive` is the one-step way to REPLACE the set, e.g.
+after the bucket moved: the new scans go to a staging directory
+(baseline_scans/incoming_<session>/) first, and only when the whole
+collection succeeded is the old set archived and the new one moved
+in. An interrupted or failed collection therefore never leaves a mix
+of old and new scans active - the two describe different scenes.
+Without --archive, new scans are added to the current set.
 
 WHY A COMMAND AND NOT JUST RUNNING `laundry scan` EIGHT TIMES
 -------------------------------------------------------------
@@ -51,7 +71,9 @@ HARDWARE ONLY (collect). promote is a plain file copy.
 """
 
 import datetime
+import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -60,6 +82,12 @@ import time
 from .. import config
 
 DEFAULT_COUNT = 8
+
+ARCHIVE_DIR = 'archive'
+STAGING_PREFIX = 'incoming_'
+
+# baseline_<session>_NN.csv; the session is also the archive label.
+_TIMESTAMP = re.compile(r'(\d{8}_\d{6})')
 
 # A scan that comes back with fewer points than this did not really
 # happen - the ToF node is down, the sensor is out of range, or the
@@ -117,6 +145,111 @@ def confirm_setup(count, dest):
     return answer == 'yes'
 
 
+def _now():
+    return datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+
+def active_scans(directory):
+    """Return the scans the detector would use: *.csv directly in directory."""
+    return sorted(glob.glob(os.path.join(directory, '*.csv')))
+
+
+def session_of(path):
+    """Return the YYYYmmdd_HHMMSS stamp in a scan's file name, or None."""
+    match = _TIMESTAMP.search(os.path.basename(path))
+
+    return match.group(1) if match else None
+
+
+def set_label(paths):
+    """Name a set of scans after the collection session(s) it came from."""
+    sessions = sorted({session_of(p) for p in paths} - {None})
+
+    if not sessions:
+        return f'archived_{_now()}'
+
+    if len(sessions) == 1:
+        return sessions[0]
+
+    return f'{sessions[0]}..{sessions[-1]}'
+
+
+def _free_directory(path):
+    candidate, n = path, 2
+
+    while os.path.exists(candidate):
+        candidate, n = f'{path}_{n}', n + 1
+
+    return candidate
+
+
+def archive(directory, label=None):
+    """
+    Move the current set (and rejected scans) into archive/<label>/.
+
+    Returns (archive directory, moved paths); (None, []) if there was
+    nothing to move. label defaults to set_label() of the scans.
+    """
+    scans = active_scans(directory)
+    rejected = sorted(glob.glob(os.path.join(directory, '*.csv.rejected')))
+
+    if not scans and not rejected:
+        return None, []
+
+    target = _free_directory(
+        os.path.join(directory, ARCHIVE_DIR, label or set_label(scans))
+    )
+    os.makedirs(target)
+
+    for path in scans + rejected:
+        os.replace(path, os.path.join(target, os.path.basename(path)))
+
+    return target, scans + rejected
+
+
+def archived_sets(directory):
+    """Return [(label, number of scans)] under archive/, oldest first."""
+    root = os.path.join(directory, ARCHIVE_DIR)
+
+    if not os.path.isdir(root):
+        return []
+
+    return [
+        (label, len(active_scans(os.path.join(root, label))))
+        for label in sorted(os.listdir(root))
+        if os.path.isdir(os.path.join(root, label))
+    ]
+
+
+def restore(directory, label):
+    """
+    Make archive/<label>/ the current set again.
+
+    The current set is archived first, so nothing is lost. Returns
+    (restored paths, where the replaced set went or None).
+    """
+    source = os.path.join(directory, ARCHIVE_DIR, label)
+
+    if not os.path.isdir(source):
+        known = ', '.join(name for name, _n in archived_sets(directory))
+        raise FileNotFoundError(
+            f'No archived baseline set {label!r}. Archived: {known or "none"}.'
+        )
+
+    shelved, _moved = archive(directory)
+
+    restored = []
+
+    for name in sorted(os.listdir(source)):
+        path = os.path.join(directory, name)
+        os.replace(os.path.join(source, name), path)
+        restored.append(path)
+
+    os.rmdir(source)
+
+    return restored, shelved
+
+
 def collect(
     count,
     dest,
@@ -125,11 +258,12 @@ def collect(
     keep_going,
     timeout_sec,
     settle_sec,
+    session=None,
 ):
 
     os.makedirs(dest, exist_ok=True)
 
-    session = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    session = session or _now()
 
     written = []
     failed = []
@@ -255,57 +389,96 @@ def report(written, failed, dest):
     print()
     print('Look for all of:')
     print("  - 'closed end : modelled as a flat cap'")
-    print('  - the fitted cone within a few mm of the URDF seed')
+    print('  - the fitted cone within a few mm of the configured bucket (laundry scene fit)')
     print('  - median cell count >= 5, empty cells near 0%')
     print('  - 0 false clusters across the leave-one-out folds')
 
 
-def promote(src_path, dest=None, force=False):
+def baseline_name(src_path, dest_dir):
     """
-    Copy an already-saved empty-bucket scan into the baseline set.
+    Return a free baseline_<stamp>_NN.csv name in dest_dir for a scan.
+
+    The stamp is the one in the scan's own file name (when it was
+    taken), else its modification time; NN is the next free number.
+    """
+    stamp = session_of(src_path) or datetime.datetime.fromtimestamp(
+        os.path.getmtime(src_path)
+    ).strftime('%Y%m%d_%H%M%S')
+
+    index = 1
+
+    while True:
+        name = f'baseline_{stamp}_{index:02d}.csv'
+
+        if not os.path.exists(os.path.join(dest_dir, name)):
+            return name
+
+        index += 1
+
+
+def _expand_sources(sources):
+    paths = []
+
+    for source in sources:
+        if os.path.isdir(source):
+            found = active_scans(source)
+
+            if not found:
+                raise FileNotFoundError(f'No .csv files in {source!r}.')
+
+            paths.extend(found)
+
+        elif os.path.isfile(source):
+            paths.append(source)
+
+        else:
+            raise FileNotFoundError(f'No such scan CSV or directory: {source!r}')
+
+    return paths
+
+
+def promote(sources, dest=None, move=False, archive_first=False):
+    """
+    Add already-saved empty-bucket scans to the baseline set.
 
     For when a scan is only decided to be a good empty-bucket
-    reference after the fact. A baseline file is a completely
-    ordinary scan CSV - nothing tags it as special on disk, so it
-    stays viewable with `laundry replay`; being "a baseline" is
-    purely a matter of which directory it sits in.
+    reference after the fact, or to adopt a staged collection. A
+    baseline file is a completely ordinary scan CSV - nothing tags
+    it as special on disk, so it stays viewable with `laundry
+    replay`; being "a baseline" is purely a matter of sitting
+    directly in the baseline directory.
 
-    `dest` is normally a DIRECTORY (default: config.baseline_dir());
-    the scan keeps its own filename inside it, so repeated
-    promotions accumulate into the 8-10 empty scans the model wants.
-    A fixed destination filename would silently replace the set
-    instead, leaving one scan and a sigma map that is entirely
-    pooled fallback. An explicit .csv path still works for one-off
-    use.
+    sources: scan CSVs and/or directories of them. Each is named
+    baseline_<stamp>_NN.csv (baseline_name), copied - or moved, with
+    move=True - into dest (default: config.baseline_dir()). With
+    archive_first=True the current set is archived first, so these
+    REPLACE it. Existing files are never overwritten.
 
-    Returns the path actually written.
+    Returns (written paths, archive directory or None).
     """
-    if dest is None:
-        dest = config.baseline_dir()
+    if isinstance(sources, str):
+        sources = [sources]
 
-    if not os.path.isfile(src_path):
-        raise FileNotFoundError(f'No such scan CSV: {src_path!r}')
+    dest = dest or config.baseline_dir()
+    paths = _expand_sources(sources)
 
-    treat_as_dir = os.path.isdir(dest) or not dest.endswith('.csv')
+    os.makedirs(dest, exist_ok=True)
 
-    if treat_as_dir:
-        dest_path = os.path.join(dest, os.path.basename(src_path))
-    else:
-        dest_path = dest
+    shelved = archive(dest)[0] if archive_first else None
 
-    if os.path.exists(dest_path) and not force:
-        raise FileExistsError(
-            f'{dest_path!r} already exists. Pass --force to overwrite it.'
-        )
+    written = []
 
-    dest_dir = os.path.dirname(dest_path)
+    for path in paths:
+        target = os.path.join(dest, baseline_name(path, dest))
 
-    if dest_dir:
-        os.makedirs(dest_dir, exist_ok=True)
+        if move:
+            shutil.move(path, target)
+        else:
+            shutil.copyfile(path, target)
 
-    shutil.copyfile(src_path, dest_path)
+        written.append(target)
 
-    return dest_path
+    return written, shelved
 
 
 def add_collect_arguments(parser):
@@ -365,9 +538,20 @@ def add_collect_arguments(parser):
     )
 
     parser.add_argument(
+        '--archive',
+        action='store_true',
+        help=(
+            'REPLACE the current set: collect into a staging directory, '
+            'and only once every scan succeeded, move the current set to '
+            'baseline_scans/archive/<its session>/ and the new scans in. '
+            'Without it, new scans are added to the current set.'
+        ),
+    )
+
+    parser.add_argument(
         '--yes',
         action='store_true',
-        help='Skip the empty-bucket confirmation prompt.',
+        help='Skip the confirmation prompts.',
     )
 
 
@@ -379,6 +563,16 @@ def run_collect(args, scan_args):
         print('--count must be at least 1.', file=sys.stderr)
         return 2
 
+    replacing = getattr(args, 'archive', False)
+    current = active_scans(dest)
+
+    if replacing and current:
+        print(
+            f'--archive: the {len(current)} current baseline scan(s) move '
+            f'to {os.path.join(dest, ARCHIVE_DIR, set_label(current))}/ once '
+            'the new set is complete.'
+        )
+
     if not args.yes and not confirm_setup(args.count, dest):
         print('Aborted.')
         return 1
@@ -386,16 +580,73 @@ def run_collect(args, scan_args):
     if scan_args:
         print(f"\nForwarding to laundry scan: {' '.join(scan_args)}")
 
+    session = _now()
+    target = (
+        os.path.join(dest, STAGING_PREFIX + session) if replacing else dest
+    )
+
     written, failed = collect(
         count=args.count,
-        dest=dest,
+        dest=target,
         scan_args=scan_args,
         min_points=args.min_points,
         keep_going=args.keep_going,
         timeout_sec=args.timeout,
         settle_sec=args.settle,
+        session=session,
     )
+
+    if replacing:
+        written = _adopt_staged(target, dest, written, failed, args.count, args.yes)
 
     report(written, failed, dest)
 
     return 0 if written and not failed else 1
+
+
+def _adopt_staged(staging, dest, written, failed, count, assume_yes):
+    """Swap a staged collection in for the current set; return its paths."""
+    complete = written and not failed and len(written) == count
+
+    if not complete:
+        if not written:
+            print('\nNo usable scans; the current set is unchanged.')
+            return []
+
+        print(
+            f'\nOnly {len(written)} of {count} scans succeeded; the current '
+            'set is still active.'
+        )
+
+        answer = 'no' if assume_yes else input(
+            f'Replace it with these {len(written)} scan(s) anyway? '
+            "Type 'yes': "
+        ).strip().lower()
+
+        if answer != 'yes':
+            print(
+                f'Kept. The new scans are in {staging}; to use them later:\n'
+                f'  laundry baseline promote {staging} --archive --move'
+            )
+            return []
+
+    shelved, moved = archive(dest)
+
+    if shelved:
+        print(f'\nArchived the previous {len(moved)} file(s) to {shelved}')
+
+    adopted = []
+
+    for path in written:
+        final = os.path.join(dest, os.path.basename(path))
+        os.replace(path, final)
+        adopted.append(final)
+
+    leftovers = os.listdir(staging)
+
+    if leftovers:
+        print(f'Rejected scans stay in {staging}')
+    else:
+        os.rmdir(staging)
+
+    return adopted

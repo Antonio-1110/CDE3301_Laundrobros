@@ -11,15 +11,18 @@
     laundry detect scan.csv [-o targets.json] [--publish]   # offline
     laundry grasp targets.json [--drop] [--dry-run]
     laundry gripper open|close|ANGLE
-    laundry baseline collect [--count N] [-- <scan options>]
-    laundry baseline promote scan.csv
+    laundry baseline collect [--count N] [--archive] [-- <scan options>]
+    laundry baseline promote scan.csv|dir ... [--move] [--archive]
+    laundry baseline archive | list | restore LABEL
     laundry replay scan.csv
     laundry check-flange
-    laundry plan bake [endcap|transfers|all] [--depth 0.42]
+    laundry scene apply | check
+    laundry plan bake [endcap|transfers|retrieve|all] [--depth 0.42]
     laundry plan replay [--speed 0.3]
     laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
-    laundry run [--dry-run]                                 # everything
-    laundry preplanned
+    laundry run [--dry-run]                                 # one item
+    laundry clear [--no-grabs] [--max-rounds N]             # the bucket
+    laundry preplanned [--recorded] [--limit N] [--speed 0.3]
 
 Stages hand off through files - a scan CSV, then a targets JSON - so
 each one can run alone, be rerun offline, or be inspected in
@@ -30,8 +33,9 @@ WHAT NEEDS WHAT
     detect, evaluate, baseline promote   nothing: plain files, no ROS
                                          graph, no arm
     replay                               a ROS graph (for RViz)
-    move, check-flange, plan bake        MoveIt (real or fake)
-    scan, grasp, run, preplanned         MoveIt + scan_recorder_node/
+    move, check-flange, plan bake,       MoveIt (real or fake)
+    scene
+    scan, grasp, run, clear, preplanned  MoveIt + scan_recorder_node/
                                          tof_sensor/gripper_node - or
                                          --fake-hardware
     gripper open|close                   gripper_node
@@ -187,10 +191,13 @@ def _add_fake_arguments(parser, with_scan_from=False):
         parser.add_argument(
             '--scan-from',
             type=str,
+            nargs='+',
             default=None,
             help=(
                 'With --fake-hardware: a saved scan CSV that stands in '
-                "for the scan's output (the scan motion still runs)."
+                "for the scan's output (the scan motion still runs). "
+                'Several are used one per scan, in order, the last '
+                'repeating.'
             ),
         )
 
@@ -220,8 +227,15 @@ class _RosSession:
 
     def __enter__(self):
         import rclpy
+        from rclpy.signals import SignalHandlerOptions
 
-        rclpy.init()
+        # No rclpy SIGINT handler: it shuts the ROS context down the
+        # moment Ctrl+C is pressed, so the MoveIt goal in flight could
+        # no longer be cancelled - and a goal outlives the process
+        # that sent it, so the arm would carry on moving. Python's own
+        # handler raises KeyboardInterrupt instead, and
+        # XArm7Controller cancels the goal before it propagates.
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
 
         if self.need_arm:
             from .arm.controller import XArm7Controller
@@ -485,17 +499,73 @@ def cmd_gripper(args):
 
 
 def cmd_baseline(args):
-    """Run `laundry baseline collect|promote`."""
+    """Run `laundry baseline collect|promote|archive|list|restore`."""
+    from . import config
     from .scan import baselines
 
-    if args.baseline_action == 'collect':
+    action = args.baseline_action
+
+    if action == 'collect':
         return baselines.run_collect(args, args.forwarded_scan_args)
 
-    written = baselines.promote(args.src_path, dest=args.dest, force=args.force)
+    dest = args.dest or config.baseline_dir()
 
-    print(f'Promoted {args.src_path!r} -> {written!r}')
+    if action == 'promote':
+        written, shelved = baselines.promote(
+            args.sources, dest=dest, move=args.move,
+            archive_first=args.archive,
+        )
+
+        if shelved:
+            print(f'Archived the previous set to {shelved}')
+
+        verb = 'Moved' if args.move else 'Copied'
+
+        for path in written:
+            print(f'{verb} -> {path}')
+
+    elif action == 'archive':
+        shelved, moved = baselines.archive(dest, label=args.label)
+
+        if shelved is None:
+            print(f'Nothing to archive in {dest}.')
+        else:
+            print(f'Archived {len(moved)} file(s) to {shelved}')
+            print('The detector now has NO baseline set until you collect '
+                  'or restore one.')
+
+    elif action == 'restore':
+        restored, shelved = baselines.restore(dest, args.label)
+
+        if shelved:
+            print(f'Archived the replaced set to {shelved}')
+
+        print(f'Restored {len(restored)} file(s) from archive/{args.label}')
+
+    if action in ('promote', 'archive', 'restore', 'list'):
+        _print_baseline_sets(baselines, dest)
 
     return 0
+
+
+def _print_baseline_sets(baselines, dest):
+    from collections import Counter
+
+    current = baselines.active_scans(dest)
+    sessions = Counter(baselines.session_of(p) or '?' for p in current)
+
+    print(f'\nCurrent set in {dest}: {len(current)} scan(s)')
+
+    for session, count in sorted(sessions.items()):
+        print(f'  {session}: {count}')
+
+    archived = baselines.archived_sets(dest)
+
+    if archived:
+        print(f'Archived ({baselines.ARCHIVE_DIR}/):')
+
+        for label, count in archived:
+            print(f'  {label}: {count}')
 
 
 def cmd_replay(args):
@@ -517,25 +587,63 @@ def cmd_check_flange(args):
 
 
 def cmd_plan(args):
-    """Run `laundry plan bake [endcap|transfers|all]`."""
+    """Run `laundry plan bake [endcap|transfers|retrieve|all]`."""
     import socket
 
+    from . import config
     from .arm import transfers
+    from .grasp import retrieve_grid
     from .scan import endcap
 
     speed = math.radians(args.max_joint_speed)
+    status = 0
 
     with _RosSession(args=args) as arm:
-        if args.which in ('transfers', 'all'):
-            try:
-                routes = transfers.bake(arm, log=print)
-            except transfers.BakeError as exc:
-                print(f'Transfer bake failed: {exc}', file=sys.stderr)
-                return 1
+        if args.which in ('retrieve', 'all'):
+            print('Solving the grab grid (config.RETRIEVE_GRID)...')
+            grabs, misses = retrieve_grid.solve(arm, log=print)
+            retrieve_grid.save(grabs, baked_on=socket.gethostname())
+            print(f'Saved {retrieve_grid.plan_path()} ({len(grabs)} grabs)')
+
+            if misses:
+                print(
+                    f'{len(misses)} grid point(s) unreachable; see above.',
+                    file=sys.stderr,
+                )
+                status = 1
+
+        if args.which in ('transfers', 'retrieve', 'all'):
+            # `retrieve` re-bakes only the grab routes and keeps the
+            # rest of transfers.yaml (if it matches the current scene).
+            targets = (
+                tuple(config.generated_grab_poses())
+                if args.which == 'retrieve' else None
+            )
+            routes, clearances, failures = transfers.bake(
+                arm, targets=targets, log=print
+            )
 
             path = transfers.default_plan_path()
-            transfers.save(path, routes, speed, baked_on=socket.gethostname())
-            print(f'Saved {path}')
+            transfers.save(
+                path,
+                routes,
+                speed,
+                baked_on=socket.gethostname(),
+                clearances=clearances,
+                keep=transfers.routes_to_keep(path, routes),
+            )
+            print(f'Saved {path} ({", ".join(routes) or "no routes"})')
+
+            if failures:
+                for name, reason in failures.items():
+                    print(f'No route to {name.upper()}: {reason}', file=sys.stderr)
+
+                print(
+                    'Moves to those poses fall back to a straight or planned '
+                    'move, not a baked one.',
+                    file=sys.stderr,
+                )
+                status = 1
 
         if args.which in ('endcap', 'all'):
             try:
@@ -559,7 +667,246 @@ def cmd_plan(args):
 
     print('Commit scan_plans/ so every run replays the same motion.')
 
+    return status
+
+
+def _describe_contacts(contacts):
+    if contacts is None:
+        return 'MoveIt did not answer'
+
+    return ', '.join(f'{a} <-> {b}' for a, b in contacts) or 'collides'
+
+
+def _check_path(arm, waypoints):
+    """Return None if a joint path is collision-free, else what it hits."""
+    from .arm.joint_path import densify
+
+    dense = densify(waypoints)
+
+    for index, joints in enumerate(dense):
+        contacts = arm.state_contacts(joints)
+
+        if contacts != []:
+            return (
+                f'collides at state {index}/{len(dense) - 1}: '
+                f'{_describe_contacts(contacts)}'
+            )
+
+    return None
+
+
+def cmd_scene_fit(args):
+    """Run `laundry scene fit`: the bucket pose the baseline scans measure."""
+    import numpy as np
+
+    from . import config
+    from .perception.bucket_model import (
+        bucket_pose_from_fit,
+        fit_cone,
+        seed_axis_direction,
+        seed_origin,
+    )
+    from .perception.detect import load_baseline_scans
+
+    directory = args.baseline or config.baseline_dir()
+    scans = load_baseline_scans(directory)
+    model = fit_cone(np.concatenate(scans))
+
+    xyz, rpy = bucket_pose_from_fit(model)
+
+    axis = seed_axis_direction()
+
+    print(
+        f'Fitted the bucket wall to {len(scans)} baseline scan(s) in '
+        f'{directory}.\nOffset of the scanned bucket axis from '
+        'config.OBSTACLES, cm (x, y, z in link_base):'
+    )
+
+    for s in (0.0, 0.4):
+        d = model.axis_point + s * model.axis_dir - seed_origin()
+        d -= np.dot(d, axis) * axis
+        print(
+            f'  {s * 100:3.0f} cm from the closed end: '
+            f'{np.round(d * 100, 1)}'
+        )
+
+    tilt = np.degrees(np.arccos(np.clip(model.axis_dir @ axis, -1.0, 1.0)))
+    print(f'  axis tilt: {tilt:.1f} deg')
+
+    print(
+        '\nThe fit relies on the ToF extrinsics (config.TOF_SENSOR_OFFSET_*),'
+        '\nso an error there moves it too: check it against a tape measure.'
+        '\nIf it is right, the bucket entry in config.OBSTACLES becomes:\n'
+    )
+    print(f"        'xyz': [{', '.join(f'{v:.4f}' for v in xyz)}],")
+    print(f"        'rpy': [{', '.join(f'{v:.4f}' for v in rpy)}],")
+    print('\nThen: laundry scene check, and laundry plan bake.')
+
     return 0
+
+
+def cmd_scene(args):
+    """Run `laundry scene apply|check|fit`: the obstacles in MoveIt."""
+    import os
+
+    if args.scene_action == 'fit':
+        return cmd_scene_fit(args)
+
+    from . import config
+    from .arm import scene, transfers
+    from .scan import endcap
+
+    current = scene.signature()
+
+    print(f'Obstacles (config.OBSTACLES, scene {current}):')
+
+    for name, spec in config.OBSTACLES.items():
+        print(
+            f'  {name:<8} {spec["mesh"]:<12} xyz {spec["xyz"]}  '
+            f'rpy {spec["rpy"]}'
+        )
+
+    print(
+        f'Padding: arm links {config.OBSTACLE_PADDING_M * 100:g} cm, gripper '
+        f'{config.GRIPPER_PADDING_M * 100:g} cm.'
+    )
+
+    # Connecting applies the scene (XArm7Controller(pad_obstacles=True)).
+    with _RosSession(args=args) as arm:
+        if args.scene_action == 'apply':
+            print('move_group has the obstacles.')
+            return 0
+
+        problems = 0
+
+        print('\nRecorded poses (arm link padding as live):')
+
+        for name, joints in config.named_poses().items():
+            contacts = arm.state_contacts(joints)
+            verdict = 'ok' if contacts == [] else (
+                'COLLIDES: ' + _describe_contacts(contacts)
+            )
+            problems += contacts != []
+            print(f'  {name:<11} {verdict}')
+
+        routes, _speed = transfers.load()
+        stamp = transfers.baked_scene()
+        mismatches = transfers.padding_mismatches()
+
+        print('\nBaked transfers from INTER (scan_plans/transfers.yaml):')
+
+        stale = scene.stale_plan_message(
+            stamp, '  transfers.yaml', 'laundry plan bake transfers'
+        )
+
+        if stale:
+            print(stale)
+
+        for name in transfers.transfer_targets():
+            route = routes.get(name)
+
+            if route is None:
+                print(
+                    f'  {name:<11} NO ROUTE: moves there go straight if that '
+                    'is clear, else through the planner'
+                )
+                problems += 1
+                continue
+
+            padding = transfers.route_arm_padding(name)
+            arm.set_arm_padding(padding)
+
+            try:
+                hit = _check_path(arm, route)
+            finally:
+                arm.set_arm_padding(config.OBSTACLE_PADDING_M)
+
+            problems += hit is not None
+            print(
+                f'  {name:<11} {"ok" if hit is None else "COLLIDES " + hit} '
+                f'({len(route) - 2} via(s), arm links {padding * 100:g} cm)'
+            )
+
+            if name in mismatches:
+                problems += 1
+                print(f'              {mismatches[name]}')
+
+        from .grasp import retrieve_grid
+
+        grabs, grab_stamp = retrieve_grid.load()
+
+        if grabs:
+            print(
+                '\nGrab descents (scan_plans/retrieve.yaml, approach -> grab):'
+            )
+
+            stale = scene.stale_plan_message(
+                grab_stamp, '  retrieve.yaml', 'laundry plan bake retrieve'
+            )
+
+            if stale:
+                print(stale)
+
+            changed = retrieve_grid.grid_mismatch()
+
+            if changed:
+                problems += 1
+                print(f'  {changed}')
+
+            for grab in grabs:
+                hit = _check_path(arm, [grab['approach'], grab['grab']])
+                problems += hit is not None
+                print(
+                    f'  {grab["name"]:<11} '
+                    f'{"ok" if hit is None else "COLLIDES " + hit}'
+                )
+
+        plan_path = endcap.default_plan_path()
+
+        if os.path.isfile(plan_path):
+            plan = endcap.EndcapPlan.load(plan_path)
+
+            print(
+                f'\nEnd scan (scan_plans/endcap.yaml, arm link padding '
+                f'{config.ENDCAP_PADDING_M * 100:g} cm):'
+            )
+
+            stale = scene.stale_plan_message(
+                plan.scene, '  endcap.yaml',
+                f'laundry plan bake endcap --depth {plan.depth_m:.3f}',
+            )
+
+            if stale:
+                print(stale)
+
+            if abs(plan.padding_m - config.ENDCAP_PADDING_M) > 1e-9:
+                problems += 1
+                print(
+                    f'  baked with {plan.padding_m * 100:g} cm arm padding, '
+                    f'config says {config.ENDCAP_PADDING_M * 100:g} cm; '
+                    're-bake: laundry plan bake endcap'
+                )
+
+            arm.set_arm_padding(config.ENDCAP_PADDING_M)
+
+            try:
+                bad = arm.first_invalid_state(plan.waypoints)
+            finally:
+                arm.set_arm_padding(config.OBSTACLE_PADDING_M)
+
+            problems += bad is not None
+            print(
+                '  ok' if bad is None
+                else f'  COLLIDES at checked state {bad}'
+            )
+
+    print(
+        '\nAll clear.' if not problems else
+        f'\n{problems} problem(s). Fix config.OBSTACLES or re-record the '
+        'pose, then `laundry plan bake`.'
+    )
+
+    return 1 if problems else 0
 
 
 def cmd_plan_replay(args):
@@ -617,12 +964,41 @@ def cmd_run(args):
     return 0 if ok else 1
 
 
+def cmd_clear(args):
+    """Run `laundry clear`: grab sweep, then scan -> grasp until empty."""
+    from .pipeline import run_clear
+    from .scan.pattern import scan_kwargs_from_args
+
+    with _RosSession(args=args) as arm:
+        ok = run_clear(
+            arm,
+            _make_recorder(arm, args),
+            _make_gripper(arm, args.fake_hardware),
+            baseline=_baseline_path(args),
+            scan_kwargs=scan_kwargs_from_args(args),
+            detect_params=_detect_params(args),
+            sweep=not args.no_grabs,
+            sweep_limit=args.grab_limit,
+            max_rounds=args.max_rounds,
+            max_failed=args.max_failed,
+            time_scale=args.speed,
+        )
+
+    return 0 if ok else 1
+
+
 def cmd_preplanned(args):
     """Run `laundry preplanned`."""
     from .pipeline import run_preplanned
 
     with _RosSession(args=args) as arm:
-        ok = run_preplanned(arm, _make_gripper(arm, args.fake_hardware))
+        ok = run_preplanned(
+            arm,
+            _make_gripper(arm, args.fake_hardware),
+            recorded=args.recorded,
+            limit=args.limit,
+            time_scale=args.speed,
+        )
 
     return 0 if ok else 1
 
@@ -790,7 +1166,7 @@ def build_parser():
     gripper.set_defaults(func=cmd_gripper)
 
     baseline = subparsers.add_parser(
-        'baseline', help='Collect or promote empty-bucket baseline scans.'
+        'baseline', help='Collect, add, archive and restore empty-bucket baseline scans.'
     )
     baseline_actions = baseline.add_subparsers(
         dest='baseline_action', required=True
@@ -801,16 +1177,45 @@ def build_parser():
     )
     add_collect_arguments(collect)
     promote = baseline_actions.add_parser(
-        'promote', help='Copy a saved empty-bucket scan into the baseline set.'
+        'promote',
+        help=(
+            'Add saved empty-bucket scans to the set, named '
+            'baseline_<when taken>_NN.csv.'
+        ),
     )
-    promote.add_argument('src_path', help='The empty-bucket scan CSV.')
     promote.add_argument(
-        '--dest', type=str, default=None,
-        help='Baseline directory (default: <repo>/baseline_scans).',
+        'sources', nargs='+', help='Scan CSVs and/or directories of them.'
     )
     promote.add_argument(
-        '--force', action='store_true', help='Overwrite an existing file.'
+        '--move', action='store_true', help='Move instead of copying.'
     )
+    promote.add_argument(
+        '--archive', action='store_true',
+        help='Archive the current set first, so these REPLACE it.',
+    )
+    archive = baseline_actions.add_parser(
+        'archive',
+        help='Move the current set to baseline_scans/archive/<label>/.',
+    )
+    archive.add_argument(
+        '--label', type=str, default=None,
+        help="Archive folder name (default: the scans' session stamp).",
+    )
+    baseline_actions.add_parser(
+        'list', help='Show the current set and the archived ones.'
+    )
+    restore = baseline_actions.add_parser(
+        'restore',
+        help='Make an archived set current again (archiving the current one).',
+    )
+    restore.add_argument('label', help='Archived set, as `list` names it.')
+
+    for sub in baseline_actions.choices.values():
+        if sub is not collect:
+            sub.add_argument(
+                '--dest', type=str, default=None,
+                help='Baseline directory (default: <repo>/baseline_scans).',
+            )
     baseline.set_defaults(func=cmd_baseline)
 
     replay = subparsers.add_parser(
@@ -827,6 +1232,26 @@ def build_parser():
     )
     check.set_defaults(func=cmd_check_flange)
 
+    scene_parser = subparsers.add_parser(
+        'scene',
+        help='Put the obstacles (config.OBSTACLES) into MoveIt, and check them.',
+    )
+    scene_parser.add_argument(
+        'scene_action', choices=('apply', 'check', 'fit'),
+        help=(
+            'apply: add the padded bucket/table to move_group (bring-up '
+            'does this). check: also collision-check every recorded pose '
+            'and baked route against them. Neither moves the arm. fit '
+            '(offline): the bucket pose the baseline scans measure, as a '
+            'config.OBSTACLES entry.'
+        ),
+    )
+    scene_parser.add_argument(
+        '--baseline', type=str, default=None,
+        help='fit: directory of empty-bucket scans (default: <repo>/baseline_scans).',
+    )
+    scene_parser.set_defaults(func=cmd_scene)
+
     plan = subparsers.add_parser(
         'plan', help='Bake planner-free motions (the precession end scan).'
     )
@@ -835,12 +1260,16 @@ def build_parser():
         'bake',
         help=(
             'Solve, collision-check and save the end-scan trajectory and/or '
-            'the INTER<->HOME/DROP transfers. MOVES THE ARM.'
+            'the transfers from INTER to every named pose. MOVES THE ARM.'
         ),
     )
     bake.add_argument(
-        'which', nargs='?', choices=('endcap', 'transfers', 'all'),
-        default='all', help='What to bake (default: all).',
+        'which', nargs='?', choices=('endcap', 'transfers', 'retrieve', 'all'),
+        default='all',
+        help=(
+            'What to bake (default: all). retrieve: solve the grab grid '
+            '(config.RETRIEVE_GRID) and bake routes to it.'
+        ),
     )
     from .scan.pattern import DEFAULT_DEPTH_M
 
@@ -899,8 +1328,64 @@ def build_parser():
     _add_fake_arguments(run, with_scan_from=True)
     run.set_defaults(func=cmd_run)
 
+    from .pipeline import DEFAULT_CLEAR_MAX_FAILED, DEFAULT_CLEAR_MAX_ROUNDS
+
+    clear = subparsers.add_parser(
+        'clear',
+        help=(
+            'Empty the bucket: the grab-grid sweep, then scan -> detect -> '
+            'grasp -> drop until a scan finds nothing.'
+        ),
+    )
+    clear.add_argument(
+        '--no-grabs', action='store_true',
+        help='Skip the sensorless grab-grid pass; start with a scan.',
+    )
+    clear.add_argument(
+        '--grab-limit', type=int, default=None,
+        help='Only the first N grabs of the grid (they run mouth-first).',
+    )
+    clear.add_argument(
+        '--max-rounds', type=int, default=DEFAULT_CLEAR_MAX_ROUNDS,
+        help=(
+            'Give up after this many scan -> grasp rounds '
+            f'(default: {DEFAULT_CLEAR_MAX_ROUNDS}).'
+        ),
+    )
+    clear.add_argument(
+        '--max-failed', type=int, default=DEFAULT_CLEAR_MAX_FAILED,
+        help=(
+            'Give up after this many failed grasps in a row '
+            f'(default: {DEFAULT_CLEAR_MAX_FAILED}).'
+        ),
+    )
+    clear.add_argument(
+        '--speed', type=float, default=1.0,
+        help='Fraction of the baked speed for the grabs, (0, 1] (default: 1).',
+    )
+    add_scan_arguments(clear)
+    _add_detector_arguments(clear)
+    _add_fake_arguments(clear, with_scan_from=True)
+    clear.set_defaults(func=cmd_clear)
+
     preplanned = subparsers.add_parser(
-        'preplanned', help='Sensorless sweep over the recorded RETRIEVE poses.'
+        'preplanned',
+        help=(
+            'Sensorless sweep: grab at each generated grab pose (else the '
+            'recorded RETRIEVE poses) and drop.'
+        ),
+    )
+    preplanned.add_argument(
+        '--recorded', action='store_true',
+        help='Use the hand-recorded RETRIEVE_3..0 instead of the grab grid.',
+    )
+    preplanned.add_argument(
+        '--limit', type=int, default=None,
+        help='Only the first N grabs (they run mouth-first).',
+    )
+    preplanned.add_argument(
+        '--speed', type=float, default=1.0,
+        help='Fraction of the baked speed, (0, 1] (default: 1).',
     )
     _add_fake_arguments(preplanned)
     preplanned.set_defaults(func=cmd_preplanned)
@@ -920,6 +1405,11 @@ def _split_forwarded(argv):
 def main(argv=None):
     """Entry point for the `laundry` console script."""
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    # Launched as a ROS node (laundry_bringup.launch.py's `scene apply`),
+    # launch may append ROS arguments; they are not ours.
+    if '--ros-args' in argv:
+        argv = argv[:argv.index('--ros-args')]
 
     own_argv, forwarded = _split_forwarded(argv)
 

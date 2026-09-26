@@ -22,6 +22,10 @@ separately - it owns the GPIO) or, with --fake-hardware, a
 hardware.fake.FakeGripper.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
+from . import retrieve_grid
 from .plan import compute_grasp_target
 from ..arm.transfers import go_to
 
@@ -61,37 +65,6 @@ def select_target_cluster(clusters):
     return ranked[0] if ranked else None
 
 
-def plan_first_reachable(clusters, surface, arm, compute_grasp_target):
-    """
-    Return the best-ranked cluster whose grasp target is reachable.
-
-    Walk clusters best-first and return the first
-    (cluster, GraspTarget) whose grasp target the arm can actually
-    reach, or (None, None) if none of them can be.
-
-    compute_grasp_target is injected rather than imported here so
-    this stays unit-testable with a stub.
-    """
-    for cluster in rank_clusters(clusters):
-
-        cx, cy, cz = getattr(cluster, 'target_point', cluster.centroid)
-
-        print(
-            f'Trying cluster: size={cluster.size} '
-            f'target=({cx:.3f}, {cy:.3f}, {cz:.3f}) '
-            f'mean_dev={cluster.mean_deviation_m:.3f}m'
-        )
-
-        grasp = compute_grasp_target(cluster, surface, arm)
-
-        if grasp is not None:
-            return cluster, grasp
-
-        print('  unreachable at every sink depth; trying the next cluster.')
-
-    return None, None
-
-
 def describe_grasp(grasp):
     """One-line summary of a GraspTarget, for the log."""
     return (
@@ -121,7 +94,11 @@ def execute_grasp(arm, gripper, grasp, drop=False):
     """
     print('Opening gripper...')
 
-    gripper.open_blocking()
+    if not gripper.open_blocking():
+        print('Gripper did not confirm it opened (is gripper_node running?); '
+              'aborting before the approach.')
+
+        return False
 
     x, y, z = grasp.tcp_position
 
@@ -132,13 +109,21 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Closing gripper...')
 
-    gripper.close_blocking()
+    closed = gripper.close_blocking()
+
+    if not closed:
+        # Still retract: the arm must not be left down in the bucket.
+        print('Gripper did not confirm it closed; retracting without the '
+              'item.')
 
     print('Retracting to INTER...')
 
     if not go_to(arm, 'inter'):
         print('Failed to retract to INTER; aborting.')
 
+        return False
+
+    if not closed:
         return False
 
     if not drop:
@@ -153,19 +138,108 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Opening gripper to release the item...')
 
-    gripper.open_blocking()
+    released = gripper.open_blocking()
+
+    if not released:
+        print('Gripper did not confirm it opened at DROP; the item may '
+              'still be held.')
 
     print('Returning to INTER...')
 
-    return go_to(arm, 'inter')
+    return go_to(arm, 'inter') and released
+
+
+@dataclass
+class GraspPlan:
+    """
+    How the next item will be taken.
+
+    kind 'floor': a grid-style grab (retrieve_grid.plan_floor_grab),
+    plan is its dict. kind 'cartesian': the tilted reach from INTER
+    (plan.compute_grasp_target), plan is a GraspTarget.
+    """
+
+    kind: str
+    cluster: Any
+    plan: Any
+
+
+def plan_grasp(arm, clusters, surface, grabs=None):
+    """
+    Return a GraspPlan for the best-ranked reachable cluster, or None.
+
+    Assumes the arm is at INTER. Per cluster, best first:
+
+      1. a grab like the grab grid's - IK over the item, a straight
+         descent, reached from the nearest baked grab_NN - when the
+         grid is baked (grabs defaults to retrieve.yaml's) and the
+         item is within config.DETECTED_GRAB_MAX_ANGLE_DEG of the
+         floor's lowest line (default: the whole lower half). Measured on the fake
+         controller, the Cartesian reach below could not get to a
+         towel in the middle of the floor at any sink depth: its one
+         straight tool line from INTER runs into the wall.
+      2. else the Cartesian reach (grasp/plan.py), for items away from
+         the floor.
+    """
+    if grabs is None:
+        grabs, _stamp = retrieve_grid.load()
+
+    for cluster in rank_clusters(clusters):
+        point = getattr(cluster, 'target_point', cluster.centroid)
+
+        print(
+            f'Trying cluster: size={cluster.size} target=('
+            + ', '.join(f'{v:.3f}' for v in point)
+            + f') mean_dev={cluster.mean_deviation_m:.3f}m'
+        )
+
+        if grabs:
+            floor = retrieve_grid.plan_floor_grab(arm, point, grabs)
+
+            if floor is not None:
+                return GraspPlan('floor', cluster, floor)
+
+        grasp = compute_grasp_target(cluster, surface, arm)
+
+        if grasp is not None:
+            return GraspPlan('cartesian', cluster, grasp)
+
+        print('  unreachable; trying the next cluster.')
+
+    return None
+
+
+def execute_plan(arm, gripper, plan, drop=False):
+    """Carry out a GraspPlan; True if every step succeeded."""
+    if plan.kind == 'floor':
+        return retrieve_grid.run_floor_grab(
+            arm, gripper, plan.plan, go_to, drop=drop
+        )
+
+    return execute_grasp(arm, gripper, plan.plan, drop=drop)
+
+
+def describe_plan(plan):
+    """One-line summary of a GraspPlan, for the log."""
+    if plan.kind == 'cartesian':
+        return describe_grasp(plan.plan)
+
+    grab = plan.plan
+
+    return (
+        f'Floor grab via {grab["via"]}: contact={grab["contact"]}, '
+        f'{grab["floor_angle_deg"]:+.0f} deg, '
+        f'{grab["height_m"] * 100:.1f} cm from the wall, '
+        f'tilt {grab["tilt_deg"]:.0f} deg'
+    )
 
 
 def grasp_best(arm, gripper, clusters, surface, drop=False, dry_run=False):
     """
     Move to INTER, plan against the clusters best-first, then execute.
 
-    dry_run stops after printing the grasp target - the arm still
-    moves to INTER (the reachability probe must start from the real
+    dry_run stops after printing the grasp plan - the arm still moves
+    to INTER (the reachability probe must start from the real
     starting state), but never approaches, grips or drops.
 
     Returns True on success (or a successful dry run).
@@ -177,27 +251,21 @@ def grasp_best(arm, gripper, clusters, surface, drop=False, dry_run=False):
 
         return False
 
-    _target_cluster, grasp = plan_first_reachable(
-        clusters,
-        surface,
-        arm,
-        compute_grasp_target,
-    )
+    plan = plan_grasp(arm, clusters, surface)
 
-    if grasp is None:
+    if plan is None:
         print(
             f'None of the {len(clusters)} detected cluster(s) '
-            'yielded a reachable grasp target, even at sink=0; '
-            'aborting.'
+            'yielded a reachable grasp; aborting.'
         )
 
         return False
 
-    print(describe_grasp(grasp))
+    print(describe_plan(plan))
 
     if dry_run:
-        print('--dry-run: stopping before move_to_pose().')
+        print('--dry-run: stopping before the approach.')
 
         return True
 
-    return execute_grasp(arm, gripper, grasp, drop=drop)
+    return execute_plan(arm, gripper, plan, drop=drop)

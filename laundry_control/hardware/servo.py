@@ -29,7 +29,18 @@ library or a permissions problem surfaces as an exception from that
 first call - which gripper_node turns into a failed service response
 instead of a crashed node.
 
-HARDWARE ONLY. From the terminal: `laundry gripper <ANGLE>`.
+HOLDING
+-------
+A hobby servo only holds its position while it receives pulses: with
+PWM stopped it goes limp, and a claw closed on laundry springs open
+under the load on the way to DROP. ServoDriver therefore keeps
+driving the servo after a move with hold=True (gripper_node does this
+for close), and stops only after hold=False moves (open - holding an
+unloaded servo just makes it jitter and warm up). The driver stays
+alive in gripper_node, so the hold lasts until the next command.
+
+HARDWARE ONLY. From the terminal: `laundry gripper <ANGLE>` (a
+one-shot process, so it never holds).
 """
 
 import time
@@ -72,15 +83,12 @@ def validate_angle(angle):
         )
 
 
-def set_servo_angle(angle):
-    """Move the servo to `angle` degrees, then stop driving it."""
-    validate_angle(angle)
-
+def _make_servo():
     _ensure_pin_factory()
 
     from gpiozero import AngularServo
 
-    servo = AngularServo(
+    return AngularServo(
         SERVO_PIN,
         min_angle=SERVO_MIN_ANGLE_DEG,
         max_angle=SERVO_MAX_ANGLE_DEG,
@@ -88,13 +96,67 @@ def set_servo_angle(angle):
         max_pulse_width=SERVO_MAX_PULSE_WIDTH_S,
     )
 
+
+class ServoDriver:
+    """
+    A long-lived servo that can keep holding its position.
+
+    make_servo is injectable so this can be tested without GPIO.
+    """
+
+    def __init__(self, make_servo=_make_servo, settle_sec=SETTLE_SEC):
+        self._make_servo = make_servo
+        self._settle_sec = settle_sec
+        self._servo = None
+
+    @property
+    def holding(self):
+        """Return True while PWM is being sent."""
+        return self._servo is not None and self._servo.value is not None
+
+    def move(self, angle, hold=False):
+        """
+        Move to `angle` degrees and wait for it to get there.
+
+        hold=True keeps driving it afterwards (until the next move or
+        release()); hold=False stops the pulses.
+        """
+        validate_angle(angle)
+
+        if self._servo is None:
+            self._servo = self._make_servo()
+
+        try:
+            self._servo.angle = angle
+            time.sleep(self._settle_sec)
+
+        except BaseException:
+            self._servo.detach()
+            raise
+
+        if not hold:
+            self._servo.detach()
+
+    def release(self):
+        """Stop the pulses (the servo goes limp)."""
+        if self._servo is not None:
+            self._servo.detach()
+
+    def close(self):
+        """Stop the pulses and free the GPIO pin."""
+        if self._servo is not None:
+            self._servo.detach()
+            self._servo.close()
+            self._servo = None
+
+
+def set_servo_angle(angle):
+    """Move the servo to `angle` degrees, then stop driving it."""
+    driver = ServoDriver()
+
     try:
         print(f'Moving servo to {angle:.1f} degrees')
-        servo.angle = angle
-
-        time.sleep(SETTLE_SEC)
+        driver.move(angle, hold=False)
 
     finally:
-        # Stop sending PWM after reaching target.
-        servo.detach()
-        servo.close()
+        driver.close()

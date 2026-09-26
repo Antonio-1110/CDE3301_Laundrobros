@@ -1,4 +1,4 @@
-"""Tests for the baked INTER <-> HOME/DROP transfers (arm/transfers.py)."""
+"""Tests for the baked transfers from INTER (arm/transfers.py)."""
 
 import math
 
@@ -11,6 +11,7 @@ import pytest
 INTER = np.array(config.INTER)
 DROP = np.array(config.DROP)
 HOME = np.array(config.HOME)
+BOTTOM = np.array(config.BOTTOM)
 
 
 def test_time_stop_at_each_rests_at_every_waypoint():
@@ -45,6 +46,25 @@ def test_route_applies_from_inter_and_reverses_back_to_inter():
     assert np.allclose(back[0], DROP) and np.allclose(back[-1], INTER)
 
 
+def test_route_between_two_targets_goes_through_inter():
+    routes = {
+        'drop': np.array([INTER, INTER + 0.1, DROP]),
+        'home': np.array([INTER, INTER - 0.1, HOME]),
+    }
+
+    path = transfers.route_for(HOME, 'drop', routes)
+
+    # Back along HOME's route to INTER, then out along DROP's.
+    assert np.allclose(path[0], HOME)
+    assert np.allclose(path[2], INTER)
+    assert np.allclose(path[-1], DROP)
+    assert len(path) == 5
+
+
+def test_route_to_where_the_arm_already_is_is_none():
+    assert transfers.route_for(DROP, 'drop', ROUTES) is None
+
+
 def test_route_does_not_apply_elsewhere():
     assert transfers.route_for(HOME, 'drop', ROUTES) is None
     assert transfers.route_for(INTER + math.radians(5.0), 'drop', ROUTES) is None
@@ -59,6 +79,46 @@ def test_save_and_load_round_trip(tmp_path):
 
     assert speed == pytest.approx(0.7)
     assert np.allclose(routes['drop'], ROUTES['drop'], atol=1e-6)
+
+
+def test_saved_routes_record_scene_and_paddings(tmp_path):
+    from laundry_control.arm import scene
+
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(
+        path, {'drop': list(ROUTES['drop']), 'bottom': [INTER, BOTTOM]}, 0.7
+    )
+
+    assert transfers.baked_scene(path) == scene.signature()
+    assert transfers.padding_mismatches(path) == {}
+
+
+def test_padding_changes_are_reported(tmp_path, monkeypatch):
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(path, {'drop': list(ROUTES['drop'])}, 0.7)
+
+    monkeypatch.setattr(config, 'OBSTACLE_PADDING_M', 0.05)
+
+    report = transfers.padding_mismatches(path)
+    assert set(report) == {'drop'}
+    assert 'arm_links 3 -> 5 cm' in report['drop']
+
+
+def test_replay_is_checked_under_the_current_padding(monkeypatch):
+    monkeypatch.setattr(config, 'OBSTACLE_PADDING_M', 0.05)
+    arm = _StubArm(INTER)
+
+    # Routes supplied directly carry no file; the padding comes from
+    # config, so the raised value is what the route is checked under.
+    assert transfers.go_to(arm, 'drop', routes=ROUTES, max_velocity_rad_s=0.7)
+    assert arm.calls[0][0] == 'baked'  # 5 cm is config now: no switch needed
+
+    monkeypatch.setattr(config, 'ROUTE_ARM_PADDING_M', {'drop': 0.04})
+    arm = _StubArm(INTER)
+    assert transfers.go_to(arm, 'drop', routes=ROUTES, max_velocity_rad_s=0.7)
+    assert [c for c in arm.calls if c[0] == 'padding'] == [
+        ('padding', 0.04), ('padding', 0.05)
+    ]
 
 
 def test_missing_file_means_no_routes(tmp_path):
@@ -90,6 +150,9 @@ class _StubArm:
     def get_current_joints(self):
         return list(self.at)
 
+    def set_arm_padding(self, padding_m):
+        self.calls.append(('padding', padding_m))
+
     def first_invalid_state(self, waypoints):
         return 3 if self.blocked else None
 
@@ -118,6 +181,31 @@ def test_go_to_replays_the_baked_route():
     assert np.allclose(waypoints[-1], DROP)
 
 
+def test_go_to_refuses_a_baked_route_that_collides_now():
+    arm = _StubArm(INTER, blocked=True)
+
+    assert not transfers.go_to(
+        arm, 'drop', routes=ROUTES, max_velocity_rad_s=0.7
+    )
+    # No replay, and no planner fallback either.
+    assert arm.calls == []
+
+
+def test_go_to_replays_under_the_routes_padding_then_restores_it():
+    routes = dict(ROUTES, bottom=np.array([INTER, BOTTOM]))
+    arm = _StubArm(DROP)
+
+    assert transfers.go_to(
+        arm, 'bottom', routes=routes, max_velocity_rad_s=0.7,
+        arm_paddings={'drop': 0.03, 'bottom': 0.02},
+    )
+
+    kinds = [call[0] for call in arm.calls]
+    assert kinds == ['padding', 'baked', 'padding']
+    assert arm.calls[0][1] == 0.02
+    assert arm.calls[2][1] == config.OBSTACLE_PADDING_M
+
+
 def test_go_to_uses_a_straight_move_without_a_route():
     arm = _StubArm(HOME)
 
@@ -135,7 +223,7 @@ def test_go_to_falls_back_to_the_planner_only_when_blocked():
 def test_committed_transfers_are_sane():
     routes, speed = transfers.load()
 
-    assert set(routes) == {'home', 'drop'}
+    assert {'home', 'drop'} <= set(routes) <= set(transfers.transfer_targets())
     assert speed == pytest.approx(config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S)
 
     for name, route in routes.items():

@@ -91,14 +91,52 @@ def sample_with_cap(model, n=5000, seed=0, cap_fraction=0.1, noise_m=0.002):
 # seed geometry
 # ---------------------------------------------------------------
 
-def test_seed_axis_matches_urdf_bucket_pose():
-    # The bucket lies on its side, so its axis is nearly +Y in
-    # link_base. Cross-checked against the fixed
-    # base_to_bucket_joint in xarm7.urdf.xacro.
+def test_seed_is_the_configured_bucket_pose():
+    # The same pose MoveIt collision-checks against: the mesh's local
+    # +Z (depth axis) under config.OBSTACLES' URDF-convention rpy.
+    from laundry_control import config
+    from scipy.spatial.transform import Rotation
+
+    spec = config.OBSTACLES['bucket']
     axis = seed_axis_direction()
 
-    assert np.allclose(axis, [-0.0014, 0.996, 0.0891], atol=1e-3)
-    assert np.isclose(np.linalg.norm(axis), 1.0)
+    assert np.allclose(
+        axis, Rotation.from_euler('xyz', spec['rpy']).apply([0, 0, 1])
+    )
+    assert np.allclose(seed_cone().axis_point, spec['xyz'])
+    # The bucket lies on its side, so its axis is nearly +Y in link_base.
+    assert axis[1] > 0.98
+
+
+def test_bucket_pose_from_fit_moves_the_mesh_onto_the_cone():
+    from laundry_control import config
+    from laundry_control.perception.bucket_model import bucket_pose_from_fit
+    from scipy.spatial.transform import Rotation
+
+    seed = seed_cone()
+    e1, e2 = _axis_basis(seed.axis_dir)
+    fitted = ConeModel(
+        axis_point=seed.axis_point + 0.03 * e1,
+        axis_dir=(seed.axis_dir + 0.03 * e2) / np.linalg.norm(
+            seed.axis_dir + 0.03 * e2
+        ),
+        r0=seed.r0, taper=seed.taper, s_min=0.0, s_max=0.5,
+    )
+
+    xyz, rpy = bucket_pose_from_fit(fitted)
+
+    assert np.allclose(xyz, fitted.axis_point)
+    new = Rotation.from_euler('xyz', rpy)
+    assert np.allclose(new.apply([0, 0, 1]), fitted.axis_dir)
+    # Smallest rotation: the mesh turns by just the axis tilt.
+    old = Rotation.from_euler('xyz', config.OBSTACLES['bucket']['rpy'])
+    assert (new * old.inv()).magnitude() == pytest.approx(
+        np.arccos(fitted.axis_dir @ seed.axis_dir), abs=1e-9
+    )
+    # Unchanged when the fit agrees with the configuration.
+    same_xyz, same_rpy = bucket_pose_from_fit(seed)
+    assert np.allclose(same_xyz, seed.axis_point)
+    assert (Rotation.from_euler('xyz', same_rpy) * old.inv()).magnitude() < 1e-9
 
 
 def test_seed_cone_widens_toward_the_mouth():

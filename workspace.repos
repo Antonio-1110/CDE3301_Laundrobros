@@ -2,4 +2,4 @@ repositories:
   xarm_ros2:
     type: git
     url: https://github.com/Antonio-1110/xarm_ros2-cde3301.git
-    version: my-obstacle-changes
+    version: world-obstacles
