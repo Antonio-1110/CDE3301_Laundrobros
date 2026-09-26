@@ -1,5 +1,8 @@
 repositories:
   xarm_ros2:
     type: git
-    url: https://github.com/Antonio-1110/xarm_ros2-cde3301.git
-    version: world-obstacles
+    url: https://github.com/xArm-Developer/xarm_ros2.git
+    # The manufacturer's jazzy branch, UNMODIFIED, pinned to the commit
+    # it was tested with. Our gripper and joint limits are launch
+    # arguments (laundry_control/config.py, xarm_description_arguments).
+    version: 3dc2b5e8294758d96b54b15fa5920d581b7cbb3d

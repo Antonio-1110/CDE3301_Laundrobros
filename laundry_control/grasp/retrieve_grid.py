@@ -198,7 +198,7 @@ def solve(arm, grid=None, log=print):
     scene.set_padding(
         arm,
         config.OBSTACLE_PADDING_M,
-        {'gripper_link': config.GRIPPER_PADDING_M + grid['clearance_m']},
+        {config.GRIPPER_LINK: config.GRIPPER_PADDING_M + grid['clearance_m']},
     )
 
     grabs = []
@@ -228,7 +228,7 @@ def solve(arm, grid=None, log=print):
         scene.set_padding(
             arm,
             config.OBSTACLE_PADDING_M,
-            {'gripper_link': config.GRIPPER_PADDING_M},
+            {config.GRIPPER_LINK: config.GRIPPER_PADDING_M},
         )
 
     return grabs, misses
@@ -294,7 +294,7 @@ def plan_floor_grab(arm, point, grabs, grid=None):
     scene.set_padding(
         arm,
         config.OBSTACLE_PADDING_M,
-        {'gripper_link': config.GRIPPER_PADDING_M + grid['clearance_m']},
+        {config.GRIPPER_LINK: config.GRIPPER_PADDING_M + grid['clearance_m']},
     )
 
     try:
@@ -303,7 +303,7 @@ def plan_floor_grab(arm, point, grabs, grid=None):
         scene.set_padding(
             arm,
             config.OBSTACLE_PADDING_M,
-            {'gripper_link': config.GRIPPER_PADDING_M},
+            {config.GRIPPER_LINK: config.GRIPPER_PADDING_M},
         )
 
     if plan is None:

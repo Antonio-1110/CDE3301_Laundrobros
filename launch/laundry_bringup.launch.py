@@ -7,7 +7,8 @@ Real rig (default, fake:=false) - the Pi controls the arm and owns
 the ToF sensor and the gripper servo:
 
     - xArm7 hardware driver + MoveIt, headless
-      (xarm_moveit_config/launch/xarm7_moveit_realmove.launch.py)
+      (xarm_moveit_config/launch/_robot_moveit_realmove.launch.py, unmodified;
+       our gripper mesh and joint limits go in as its launch arguments)
     - tof_sensor         - reads the VL53L0X, publishes
                            sensor_msgs/Range on tof_sensor/range,
                            plus the static flange -> sensor transform.
@@ -51,6 +52,12 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def _moveit_include(launch_file, condition, extra_arguments):
+    # The manufacturer's underlying launch, not its xarm7_* wrapper: the
+    # wrapper forwards only a few arguments, and ours (the gripper mesh,
+    # the joint limits - config.xarm_description_arguments) must reach
+    # the robot description. xarm_ros2 itself stays unmodified.
+    from laundry_control import config
+
     return IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -58,7 +65,9 @@ def _moveit_include(launch_file, condition, extra_arguments):
             )
         ),
         launch_arguments=dict(
-            {'show_rviz': 'false'}, **extra_arguments
+            config.xarm_description_arguments(),
+            show_rviz='false',
+            **extra_arguments,
         ).items(),
         condition=condition,
     )
@@ -135,13 +144,13 @@ def generate_launch_description():
     ]
 
     real_moveit = _moveit_include(
-        'xarm7_moveit_realmove.launch.py',
+        '_robot_moveit_realmove.launch.py',
         UnlessCondition(fake),
         {'robot_ip': robot_ip},
     )
 
     fake_moveit = _moveit_include(
-        'xarm7_moveit_fake.launch.py',
+        '_robot_moveit_fake.launch.py',
         IfCondition(fake),
         {},
     )
@@ -193,6 +202,18 @@ def generate_launch_description():
         executable='laundry',
         arguments=['scene', 'apply'],
         output='screen',
+        condition=UnlessCondition(fake),
+    )
+
+    # The mock hardware starts at all-zeros, where the modelled gripper
+    # is in the table: move the fake arm to HOME (see cli.py
+    # _fake_start_at_home).
+    fake_scene_node = Node(
+        package='laundry_control',
+        executable='laundry',
+        arguments=['scene', 'apply', '--fake-start-home'],
+        output='screen',
+        condition=IfCondition(fake),
     )
 
     rviz_node = Node(
@@ -227,6 +248,7 @@ def generate_launch_description():
             scan_recorder_node,
             gripper_node,
             scene_node,
+            fake_scene_node,
             delayed_rviz,
         ]
     )

@@ -745,6 +745,36 @@ def cmd_scene_fit(args):
     return 0
 
 
+def _fake_start_at_home(arm):
+    """
+    FAKE CONTROLLER ONLY: move the arm from all-zeros to HOME.
+
+    The mock hardware starts every joint at 0, and there the modelled
+    gripper sits in the table, so MoveIt refuses to plan out of it. The
+    move goes straight to the trajectory controller (no planning, so no
+    start-state collision check). Refuses unless the arm reads exactly
+    all-zeros - a real arm never does, it starts where it was left.
+    """
+    from . import config
+    from .arm.joint_path import time_stop_at_each
+
+    current = arm.get_current_joints()
+
+    if current is None or max(abs(q) for q in current) > 1e-6:
+        print('--fake-start-home: the arm is not at the mock all-zeros '
+              'start; not moving it.')
+        return current is not None
+
+    waypoints, times, velocities = time_stop_at_each(
+        [current, config.HOME], config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S
+    )
+
+    ok = arm.execute_joint_path(waypoints, times, velocities)
+    print('Fake arm moved to HOME.' if ok else 'Could not move the fake arm.')
+
+    return ok
+
+
 def cmd_scene(args):
     """Run `laundry scene apply|check|fit`: the obstacles in MoveIt."""
     import os
@@ -775,6 +805,10 @@ def cmd_scene(args):
     with _RosSession(args=args) as arm:
         if args.scene_action == 'apply':
             print('move_group has the obstacles.')
+
+            if args.fake_start_home:
+                return 0 if _fake_start_at_home(arm) else 1
+
             return 0
 
         problems = 0
@@ -1244,6 +1278,14 @@ def build_parser():
             'and baked route against them. Neither moves the arm. fit '
             '(offline): the bucket pose the baseline scans measure, as a '
             'config.OBSTACLES entry.'
+        ),
+    )
+    scene_parser.add_argument(
+        '--fake-start-home', action='store_true',
+        help=(
+            'apply, FAKE CONTROLLER ONLY: then move the arm from the mock '
+            "hardware's all-zeros start (in the table) to HOME. Bring-up "
+            'passes it with fake:=true.'
         ),
     )
     scene_parser.add_argument(
