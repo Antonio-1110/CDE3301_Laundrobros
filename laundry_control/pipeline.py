@@ -81,6 +81,15 @@ def run_scan(arm, recorder, csv_path, scan_kwargs):
                 '    ros2 param set /scan_recorder_node csv_path ""'
             )
 
+        # The scan pauses recording on the way in and out; never
+        # leave it paused (a failed or interrupted scan would).
+        if not recorder.set_recording(True):
+            print(
+                "WARNING: could not resume scan_recorder_node's "
+                'recording. Do it by hand before the next scan:\n'
+                '    ros2 param set /scan_recorder_node recording true'
+            )
+
 
 def build_model(baseline):
     """Fit the empty-bucket model from the baselines, and report it."""

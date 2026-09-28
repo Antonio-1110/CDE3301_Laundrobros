@@ -102,6 +102,7 @@ class _StubRecorder:
     def __init__(self):
         self.paths = []
         self.cleared = False
+        self.recording = []
 
     def set_csv_path(self, path):
         self.paths.append(path)
@@ -111,8 +112,12 @@ class _StubRecorder:
         self.cleared = True
         return True
 
+    def set_recording(self, on):
+        self.recording.append(on)
+        return True
 
-def test_run_scan_restores_auto_naming_even_when_scan_fails(
+
+def test_run_scan_restores_auto_naming_and_recording_when_scan_fails(
     monkeypatch, tmp_path
 ):
     import laundry_control.pipeline as pipeline
@@ -130,6 +135,8 @@ def test_run_scan_restores_auto_naming_even_when_scan_fails(
 
     assert recorder.cleared
     assert recorder.paths == [str(target), '']
+    # A scan that died with recording paused must not leave it so.
+    assert recorder.recording == [True]
 
 
 # ------------------------------------------------------------ grasp

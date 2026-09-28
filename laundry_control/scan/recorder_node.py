@@ -35,6 +35,9 @@ Services (std_srvs/Trigger):
     save_scan  - write accumulated points to the `csv_path` param.
     clear_scan - reset accumulated points (e.g. before a new scan).
 
+Parameter `recording` (default true): false ignores readings, so a
+scan can leave out the sensor's way into and out of the bucket.
+
 If `csv_path` is left empty (the default), points are saved under
 `records_dir` (default: config.scan_records_dir(), the source tree's
 scan_records/), in a file named with the scan's start time (kept
@@ -105,6 +108,10 @@ class ScanRecorderNode(Node):
         self.declare_parameter('csv_path', '')
         self.declare_parameter('records_dir', '')
         self.declare_parameter('joint_state_topic', config.JOINT_STATE_TOPIC)
+        # False pauses recording: readings are ignored. The scan
+        # pauses it while the sensor enters and leaves the bucket
+        # (scan.pattern, entry_depth).
+        self.declare_parameter('recording', True)
 
         self.base_frame = self.get_parameter('base_frame').value
         self.flange_link = self.get_parameter('flange_link').value
@@ -226,6 +233,9 @@ class ScanRecorderNode(Node):
         return float(np.interp(stamp, times, angles))
 
     def _range_callback(self, msg):
+
+        if not self.get_parameter('recording').value:
+            return
 
         if not (msg.min_range <= msg.range <= msg.max_range):
             return

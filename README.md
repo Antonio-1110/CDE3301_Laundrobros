@@ -194,6 +194,8 @@ The bucket and table in RViz (the "Obstacles" display) are only as accurate as `
 
 The scan deliberately covers the **bottom** of the bucket: the floor, the lower walls and the lower half of the closed end. The 150° J7 sweep is centred on the floor. It runs at velocity 0.03 (was 0.1) for denser data and a J7 speed within its limit.
 
+**The scan path.** From INTER the arm moves straight in by `--entry-depth` (default 6 cm) without recording. The sensor starts just outside the mouth, so readings taken there caught the lip and things past it. Recording starts once the sensor is inside. The strokes then swing J7 150° each while moving in to `--depth` (0.42 m). They're spread evenly and at most `--step` apart (`scan/strokes.py`: 12 strokes of 3 cm with the defaults). `--step` is capped at 3 cm, and a larger value is rejected. After the end scan and the outward strokes back up to the entry depth, recording stops, J7 turns back, and the arm moves straight out. Changing `--entry-depth` or `--step` needs no re-bake, because the strokes are planned live and the end scan pivots at `--depth`. It does change the scan path, so re-collect the baselines with the same values.
+
 **The closed end** is out of the strokes' reach: the beam is fixed at 90° to the tool axis, and the gripper stops the arm going deeper. At maximum depth, the scan replays a **baked precession sweep** (`scan/endcap.py`, `scan_plans/endcap.yaml`). The tool tilts in a cone about the deepest flange position, so the beam traces arcs across the lower closed end. Simulated coverage of that area goes from 57% (the old BOTTOM detour) to 81%.
 
 The sweep is solved once by `laundry plan bake` and replayed as a fixed joint trajectory:

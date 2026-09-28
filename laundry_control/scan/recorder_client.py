@@ -43,7 +43,7 @@ def set_remote_string_param(
     node, remote_node_name, param_name, value, timeout_sec=5.0
 ):
     """
-    Set a string parameter on a DIFFERENT, already-running node.
+    Set a string (or, given a bool, a bool) parameter on another node.
 
     Goes through that node's own /<name>/set_parameters service.
     Returns True on success; logs why and returns False otherwise.
@@ -62,15 +62,16 @@ def set_remote_string_param(
 
     request = SetParameters.Request()
 
-    request.parameters = [
-        Parameter(
-            name=param_name,
-            value=ParameterValue(
-                type=ParameterType.PARAMETER_STRING,
-                string_value=value,
-            ),
+    if isinstance(value, bool):
+        parameter_value = ParameterValue(
+            type=ParameterType.PARAMETER_BOOL, bool_value=value
         )
-    ]
+    else:
+        parameter_value = ParameterValue(
+            type=ParameterType.PARAMETER_STRING, string_value=value
+        )
+
+    request.parameters = [Parameter(name=param_name, value=parameter_value)]
 
     future = client.call_async(request)
 
@@ -125,6 +126,21 @@ class ScanRecorderClient:
             self.recorder_node_name,
             'csv_path',
             csv_path,
+            timeout_sec=timeout_sec,
+        )
+
+    def set_recording(self, on, timeout_sec=5.0):
+        """
+        Resume (True) or pause (False) the recorder's recording.
+
+        Callers that pause it must resume it afterwards (in a
+        finally): left paused, the next scan records nothing.
+        """
+        return set_remote_string_param(
+            self.arm,
+            self.recorder_node_name,
+            'recording',
+            bool(on),
             timeout_sec=timeout_sec,
         )
 

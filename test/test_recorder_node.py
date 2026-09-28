@@ -63,9 +63,14 @@ class _Recorder:
         self._tf_fallback_count = 0
         self._tf_dropped_count = 0
         self.recorded = []
+        self.recording = True
 
     def get_clock(self):
         return _Clock(self)
+
+    def get_parameter(self, name):
+        assert name == 'recording'
+        return type('Parameter', (), {'value': self.recording})()
 
     def get_logger(self):
         return _Logger()
@@ -194,3 +199,17 @@ def test_a_reading_also_waits_for_the_joint_state_past_it():
     recorder._drain()
 
     assert recorder.recorded == [(pytest.approx(9.95), 'exact')]
+
+
+def test_paused_recording_ignores_readings():
+    recorder = _Recorder(now=10.00, tf_latest=10.00)
+    recorder.recording = False
+
+    recorder._range_callback(_reading(9.99))
+
+    assert recorder.recorded == [] and not recorder._pending
+
+    recorder.recording = True
+    recorder._range_callback(_reading(9.99))
+
+    assert len(recorder.recorded) == 1
