@@ -444,7 +444,11 @@ OBSTACLES = {
     'bucket': {
         'mesh': 'bucket.obj',
         'xyz': [0.14, -0.72, 0.42],
-        'rpy': [1.71, 3.14, -3.14],
+        # Roll 1.68 (was 1.71): the axis rises 6.3 deg toward the mouth,
+        # as `laundry scene fit` measures from the baselines (2026-09-28;
+        # check-flange at the derived INTER agreed, 1.9 deg off at 1.71).
+        # The fit's sideways shift (+3.1 cm x) is not applied: unverified.
+        'rpy': [1.68, 3.14, -3.14],
         'allowed_links': [],
     },
     'table': {
