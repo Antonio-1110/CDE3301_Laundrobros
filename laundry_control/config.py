@@ -95,50 +95,49 @@ DROP = [
     -2.913362979888916,
 ]
 
-# Hand-recorded grab poses for the sensorless `laundry preplanned`
-# sweep. Superseded by the generated grab grid (RETRIEVE_GRID below,
-# `laundry plan bake retrieve`) once that is baked; kept for
-# `laundry preplanned --recorded`. FK in the configured bucket: all
-# four sit on the floor's centre line, 11-39 cm from the closed end,
-# and RETRIEVE_1/2 grab almost the same spot.
-RETRIEVE_0 = [
-    -0.16877898573875427,
-    0.3103211522102356,
-    -1.2240749597549438,
-    1.2551662921905518,
-    0.23523668944835663,
-    0.6844640374183655,
-    -3.019961357116699,
-]
-
-RETRIEVE_1 = [
-    1.0142279863357544,
-    0.7750195264816284,
-    -2.239295482635498,
-    0.6214537024497986,
-    0.6356657147407532,
-    0.6073369383811951,
-    -3.199042797088623,
-]
-
-RETRIEVE_2 = [
-    0.635716438293457,
-    0.1730310469865799,
-    -1.9444830417633057,
-    1.1769441366195679,
-    0.14949719607830048,
-    1.2463109493255615,
-    -2.922783851623535,
-]
-
-RETRIEVE_3 = [
-    1.0214934349060059,
-    0.7060800194740295,
-    -2.34552264213562,
-    0.7978871464729309,
-    0.47409510612487793,
-    1.36742103099823,
-    -3.12626576423645,
+# Starting points (IK seeds) for the grab-grid solver, grasp/
+# retrieve_grid.py - never moved to. They are the four grab poses
+# once jogged by hand (the old RETRIEVE_0..3), kept because they show
+# the solver which arm postures reach the bucket floor: from each, it
+# converges on a grab in that same posture. The generated grab grid
+# (RETRIEVE_GRID below) replaced them as poses.
+GRAB_IK_SEEDS = [
+    [
+        -0.16877898573875427,
+        0.3103211522102356,
+        -1.2240749597549438,
+        1.2551662921905518,
+        0.23523668944835663,
+        0.6844640374183655,
+        -3.019961357116699,
+    ],
+    [
+        1.0142279863357544,
+        0.7750195264816284,
+        -2.239295482635498,
+        0.6214537024497986,
+        0.6356657147407532,
+        0.6073369383811951,
+        -3.199042797088623,
+    ],
+    [
+        0.635716438293457,
+        0.1730310469865799,
+        -1.9444830417633057,
+        1.1769441366195679,
+        0.14949719607830048,
+        1.2463109493255615,
+        -2.922783851623535,
+    ],
+    [
+        1.0214934349060059,
+        0.7060800194740295,
+        -2.34552264213562,
+        0.7978871464729309,
+        0.47409510612487793,
+        1.36742103099823,
+        -3.12626576423645,
+    ],
 ]
 
 _POSE_NAMES = (
@@ -146,10 +145,6 @@ _POSE_NAMES = (
     'INTER_RECORDED',
     'BOTTOM_RECORDED',
     'DROP',
-    'RETRIEVE_0',
-    'RETRIEVE_1',
-    'RETRIEVE_2',
-    'RETRIEVE_3',
 )
 
 

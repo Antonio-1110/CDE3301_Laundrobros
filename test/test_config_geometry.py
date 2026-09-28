@@ -23,10 +23,7 @@ def _quat(rotation):
 def test_named_poses_cover_every_recorded_pose():
     poses = config.named_poses()
 
-    recorded = {
-        'home', 'inter', 'bottom', 'drop',
-        'retrieve_0', 'retrieve_1', 'retrieve_2', 'retrieve_3',
-    }
+    recorded = {'home', 'inter', 'bottom', 'drop'}
     # Plus the generated grab_NN poses, once scan_plans/retrieve.yaml
     # is baked.
     assert set(poses) == recorded | set(config.generated_grab_poses())

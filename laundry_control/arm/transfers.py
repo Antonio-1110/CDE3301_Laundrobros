@@ -60,17 +60,13 @@ from .. import config
 PLAN_VERSION = 1
 
 # Targets reached from INTER through a baked transfer. INTER is the
-# hub: a move between two of these (RETRIEVE_n -> DROP, say) replays
+# hub: a move between two of these (grab_NN -> DROP, say) replays
 # one route back to INTER and the other out from it - through the
 # bucket mouth, never across the rim.
 TRANSFER_TARGETS = (
     'home',
     'drop',
     'bottom',
-    'retrieve_0',
-    'retrieve_1',
-    'retrieve_2',
-    'retrieve_3',
 )
 
 
@@ -82,7 +78,7 @@ def transfer_targets():
 # Targets outside the bucket. Their routes are baked with extra gripper
 # clearance (config.BAKE_GRIPPER_CLEARANCE_M) on top of the live
 # padding, since nothing on the way there needs the gripper close to
-# the bucket. Routes into it (BOTTOM, RETRIEVE_n) end with the gripper
+# the bucket. Routes into it (BOTTOM, grab_NN) end with the gripper
 # at the floor on purpose, so they are baked at the live padding.
 OUTSIDE_TARGETS = ('home', 'drop')
 
@@ -533,11 +529,14 @@ def from_other_inter(routes):
 
 def _where(current, routes):
     """Return 'inter', the baked target the arm is at, or None."""
-    if _at(current, config.get_named_pose('inter')):
+    poses = config.named_poses()
+
+    if _at(current, poses['inter']):
         return 'inter'
 
+    # A file baked before a pose was retired can still hold its route.
     for name in routes:
-        if _at(current, config.get_named_pose(name)):
+        if name in poses and _at(current, poses[name]):
             return name
 
     return None

@@ -71,7 +71,7 @@ laundry scene check
 ```
 
 - **Paste back:** the whole output.
-- **Expect:** every pose `ok` except `retrieve_3`, which collides with the modelled bucket even though it was recorded on the real arm. Every route `ok` except `retrieve_3`, which has none.
+- **Expect:** every pose and route `ok`. (The old hand-recorded RETRIEVE_0–3 are no longer poses; RETRIEVE_3 used to collide with the modelled bucket here.)
 
 **2c. Where is the bucket really?** The modelled bucket may be ~3 cm off. `laundry scene fit` measures the bucket from the baseline scans. It puts the bucket axis **3.1 cm further along +x** (away from the arm's centre line, sideways) and 0.5 cm lower at the closed end than `config.OBSTACLES`. At that pose, every recorded pose, RETRIEVE_3 included, is collision-free. The fit depends on the ToF mounting offsets, so a tape measure has the final say:
 
@@ -283,7 +283,7 @@ laundry scene check && laundry preplanned --limit 3 --speed 0.3
 
 - **Watch:** the claw's height above the floor at each grab (the target is 2–3 cm), and the side grabs against the walls. Those two depend most on where the bucket really is (tests 2c and 13).
 - **Paste back:** the `scene check` output, and the claw-to-floor gap at each of the 3 grabs (a rough ruler estimate is fine).
-- **Then:** the full sweep, `laundry preplanned --speed 0.5`, with some laundry in the bucket. Say how many items came out, and which grabs came up empty. `laundry preplanned --recorded` runs the old four poses, for comparison.
+- **Then:** the full sweep, `laundry preplanned --speed 0.5`, with some laundry in the bucket. Say how many items came out, and which grabs came up empty.
 - **If the bucket pose changes** (`config.OBSTACLES`): run `laundry plan bake retrieve` and commit `scan_plans/`.
 
 **17c. `laundry clear`, slowly.** Hand on the e-stop. Put 2–3 items in the bucket. The command runs 3 grid grabs, then scans and grasps until a scan finds nothing:

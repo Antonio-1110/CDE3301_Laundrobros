@@ -5,11 +5,12 @@ Generated grab poses for the sensorless first pass (`laundry preplanned`).
 
 WHY
 ---
-The hand-recorded RETRIEVE_0..3 all sit on one line down the middle
-of the floor, 11-39 cm from the closed end, two of them on nearly the
-same spot, and RETRIEVE_3 is inside the modelled wall. Laundry lies
-across the whole bottom of the bucket, so a sweep that is meant to
-save a scan should cover it evenly.
+The four grab poses once jogged by hand (RETRIEVE_0..3, now only
+config.GRAB_IK_SEEDS) all sat on one line down the middle of the
+floor, 11-39 cm from the closed end, two of them on nearly the same
+spot, and one inside the modelled wall. Laundry lies across the whole
+bottom of the bucket, so a sweep that is meant to save a scan should
+cover it evenly.
 
 WHAT
 ----
@@ -24,10 +25,10 @@ perception.bucket_model.seed_cone), and for each finds by IK:
 that is collision-free with the gripper padded by clearance_m, whose
 approach pose (approach_m back along the tool axis) is too, and
 whose straight joint-space descent between the two is clear. IK is
-seeded from INTER and the recorded RETRIEVE poses - the elbow
-configurations known to work in this bucket - and among seeds the one
-closest to INTER in weighted joint travel wins (less cable twist).
-The claw keeps the recorded poses' roll: local +X toward the mouth.
+seeded from INTER and config.GRAB_IK_SEEDS - the arm postures known
+to reach this bucket's floor - and among seeds the one closest to
+INTER in weighted joint travel wins (less cable twist). The claw
+keeps the seeds' roll: local +X toward the mouth.
 
 Everything is saved to scan_plans/retrieve.yaml, stamped with the
 scene; each approach pose becomes the named pose grab_NN (see
@@ -126,12 +127,8 @@ def _flange_pose(contact, tool_z, claw_x, back_off_m=0.0):
 
 
 def _seeds():
-    return [
-        config.get_named_pose('inter'),
-        config.RETRIEVE_0,
-        config.RETRIEVE_1,
-        config.RETRIEVE_2,
-        config.RETRIEVE_3,
+    return [config.get_named_pose('inter')] + [
+        list(seed) for seed in config.GRAB_IK_SEEDS
     ]
 
 
@@ -150,7 +147,7 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
     solve). Checks: grab and approach states, and the straight
     descent between them; solutions in a flipped posture (see
     MAX_TRAVEL_FROM_INTER_DEG) are skipped. seeds default to INTER
-    and the recorded RETRIEVE poses.
+    and config.GRAB_IK_SEEDS.
     """
     from ..arm.transfers import weighted_travel_deg
 

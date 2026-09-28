@@ -248,22 +248,16 @@ def test_execute_grasp_retracts_but_never_drops_if_not_closed():
     assert _sequence(arm) == ['open', 'POSE', 'close', 'INTER']
 
 
-def test_preplanned_stops_when_the_gripper_fails(monkeypatch):
+def test_preplanned_without_a_grab_grid_does_not_move(monkeypatch):
     from laundry_control import pipeline
+    from laundry_control.grasp import retrieve_grid
 
-    def fake_go_to(arm, name, **_kwargs):
-        return arm.move_joints(config.get_named_pose(name))
-
-    monkeypatch.setattr(pipeline, 'go_to', fake_go_to)
+    monkeypatch.setattr(retrieve_grid, 'load', lambda path=None: ([], ''))
 
     arm = _StubArm()
 
-    assert not pipeline.run_preplanned(
-        arm, _StubGripper(arm, fail_close=True), recorded=True
-    )
-    # Open, INTER, the first RETRIEVE pose, close (fails), back to INTER
-    # - no DROP.
-    assert _sequence(arm) == ['open', 'INTER', 'POSE', 'close', 'INTER']
+    assert not pipeline.run_preplanned(arm, _StubGripper(arm))
+    assert arm.calls == []
 
 
 def test_grasp_best_dry_run_never_approaches(monkeypatch):

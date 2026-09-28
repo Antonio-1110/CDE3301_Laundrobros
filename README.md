@@ -140,7 +140,7 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 
 | Command | Needs |
 |---|---|
-| `laundry move inter` / `home` / `bottom` / `drop` / `retrieve_0..3` `[--speed 0.3]` | MoveIt |
+| `laundry move inter` / `home` / `bottom` / `drop` / `grab_NN` `[--speed 0.3]` | MoveIt |
 | `laundry move joints J1 .. J7 [--degrees]`, `joint6 DEG`, `joint7 DEG`, `linear M`, `twist M DEG` | MoveIt |
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
 | `laundry scene apply` / `check` — put the obstacles into MoveIt / also check every recorded pose and baked route against them (no motion) | MoveIt |
@@ -157,7 +157,7 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry baseline promote X.csv\|dir ... [--move] [--archive]`, `archive`, `list`, `restore LABEL` | nothing |
 | `laundry replay scan.csv` | a ROS graph (for RViz) |
 | `laundry evaluate [--sweep] [--synthetic] [--coverage] [--laundry X.csv ...]` | nothing |
-| `laundry preplanned [--limit N] [--speed 0.3] [--recorded]` — sensorless sweep over the grab grid (else the recorded RETRIEVE poses) | rig, or `--fake-hardware` |
+| `laundry preplanned [--limit N] [--speed 0.3]` — sensorless sweep over the grab grid (refuses if it isn't baked) | rig, or `--fake-hardware` |
 
 `laundry <command> --help` documents every option.
 
@@ -228,7 +228,7 @@ For each spot, IK finds the lowest gripper height (2 cm above the floor upwards)
 - **`grab_NN`**: an approach pose 8 cm up the gripper axis, reached from INTER on a baked route like any named pose (`laundry move grab_03` works).
 - **The grab itself**: a straight descent onto the laundry, then a straight lift back up.
 
-The sweep runs: route in → descend → close → lift → DROP → open, for each grab. Edit the grid (depths, angles, heights, tilts) in `config.py` and re-bake. `--recorded` still runs the hand-recorded RETRIEVE_3..0.
+The sweep runs: route in → descend → close → lift → DROP → open, for each grab. Edit the grid (depths, angles, heights, tilts) in `config.py` and re-bake (`./rebake.sh retrieve`). The four grab poses once jogged by hand (RETRIEVE_0..3) are no longer poses. They remain only as `config.GRAB_IK_SEEDS`: starting postures for the grid's IK solver.
 
 **Detected items are grabbed the same way.** When the grid is baked, a detected item anywhere in the lower half of the drum (within `config.DETECTED_GRAB_MAX_ANGLE_DEG` = 90° of the floor's lowest line, so the lower walls too) gets a grab placed over it. The grab sinks halfway into the pile (at most 5 cm) and is solved with the same IK search. The arm takes the baked route to the nearest `grab_NN`, makes a short straight collision-checked move from there, then descends, closes and lifts. Items beyond that angle use the older Cartesian reach from INTER. On the fake controller, that reach couldn't get to a towel in the middle of the floor at any depth; the floor grab could.
 
@@ -238,9 +238,9 @@ The sweep runs: route in → descend → close → lift → DROP → open, for e
 
 Named-pose moves (`laundry move <pose>`, and the scan, grasp, drop and preplanned stages) go through `arm/transfers.go_to`, which tries three routes in order:
 
-1. **A baked route** from `scan_plans/transfers.yaml`. INTER is the hub: there is one route from INTER to each of HOME, DROP, BOTTOM, RETRIEVE_0–3 and the grab_NN poses (`laundry scene check` lists which exist).
+1. **A baked route** from `scan_plans/transfers.yaml`. INTER is the hub: there is one route from INTER to each of HOME, DROP, BOTTOM and the grab_NN poses (`laundry scene check` lists which exist).
    - INTER → pose replays the route; pose → INTER replays it in reverse.
-   - Pose → another pose (e.g. RETRIEVE_2 → DROP) goes back to INTER along one route and out along the other, so the arm always leaves the bucket through its mouth.
+   - Pose → another pose (e.g. grab_04 → DROP) goes back to INTER along one route and out along the other, so the arm always leaves the bucket through its mouth.
    - Each route is straight joint-space segments through zero to two intermediate poses (for HOME/DROP, after first backing the gripper straight out of the bucket). Every 1° is collision-checked, and the route with the least joint travel wins, weighted toward J1 and J4–J7, which twist the cables.
    - Before every replay the whole route is re-checked against the current planning scene. A route that now collides is refused, with a message to re-bake. A route baked against different obstacle poses still runs if it's clear, with a warning to re-bake. A route baked from a different INTER than the current one (after INTER is re-derived or re-recorded) is not used at all.
 2. **Otherwise:** a straight, collision-checked joint move, which is the minimum twist.
@@ -274,7 +274,7 @@ The bucket and table are MoveIt **world objects**, not robot links. `arm/scene.p
 **Padding:**
 
 - **Arm links (link1–link7): 3 cm** (`config.OBSTACLE_PADDING_M`), for everything: the planner, Cartesian strokes, and the straight and baked moves. The exceptions are the end scan (1 cm, `config.ENDCAP_PADDING_M`) and the route to BOTTOM (2 cm, `config.ROUTE_ARM_PADDING_M`), whose tilted tool brings the elbow to the rim. Each is baked and replayed under its own padding.
-- **Gripper: 0 cm** (`config.GRIPPER_PADDING_M`), because it works inside the bucket on purpose: the RETRIEVE poses put it within 1–2 cm of the floor.
+- **Gripper: 0 cm** (`config.GRIPPER_PADDING_M`), because it works inside the bucket on purpose: the grabs put it within 2–3 cm of the floor.
 - **Routes that leave the bucket** (to HOME and DROP) are baked with an extra 1 cm on the gripper (`config.BAKE_GRIPPER_CLEARANCE_M`), so it clears the bucket mouth on the way out.
 
 ## Frames and offsets

@@ -3,7 +3,7 @@
 """
 `laundry`: one command for every stage of the pipeline.
 
-    laundry move home|inter|bottom|drop|retrieve_0..3
+    laundry move home|inter|bottom|drop|grab_NN
     laundry move joints J1 .. J7 [--degrees]
     laundry move joint6 DEG | joint7 DEG
     laundry move linear M | twist M DEG
@@ -22,7 +22,7 @@
     laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
     laundry run [--dry-run]                                 # one item
     laundry clear [--no-grabs] [--max-rounds N]             # the bucket
-    laundry preplanned [--recorded] [--limit N] [--speed 0.3]
+    laundry preplanned [--limit N] [--speed 0.3]
 
 Stages hand off through files - a scan CSV, then a targets JSON - so
 each one can run alone, be rerun offline, or be inspected in
@@ -1105,7 +1105,6 @@ def cmd_preplanned(args):
         ok = run_preplanned(
             arm,
             _make_gripper(arm, args.fake_hardware),
-            recorded=args.recorded,
             limit=args.limit,
             time_scale=args.speed,
         )
@@ -1493,13 +1492,9 @@ def build_parser():
     preplanned = subparsers.add_parser(
         'preplanned',
         help=(
-            'Sensorless sweep: grab at each generated grab pose (else the '
-            'recorded RETRIEVE poses) and drop.'
+            'Sensorless sweep: grab at each generated grab pose '
+            '(scan_plans/retrieve.yaml) and drop.'
         ),
-    )
-    preplanned.add_argument(
-        '--recorded', action='store_true',
-        help='Use the hand-recorded RETRIEVE_3..0 instead of the grab grid.',
     )
     preplanned.add_argument(
         '--limit', type=int, default=None,

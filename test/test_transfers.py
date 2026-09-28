@@ -235,3 +235,11 @@ def test_committed_transfers_are_sane():
         # The wrist-cable joint moves by (near enough) the direct amount.
         j7_travel = transfers.per_joint_travel_deg(route)[6]
         assert j7_travel <= abs(math.degrees(target[6] - INTER[6])) + 5.0
+
+
+def test_a_route_to_a_retired_pose_is_ignored():
+    # A transfers.yaml baked before RETRIEVE_0..3 were retired.
+    routes = dict(ROUTES, retrieve_0=np.array([INTER, HOME]))
+
+    assert transfers.route_for(HOME, 'inter', routes) is None
+    assert transfers.route_for(DROP, 'inter', routes) is not None
