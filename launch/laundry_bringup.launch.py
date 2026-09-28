@@ -43,7 +43,7 @@ It must not be anywhere under install/ or build/, which get wiped by
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.actions import TimerAction
+from launch.actions import OpaqueFunction, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -71,6 +71,55 @@ def _moveit_include(launch_file, condition, extra_arguments):
         ).items(),
         condition=condition,
     )
+
+
+# The MoveIt parameters the manufacturer's own RViz gets
+# (xarm_moveit_config/launch/_robot_moveit_common2.launch.py).
+RVIZ_MOVEIT_PARAMETERS = (
+    'robot_description',
+    'robot_description_semantic',
+    'robot_description_kinematics',
+    'robot_description_planning',
+    'planning_pipelines',
+)
+
+
+def _rviz_node(context):
+    # RViz's PlanningScene display needs the SRDF as a parameter:
+    # move_group does not publish /robot_description_semantic, so
+    # without it the display waits forever and never shows the
+    # obstacles. Built by the manufacturer's builder from the same
+    # arguments as move_group's. Not the manufacturer's RViz node
+    # itself: closing that one shuts down the whole launch, arm
+    # driver included.
+    from laundry_control import config
+    from uf_ros_lib.moveit_configs_builder import MoveItConfigsBuilder
+
+    moveit_config = MoveItConfigsBuilder(
+        context=context, **config.xarm_description_arguments()
+    ).to_moveit_configs().to_dict()
+
+    return [
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='screen',
+            arguments=[
+                '-d',
+                PathJoinSubstitution(
+                    [
+                        FindPackageShare('laundry_control'),
+                        'rviz',
+                        'scan_visualization.rviz',
+                    ]
+                ),
+            ],
+            parameters=[
+                {name: moveit_config[name] for name in RVIZ_MOVEIT_PARAMETERS}
+            ],
+        )
+    ]
 
 
 def generate_launch_description():
@@ -216,26 +265,9 @@ def generate_launch_description():
         condition=IfCondition(fake),
     )
 
-    rviz_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        output='screen',
-        arguments=[
-            '-d',
-            PathJoinSubstitution(
-                [
-                    FindPackageShare('laundry_control'),
-                    'rviz',
-                    'scan_visualization.rviz',
-                ]
-            ),
-        ],
-    )
-
     delayed_rviz = TimerAction(
         period=rviz_delay,
-        actions=[rviz_node],
+        actions=[OpaqueFunction(function=_rviz_node)],
         condition=IfCondition(rviz),
     )
 
