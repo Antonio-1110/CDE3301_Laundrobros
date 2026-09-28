@@ -127,3 +127,40 @@ def test_a_changed_grid_is_reported(tmp_path, monkeypatch):
 
     monkeypatch.setitem(config.RETRIEVE_GRID, 'clearance_m', 0.02)
     assert 'clearance_m' in retrieve_grid.grid_mismatch(path)
+
+
+class _IkArm:
+    """IK flips J1 a full turn at the first height, and is fine after."""
+
+    def __init__(self):
+        self.heights = []
+
+    def compute_ik(self, pose, seed):
+        # The approach pose is solved seeded from the grab.
+        solution = np.array(config.get_named_pose('inter')) + 0.1
+
+        if len(self.heights) == 1:
+            solution[0] += np.radians(360.0)
+
+        return list(solution)
+
+    def first_invalid_state(self, waypoints):
+        return None
+
+
+def test_a_flipped_ik_solution_is_skipped_for_the_next_height(monkeypatch):
+    arm = _IkArm()
+    grid = dict(config.RETRIEVE_GRID, heights_m=[0.02, 0.03], tilts_deg=[0.0])
+
+    real_geometry = retrieve_grid.grab_geometry
+
+    def geometry(depth, angle, height, tilt, cone=None):
+        arm.heights.append(height)
+        return real_geometry(depth, angle, height, tilt, cone)
+
+    monkeypatch.setattr(retrieve_grid, 'grab_geometry', geometry)
+
+    grab = retrieve_grid.solve_one(arm, 0.30, 0.0, grid, seeds=[[0.0] * 7])
+
+    assert grab['height_m'] == pytest.approx(0.03)
+    assert not retrieve_grid.flipped(grab['grab'], config.get_named_pose('inter'))

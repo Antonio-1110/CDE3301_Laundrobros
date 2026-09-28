@@ -57,6 +57,17 @@ from ..perception.bucket_model import _axis_basis, seed_cone, to_cylindrical
 
 PLAN_VERSION = 1
 
+# An IK solution with any joint further than this from INTER is a
+# flipped posture, not a grab: the IK solver restarts from random
+# joint values when it cannot converge from the seed, and can land
+# with J1 turned a full revolution or the wrist (J5, J7) flipped.
+# Such a grab has no clean route from INTER. Measured (fake
+# controller, 2026-09-28, three bakes of the grid): real grabs stay
+# within 111 deg of INTER in every joint (approach poses within 96);
+# flipped ones were 176-448 deg. Rejected, so the grab falls back to
+# its next height/tilt instead.
+MAX_TRAVEL_FROM_INTER_DEG = 150.0
+
 # How far into a detected pile to sink the grab, as in grasp/plan.py:
 # half the pile's sensed height above the floor, at most 5 cm.
 FLOOR_GRAB_SINK_FRACTION = 0.5
@@ -124,14 +135,22 @@ def _seeds():
     ]
 
 
+def flipped(joints, inter):
+    """Return True if any joint is past MAX_TRAVEL_FROM_INTER_DEG from INTER."""
+    travel = np.degrees(np.abs(np.asarray(joints) - np.asarray(inter)))
+
+    return bool(travel.max() > MAX_TRAVEL_FROM_INTER_DEG)
+
+
 def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
     """
     Return the best grab at one grid point as a dict, or None.
 
     Must run with the gripper padded by the grid's clearance (see
     solve). Checks: grab and approach states, and the straight
-    descent between them. seeds default to INTER and the recorded
-    RETRIEVE poses.
+    descent between them; solutions in a flipped posture (see
+    MAX_TRAVEL_FROM_INTER_DEG) are skipped. seeds default to INTER
+    and the recorded RETRIEVE poses.
     """
     from ..arm.transfers import weighted_travel_deg
 
@@ -150,7 +169,7 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
             for seed in seeds:
                 grab = arm.compute_ik(_flange_pose(contact, tool_z, claw_x), seed)
 
-                if grab is None:
+                if grab is None or flipped(grab, inter):
                     continue
 
                 approach = arm.compute_ik(
@@ -158,7 +177,7 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
                     grab,
                 )
 
-                if approach is None:
+                if approach is None or flipped(approach, inter):
                     continue
 
                 if arm.first_invalid_state([approach, grab]) is not None:
