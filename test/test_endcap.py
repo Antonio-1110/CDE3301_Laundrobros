@@ -144,6 +144,9 @@ class _StubArm:
     def set_arm_padding(self, padding_m):
         self.paddings.append(padding_m)
 
+    def compute_fk(self, joints):
+        return None
+
     def move_joints_linear(self, target, time_scale=1.0):
         self.calls.append(('linear', list(target), time_scale))
         return True

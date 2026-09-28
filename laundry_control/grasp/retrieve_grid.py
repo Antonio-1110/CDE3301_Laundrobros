@@ -116,7 +116,7 @@ def _flange_pose(contact, tool_z, claw_x, back_off_m=0.0):
 
 def _seeds():
     return [
-        config.INTER,
+        config.get_named_pose('inter'),
         config.RETRIEVE_0,
         config.RETRIEVE_1,
         config.RETRIEVE_2,
@@ -136,7 +136,7 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
     from ..arm.transfers import weighted_travel_deg
 
     grid = grid or config.RETRIEVE_GRID
-    inter = np.array(config.INTER)
+    inter = np.array(config.get_named_pose('inter'))
     seeds = seeds or _seeds()
 
     for height in grid['heights_m']:
@@ -319,7 +319,7 @@ def plan_floor_grab(arm, point, grabs, grid=None):
             grabs,
             key=lambda g: np.abs(np.array(g['approach']) - approach).max(),
         )
-    ] + [('inter', config.INTER)]
+    ] + [('inter', config.get_named_pose('inter'))]
 
     for name, joints in vias:
         if arm.first_invalid_state([joints, plan['approach']]) is None:

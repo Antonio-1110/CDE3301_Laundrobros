@@ -8,10 +8,10 @@ from laundry_control.arm.joint_path import time_stop_at_each
 import numpy as np
 import pytest
 
-INTER = np.array(config.INTER)
+INTER = np.array(config.get_named_pose('inter'))
 DROP = np.array(config.DROP)
 HOME = np.array(config.HOME)
-BOTTOM = np.array(config.BOTTOM)
+BOTTOM = np.array(config.get_named_pose('bottom'))
 
 
 def test_time_stop_at_each_rests_at_every_waypoint():

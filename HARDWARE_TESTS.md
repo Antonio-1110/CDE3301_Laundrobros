@@ -80,6 +80,16 @@ laundry scene check
   - **Height of the bucket axis above the table at the closed end.** Config says 42.0 cm; the scans say 41.5 cm.
 - **Paste back:** the two numbers, and which side of the base centre (+x) the bucket axis is on.
 
+**2d. INTER and BOTTOM from the bucket** (after 2c, with `config.OBSTACLES` settled). Until this is done, INTER and BOTTOM are the angles jogged by eye. Derive them on an isolated **fake controller**, so the end-scan bake can't move the real arm. `rebake.sh` starts one, runs `laundry plan bake` and `laundry scene check`, then stops it (about 10 minutes):
+
+```bash
+./rebake.sh
+```
+
+- **Paste back:** the "Deriving INTER and BOTTOM" lines, and the scene check.
+- **Expected** with the current `config.OBSTACLES` (fake controller, 2026-09-28): INTER moves 3.1 cm and 7.8° from the jogged one (flagged LARGE, because the modelled axis tilts 8° and the jogged tool is level), and BOTTOM moves by at most 6.4° per joint. If 2c changed `config.OBSTACLES`, the numbers differ. A LARGE flag after 2c means the model and the rig still disagree.
+- **Then on the rig, slowly:** `laundry move inter --speed 0.3` and check by eye that the gripper points down the middle of the bucket. After that, collect new baselines (test 13): the scan now starts from the derived INTER.
+
 
 ## B. Motion and devices
 

@@ -145,7 +145,7 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
 | `laundry scene apply` / `check` — put the obstacles into MoveIt / also check every recorded pose and baked route against them (no motion) | MoveIt |
 | `laundry scene fit` — the bucket pose the baseline scans measure, as a `config.OBSTACLES` entry | nothing |
-| `laundry plan bake [endcap\|transfers\|retrieve\|all]` — solve, check and save the end scan, the routes from INTER to every named pose, and/or the grab grid (**moves the arm**) | MoveIt |
+| `laundry plan bake [poses\|endcap\|transfers\|retrieve\|all]` — solve, check and save INTER/BOTTOM from the bucket, the grab grid, the routes from INTER to every named pose, and/or the end scan (the end scan **moves the arm**) | MoveIt |
 | `laundry plan replay [--speed 0.3]` — the end scan alone, INTER to INTER | MoveIt |
 | `laundry scan [--save scan.csv] [--end-scan precession\|bottom] [--velocity 0.03 ...]` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` | nothing — plain files |
@@ -242,11 +242,22 @@ Named-pose moves (`laundry move <pose>`, and the scan, grasp, drop and preplanne
    - INTER → pose replays the route; pose → INTER replays it in reverse.
    - Pose → another pose (e.g. RETRIEVE_2 → DROP) goes back to INTER along one route and out along the other, so the arm always leaves the bucket through its mouth.
    - Each route is straight joint-space segments through zero to two intermediate poses (for HOME/DROP, after first backing the gripper straight out of the bucket). Every 1° is collision-checked, and the route with the least joint travel wins, weighted toward J1 and J4–J7, which twist the cables.
-   - Before every replay the whole route is re-checked against the current planning scene. A route that now collides is refused, with a message to re-bake. A route baked against different obstacle poses still runs if it's clear, with a warning to re-bake.
+   - Before every replay the whole route is re-checked against the current planning scene. A route that now collides is refused, with a message to re-bake. A route baked against different obstacle poses still runs if it's clear, with a warning to re-bake. A route baked from a different INTER than the current one (after INTER is re-derived or re-recorded) is not used at all.
 2. **Otherwise:** a straight, collision-checked joint move, which is the minimum twist.
 3. **Only if that collides:** the planner, with a warning.
 
 Re-bake (`laundry plan bake transfers`) after changing a recorded pose, the padding or `config.OBSTACLES`.
+
+### INTER and BOTTOM, from the bucket
+
+INTER (on the bucket axis, just outside the mouth, where the scan starts) and BOTTOM (the scan depth in, tilted up) are defined relative to the bucket in `config.BUCKET_POSES`, so they move with it:
+
+- **INTER:** the flange on the bucket axis, `standoff_m` outside the mouth plane, with the tool pointing straight down the axis and the ToF beam at the floor.
+- **BOTTOM:** the flange `depth_m` in from INTER along the axis, with the tool tilted `tilt_deg` up from the axis (the end scan's tilt-up pose).
+
+`laundry plan bake poses` solves their joint angles by IK in the bucket of `config.OBSTACLES` and saves them to `scan_plans/bucket_poses.yaml`. No motion. The IK is seeded from the hand-jogged `INTER_RECORDED` / `BOTTOM_RECORDED`, so the arm keeps the same elbow posture. The command prints how far each derived pose is from the jogged one, and calls out anything over 3 cm or 5°: that means `config.OBSTACLES` and the real bucket disagree. Until the file exists, the jogged angles are used. `laundry scene check` says which one is in use.
+
+Everything else is baked from INTER, so `laundry plan bake` (all) derives the poses first, then bakes the grab grid, the transfers and the end scan. The derived poses are only as accurate as `config.OBSTACLES`. The scan also runs from INTER, so changing INTER invalidates the baselines.
 
 ### Obstacles: the bucket and table
 
@@ -254,9 +265,11 @@ The bucket and table are MoveIt **world objects**, not robot links. `arm/scene.p
 
 **After moving the bucket (or table):**
 
-1. Edit its `xyz` / `rpy` in `config.OBSTACLES`: metres and radians in link_base, with the same convention as a URDF `<origin>`. To measure it, collect fresh baselines (`laundry baseline collect`), then run `laundry scene fit`. It prints the pose that the scans put the bucket at. That pose depends on the ToF extrinsics, so check it with a tape measure.
-2. `laundry scene check` (bring-up running, fake or real) lists every recorded pose and baked route that now collides, and what it hits. Nothing moves.
-3. Re-record any pose the move invalidated, then run `laundry plan bake` and commit `scan_plans/`. Baked files record the scene they were baked against.
+1. Edit its `xyz` / `rpy` in `config.OBSTACLES`: metres and radians in link_base, with the same convention as a URDF `<origin>`. Measure it with a tape measure. To refine it, collect baselines (`laundry baseline collect`), then run `laundry scene fit`. It prints the pose that the scans put the bucket at, and that pose depends on the ToF extrinsics.
+2. `laundry scene check` (bring-up running, fake or real) lists every named pose and baked route that now collides, and what it hits. Nothing moves.
+3. Run `./rebake.sh` (about 10 minutes on the Pi). It starts an isolated fake controller (its own ROS domain, localhost only, so it can't reach the real arm) and runs `laundry plan bake`. That derives INTER and BOTTOM from the new bucket pose, then re-bakes the grab grid, the transfers and the end scan from that INTER. The script then runs `laundry scene check` and shuts the fake controller down. Check what it printed for the move from the jogged poses. `./rebake.sh poses` (or any other `plan bake` target) runs just that part.
+4. Re-record HOME or DROP only if the bucket is now in their way.
+5. Collect new baselines (`laundry baseline collect --archive`), because the scan now starts from the new INTER. Commit `config.py`, `scan_plans/` and `baseline_scans/` together.
 
 **Padding:**
 

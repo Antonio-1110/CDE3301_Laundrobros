@@ -213,7 +213,7 @@ def _stroke(duration=2.0, count=7):
 
     for t, si, dsi, ddsi in zip(times, s, ds, dds):
         point = JointTrajectoryPoint()
-        point.positions = list(np.array(config.INTER) + si * delta)
+        point.positions = list(np.array(config.INTER_RECORDED) + si * delta)
         point.velocities = list(dsi * delta)
         point.accelerations = list(ddsi * delta)
         nanoseconds = int(round(t * 1e9))
@@ -275,6 +275,6 @@ def test_twist_too_fast_for_j7_slows_the_whole_stroke():
     assert times[-1] > 0.5
     assert np.abs(v[:, 6]).max() <= config.JOINT7_MAX_VELOCITY_RAD_S + 1e-9
     # Same path, only slower.
-    assert q[-1, 6] - config.INTER[6] == pytest.approx(
+    assert q[-1, 6] - config.INTER_RECORDED[6] == pytest.approx(
         math.radians(150.0) + 0.001
     )

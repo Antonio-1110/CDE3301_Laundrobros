@@ -496,6 +496,46 @@ def _bake(arm, depth_m, rings, max_velocity_rad_s, log):
     )
 
 
+# A plan whose pivot is further than this from the current INTER's
+# (metres / degrees of tool axis) was baked from another INTER.
+PIVOT_TOLERANCE_M = 0.005
+PIVOT_TOLERANCE_DEG = 1.0
+
+
+def inter_mismatch(arm, plan):
+    """
+    Return why the plan was baked from another INTER, or None.
+
+    The pivot is INTER's flange moved depth_m along its tool axis
+    (forward kinematics, so independent of where the arm is). Once
+    INTER changes - derived from a moved bucket, or re-recorded - the
+    strokes end at the new pivot, not the plan's.
+    """
+    fk = arm.compute_fk(config.get_named_pose('inter'))
+
+    if fk is None:
+        return None
+
+    position, quaternion = fk
+    tool_z = Rotation.from_quat(quaternion).as_matrix()[:, 2]
+    pivot = position + plan.depth_m * tool_z
+
+    distance = float(np.linalg.norm(pivot - np.asarray(plan.pivot)))
+    angle = float(np.degrees(np.arccos(np.clip(
+        tool_z @ np.asarray(plan.tool_z), -1.0, 1.0
+    ))))
+
+    if distance <= PIVOT_TOLERANCE_M and angle <= PIVOT_TOLERANCE_DEG:
+        return None
+
+    return (
+        f'The end scan was baked from another INTER: its pivot is '
+        f'{distance * 100:.1f} cm and {angle:.1f} deg from the current '
+        f"INTER's. Re-bake: laundry plan bake endcap --depth "
+        f'{plan.depth_m:.3f}'
+    )
+
+
 def run_plan(arm, plan, depth_m, time_scale=1.0):
     """
     Replay a baked end scan from wherever the strokes left the arm.
@@ -525,6 +565,11 @@ def run_plan(arm, plan, depth_m, time_scale=1.0):
 
     if stale:
         arm.get_logger().warning(stale)
+
+    moved = inter_mismatch(arm, plan)
+
+    if moved:
+        arm.get_logger().warning(moved)
 
     if abs(plan.padding_m - config.ENDCAP_PADDING_M) > 1e-9:
         arm.get_logger().warning(

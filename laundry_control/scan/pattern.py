@@ -16,8 +16,8 @@ import os
 
 import rclpy
 
+from .. import config
 from ..arm.transfers import go_to
-from ..config import BOTTOM
 
 # Defaults for every scan parameter, shared by scan() and the CLI so
 # the two can never drift apart. Baselines and detection scans MUST
@@ -869,10 +869,11 @@ def _bottom_detour(
     """
     # Entry: sweep to the side OPPOSITE nominal_end_angle,
     # relative to BOTTOM's own reference angle.
-    entry_joints = list(BOTTOM)
+    bottom = config.get_named_pose('bottom')
+    entry_joints = list(bottom)
 
     entry_joints[6] = (
-        BOTTOM[6]
+        bottom[6]
         + math.radians(-phase_sign * half_sweep)
     )
 

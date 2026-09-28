@@ -192,7 +192,7 @@ def _named_moves_through_stub(monkeypatch):
 
 
 def _sequence(arm):
-    names = {tuple(config.INTER): 'INTER', tuple(config.DROP): 'DROP'}
+    names = {tuple(config.get_named_pose('inter')): 'INTER', tuple(config.DROP): 'DROP'}
     return [
         names.get(value, 'POSE') if kind == 'joints'
         else ('POSE' if kind == 'pose' else value)

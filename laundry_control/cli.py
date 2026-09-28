@@ -587,11 +587,11 @@ def cmd_check_flange(args):
 
 
 def cmd_plan(args):
-    """Run `laundry plan bake [endcap|transfers|retrieve|all]`."""
+    """Run `laundry plan bake [poses|endcap|transfers|retrieve|all]`."""
     import socket
 
     from . import config
-    from .arm import transfers
+    from .arm import bucket_poses, transfers
     from .grasp import retrieve_grid
     from .scan import endcap
 
@@ -599,6 +599,43 @@ def cmd_plan(args):
     status = 0
 
     with _RosSession(args=args) as arm:
+        if args.which in ('poses', 'all'):
+            # First: everything else is baked from INTER.
+            print(
+                'Deriving INTER and BOTTOM from the bucket '
+                '(config.BUCKET_POSES)...'
+            )
+            poses, failures = bucket_poses.solve(arm, log=print)
+
+            if poses:
+                # Keep a previously derived pose that failed this time
+                # out, rather than falling back to the recorded one.
+                kept = {
+                    name: joints
+                    for name, joints in config.derived_bucket_poses().items()
+                    if name in failures
+                }
+                bucket_poses.save(
+                    dict(kept, **poses), baked_on=socket.gethostname()
+                )
+                print(f'Saved {bucket_poses.plan_path()}')
+
+            if failures:
+                print(
+                    'Not derived: ' + ', '.join(n.upper() for n in failures)
+                    + '. Check config.OBSTACLES and config.BUCKET_POSES.',
+                    file=sys.stderr,
+                )
+                status = 1
+
+                if args.which == 'all' and 'inter' in failures:
+                    print(
+                        'Not baking the rest: it would be baked from an INTER '
+                        'that does not fit the bucket.',
+                        file=sys.stderr,
+                    )
+                    return status
+
         if args.which in ('retrieve', 'all'):
             print('Solving the grab grid (config.RETRIEVE_GRID)...')
             grabs, misses = retrieve_grid.solve(arm, log=print)
@@ -813,7 +850,30 @@ def cmd_scene(args):
 
         problems = 0
 
-        print('\nRecorded poses (arm link padding as live):')
+        from .arm import bucket_poses
+
+        print('\nINTER and BOTTOM:')
+
+        for name, where in bucket_poses.status().items():
+            print(f'  {name:<11} {where}')
+
+        if config.derived_bucket_poses():
+            stale = scene.stale_plan_message(
+                bucket_poses.baked_scene(), '  bucket_poses.yaml',
+                'laundry plan bake',
+            )
+
+            if stale:
+                problems += 1
+                print(stale)
+
+            changed = bucket_poses.spec_mismatch()
+
+            if changed:
+                problems += 1
+                print(f'  {changed}')
+
+        print('\nNamed poses (arm link padding as live):')
 
         for name, joints in config.named_poses().items():
             contacts = arm.state_contacts(joints)
@@ -836,8 +896,18 @@ def cmd_scene(args):
         if stale:
             print(stale)
 
+        moved = transfers.from_other_inter(routes)
+
         for name in transfers.transfer_targets():
             route = routes.get(name)
+
+            if name in moved:
+                print(
+                    f'  {name:<11} BAKED FROM ANOTHER INTER: not used; '
+                    're-bake: laundry plan bake transfers'
+                )
+                problems += 1
+                continue
 
             if route is None:
                 print(
@@ -912,6 +982,12 @@ def cmd_scene(args):
 
             if stale:
                 print(stale)
+
+            moved = endcap.inter_mismatch(arm, plan)
+
+            if moved:
+                problems += 1
+                print(f'  {moved}')
 
             if abs(plan.padding_m - config.ENDCAP_PADDING_M) > 1e-9:
                 problems += 1
@@ -1301,16 +1377,20 @@ def build_parser():
     bake = plan_actions.add_parser(
         'bake',
         help=(
-            'Solve, collision-check and save the end-scan trajectory and/or '
-            'the transfers from INTER to every named pose. MOVES THE ARM.'
+            'Solve, collision-check and save INTER/BOTTOM from the bucket, '
+            'the grab grid, the transfers from INTER to every named pose '
+            'and the end-scan trajectory. The end scan MOVES THE ARM.'
         ),
     )
     bake.add_argument(
-        'which', nargs='?', choices=('endcap', 'transfers', 'retrieve', 'all'),
+        'which', nargs='?',
+        choices=('poses', 'endcap', 'transfers', 'retrieve', 'all'),
         default='all',
         help=(
-            'What to bake (default: all). retrieve: solve the grab grid '
-            '(config.RETRIEVE_GRID) and bake routes to it.'
+            'What to bake (default: all, in the order poses, retrieve, '
+            'transfers, endcap). poses: derive INTER and BOTTOM from the '
+            'bucket (config.BUCKET_POSES); no motion. retrieve: solve the '
+            'grab grid (config.RETRIEVE_GRID) and bake routes to it.'
         ),
     )
     from .scan.pattern import DEFAULT_DEPTH_M

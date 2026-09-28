@@ -40,11 +40,11 @@ def test_named_poses_cover_every_recorded_pose():
 def test_get_named_pose_is_case_insensitive_and_copies():
     pose = config.get_named_pose('  InTeR ')
 
-    assert pose == config.INTER
+    assert pose == config.get_named_pose('inter')
 
     pose[0] = 99.0
 
-    assert config.INTER[0] != 99.0
+    assert config.get_named_pose('inter')[0] != 99.0
 
 
 def test_get_named_pose_lists_alternatives_on_typo():

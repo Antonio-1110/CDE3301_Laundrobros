@@ -36,15 +36,20 @@ HOME = [
     0.0,
 ]
 
-# The reference pose everything else is measured from: the scan
-# starts and ends here, and the ToF/gripper offsets below were
-# measured here. Forward kinematics at INTER (MoveIt fake
-# controller, same URDF as the real arm):
+# INTER, the reference pose everything else is measured from: the
+# scan starts and ends here, and the ToF/gripper offsets below were
+# measured here. These are the angles jogged by eye; once
+# `laundry plan bake poses` has run, INTER is instead derived from
+# the bucket (BUCKET_POSES below, scan_plans/bucket_poses.yaml), and
+# these only seed its IK - they pick the elbow posture. Always look
+# INTER up with get_named_pose('inter'), never from this list.
 #
-#   link7 local +Z = (0.01, -1.00, -0.01)  horizontal, along -Y:
-#                                           straight into the bucket
-#                                           along its axis
-#   link7 local +X = (-0.01, 0.01, -1.00)  straight DOWN - this is
+# Forward kinematics of these angles (same URDF as the real arm):
+#
+#   link7 local +Z = (0.00, -1.00, -0.00)  horizontal, along -Y:
+#                                           into the bucket, 7.8 deg
+#                                           off the modelled axis
+#   link7 local +X = (-0.01, 0.00, -1.00)  straight DOWN - this is
 #                                           the ToF boresight, so at
 #                                           INTER's J7 the sensor
 #                                           looks at the bucket floor
@@ -52,7 +57,7 @@ HOME = [
 # Older comments said "+Z points straight down at INTER"; it is the
 # sensor's +X that does. The scan's +/-75 deg J7 sweep is therefore
 # centred on the floor, which is why the ceiling is never seen.
-INTER = [
+INTER_RECORDED = [
     1.5105054378509521,
     1.5552058219909668,
     -2.4133317470550537,
@@ -62,12 +67,14 @@ INTER = [
     -2.70444223365,
 ]
 
-# Tilted-up pose used at maximum insertion depth so the wrist-
-# mounted sensor can see the closed end past the end effector (see
-# scan.pattern's BOTTOM detour). FK: local +Z tilts 42 deg up from
-# horizontal, and the boresight (+X) points down and toward the
+# BOTTOM: tilted-up pose used at maximum insertion depth so the
+# wrist-mounted sensor can see the closed end past the end effector
+# (see scan.pattern's BOTTOM detour). Jogged by eye; derived from the
+# bucket like INTER once baked, and then only an IK seed. FK: local
+# +Z tilts 42 deg up from horizontal (50.6 deg from the modelled
+# bucket axis), and the boresight (+X) points down and toward the
 # closed end, ~48 deg below horizontal.
-BOTTOM = [
+BOTTOM_RECORDED = [
     -0.6021117568016052,
     1.1247814893722534,
     -1.3280805349349976,
@@ -136,8 +143,8 @@ RETRIEVE_3 = [
 
 _POSE_NAMES = (
     'HOME',
-    'INTER',
-    'BOTTOM',
+    'INTER_RECORDED',
+    'BOTTOM_RECORDED',
     'DROP',
     'RETRIEVE_0',
     'RETRIEVE_1',
@@ -146,15 +153,26 @@ _POSE_NAMES = (
 )
 
 
+def recorded_poses():
+    """Return the hand-recorded poses above as {lower-case name: joints}."""
+    return {
+        name.lower().removesuffix('_recorded'): list(globals()[name])
+        for name in _POSE_NAMES
+    }
+
+
 def named_poses():
     """
     Return every named pose as {lower-case name: joint list}.
 
-    The recorded poses above, plus the generated grab_NN poses (the
+    The recorded poses above, with INTER and BOTTOM replaced by the
+    ones derived from the bucket (scan_plans/bucket_poses.yaml) if
+    they have been baked, plus the generated grab_NN poses (the
     approach pose above each grab point) from
     scan_plans/retrieve.yaml, if it has been baked.
     """
-    poses = {name.lower(): list(globals()[name]) for name in _POSE_NAMES}
+    poses = recorded_poses()
+    poses.update(derived_bucket_poses())
     poses.update(generated_grab_poses())
 
     return poses
@@ -180,6 +198,29 @@ def generated_grab_poses():
     return {
         grab['name']: list(grab['approach'])
         for grab in document.get('grabs', [])
+    }
+
+
+def bucket_poses_path():
+    """Return <repo>/scan_plans/bucket_poses.yaml (see arm/bucket_poses.py)."""
+    return os.path.join(repo_root(), 'scan_plans', 'bucket_poses.yaml')
+
+
+def derived_bucket_poses():
+    """Return {inter/bottom: joints} derived from the bucket, or {}."""
+    path = bucket_poses_path()
+
+    if not os.path.isfile(path):
+        return {}
+
+    import yaml
+
+    with open(path) as handle:
+        document = yaml.safe_load(handle) or {}
+
+    return {
+        name: list(pose['joints'])
+        for name, pose in document.get('poses', {}).items()
     }
 
 
@@ -264,6 +305,50 @@ RETRIEVE_GRID = {
 DETECTED_GRAB_MAX_ANGLE_DEG = 90.0
 
 # =============================================================
+# INTER AND BOTTOM, FROM THE BUCKET
+#
+# Where INTER and BOTTOM sit relative to the bucket of OBSTACLES, so
+# that moving the bucket moves them too. `laundry plan bake poses`
+# (the first step of `laundry plan bake`) solves their joint angles
+# by IK in the configured bucket - seeded from INTER_RECORDED /
+# BOTTOM_RECORDED, so the arm keeps the elbow posture those were
+# jogged in - and saves them to scan_plans/bucket_poses.yaml. Until
+# that file exists, the recorded angles are used as they are.
+#
+#   inter:
+#     The flange on the bucket axis, standoff_m outside the mouth
+#     plane; tool +Z straight down the axis into the bucket, the ToF
+#     boresight (+X) at the floor.
+#     standoff_m:  0.054 is where the recorded INTER's flange is.
+#
+#   bottom:
+#     The flange depth_m in from INTER along the axis - the deepest
+#     stroke of the scan (scan.pattern.DEFAULT_DEPTH_M) - with the
+#     tool tilted up by tilt_deg from the axis, the boresight
+#     leaning down toward the closed end (the end scan's
+#     alpha = tilt_deg, phi = 0 pose, scan/endcap.py).
+#     tilt_deg:    the recorded BOTTOM is 50.6 deg from the modelled
+#                  axis, but 2.3 cm above it; on the axis, 50 deg puts
+#                  link3 against the rim with 3 cm padding (fake
+#                  controller, 2026-09-28). 45 deg is the reachable
+#                  tilt closest to the recorded posture (at most 6.4
+#                  deg per joint); 30-40 deg also solve.
+#
+# Derived poses are only as good as OBSTACLES: settle the bucket pose
+# (`laundry scene fit`, a tape measure) before baking them.
+# =============================================================
+
+BUCKET_POSES = {
+    'inter': {
+        'standoff_m': 0.054,
+    },
+    'bottom': {
+        'depth_m': 0.42,
+        'tilt_deg': 45.0,
+    },
+}
+
+# =============================================================
 # FRAMES AND MOVEIT
 # =============================================================
 
@@ -342,14 +427,19 @@ TRAJECTORY_CONTROLLER_ACTION = '/xarm7_traj_controller/follow_joint_trajectory'
 # AFTER MOVING THE BUCKET OR TABLE:
 #
 #   1. Edit its xyz/rpy below. `laundry scene check` shows the new
-#      scene against every recorded pose and baked route without
+#      scene against every named pose and baked route without
 #      moving the arm (run it with the fake controller up, too).
-#   2. Re-record any recorded pose (INTER, RETRIEVE_n, ...) that the
-#      physical move invalidated.
-#   3. `laundry plan bake` and commit scan_plans/. Baked routes
-#      record the scene they were baked against; replaying one baked
-#      against a different scene warns, and one that now collides is
-#      refused.
+#   2. `laundry plan bake` (fake controller) and commit scan_plans/.
+#      It derives INTER and BOTTOM from the new bucket pose
+#      (BUCKET_POSES), then bakes everything else from that INTER.
+#      Baked plans record the scene they were baked against;
+#      replaying one baked against a different scene warns, one that
+#      now collides is refused, and transfers baked from another
+#      INTER are not used.
+#   3. Re-record HOME or DROP only if the move put the bucket in
+#      their way.
+#   4. Collect new baselines (`laundry baseline collect --archive`):
+#      the scan runs from the new INTER.
 #
 # The mesh file is under meshes/. allowed_links lists robot links
 # allowed to touch the object (link_base rests on the table).
