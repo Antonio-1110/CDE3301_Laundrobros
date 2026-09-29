@@ -491,11 +491,19 @@ ENDCAP_PADDING_M = 0.01
 # mesh (3-6 s) - so it stays fixed at runtime.
 GRIPPER_PADDING_M = 0.0
 
-# Extra gripper clearance the routes that LEAVE the bucket (INTER <->
-# HOME/DROP) are baked with, so the gripper clears the bucket mouth by
-# at least this much on its way out, although the live check does not
-# require it.
-BAKE_GRIPPER_CLEARANCE_M = 0.01
+# Gripper padding each baked route (arm/transfers.py) is solved with,
+# in place of GRIPPER_PADDING_M. The routes that LEAVE the bucket
+# (INTER -> HOME/DROP) get extra, so the gripper clears the bucket
+# mouth by at least this much on its way out, although the live check
+# does not require it. Routes into the bucket (BOTTOM, grab_NN) end
+# with the gripper at the floor on purpose, so they are left out.
+# Re-bake after changing a value (`laundry plan bake transfers`).
+ROUTE_GRIPPER_CLEARANCE_M = {
+    'home': 0.01,
+    # Laundry hanging from the gripper swings out on the way to DROP;
+    # keep it well clear of the rim so it does not snag (2026-09-29).
+    'drop': 0.10,
+}
 
 # Baked routes (arm/transfers.py) that are solved and replayed with a
 # smaller arm-link padding than OBSTACLE_PADDING_M, like the end scan.
@@ -516,6 +524,23 @@ JOINT_NAMES = [
     'joint6',
     'joint7',
 ]
+
+# Joint position limits (radians), from xarm_description/urdf/xarm7/
+# xarm7.urdf.xacro. MoveIt's state-validity check does not reject
+# states outside them, so a baked route could leave them: on
+# 2026-09-29 an INTER -> DROP via had J2 at 125 deg (limit 120) and
+# the arm stopped with C23 "Joint Angle Exceed Limit". Every state
+# checked by XArm7Controller.state_is_valid must also be
+# JOINT_LIMIT_MARGIN_RAD inside these.
+JOINT_LOWER_LIMITS_RAD = [
+    -2.0 * math.pi, -2.059, -2.0 * math.pi, -0.19198,
+    -2.0 * math.pi, -1.69297, -2.0 * math.pi,
+]
+JOINT_UPPER_LIMITS_RAD = [
+    2.0 * math.pi, 2.0944, 2.0 * math.pi, 3.927,
+    2.0 * math.pi, math.pi, 2.0 * math.pi,
+]
+JOINT_LIMIT_MARGIN_RAD = math.radians(2.0)
 
 # Planning pipelines for joint-space moves.
 #

@@ -277,7 +277,7 @@ The bucket and table are MoveIt **world objects**, not robot links. `arm/scene.p
 
 - **Arm links (link1–link7): 3 cm** (`config.OBSTACLE_PADDING_M`), for everything: the planner, Cartesian strokes, and the straight and baked moves. The exceptions are the end scan (1 cm, `config.ENDCAP_PADDING_M`) and the route to BOTTOM (2 cm, `config.ROUTE_ARM_PADDING_M`), whose tilted tool brings the elbow to the rim. Each is baked and replayed under its own padding.
 - **Gripper: 0 cm** (`config.GRIPPER_PADDING_M`), because it works inside the bucket on purpose: the grabs put it within 2–3 cm of the floor.
-- **Routes that leave the bucket** (to HOME and DROP) are baked with an extra 1 cm on the gripper (`config.BAKE_GRIPPER_CLEARANCE_M`), so it clears the bucket mouth on the way out.
+- **Routes that leave the bucket** (to HOME and DROP) are baked with extra gripper padding set per route (`config.ROUTE_GRIPPER_CLEARANCE_M`: 1 cm for HOME, 10 cm for DROP), so it clears the bucket mouth on the way out.
 
 ## Frames and offsets
 

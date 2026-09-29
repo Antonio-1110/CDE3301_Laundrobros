@@ -60,6 +60,16 @@ def densify(waypoints, step_rad=DEFAULT_CHECK_STEP_RAD):
     return np.array(out)
 
 
+def within_joint_limits(joints, lower, upper, margin_rad=0.0):
+    """Return True if every joint is at least margin_rad inside [lower, upper]."""
+    joints = np.asarray(joints, dtype=np.float64)
+
+    return bool(
+        np.all(joints >= np.asarray(lower) + margin_rad)
+        and np.all(joints <= np.asarray(upper) - margin_rad)
+    )
+
+
 def split_at_reversals(waypoints):
     """
     Return index ranges [(i0, i1), ...] of monotonic stretches of a path.

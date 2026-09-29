@@ -75,13 +75,6 @@ def transfer_targets():
     return TRANSFER_TARGETS + tuple(config.generated_grab_poses())
 
 
-# Targets outside the bucket. Their routes are baked with extra gripper
-# clearance (config.BAKE_GRIPPER_CLEARANCE_M) on top of the live
-# padding, since nothing on the way there needs the gripper close to
-# the bucket. Routes into it (BOTTOM, grab_NN) end with the gripper
-# at the floor on purpose, so they are baked at the live padding.
-OUTSIDE_TARGETS = ('home', 'drop')
-
 # Joint-travel weights for choosing a route: J1 and J4-J7 twist the
 # cables running down the arm, so their travel costs more.
 TRAVEL_WEIGHTS = np.array([2.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0])
@@ -294,8 +287,7 @@ def bake(arm, targets=None, log=print):
 
     Returns ({target: [joint waypoints]}, {target: gripper clearance
     used, metres}, {target: reason it failed}). Routes to
-    OUTSIDE_TARGETS are found with the gripper padded by
-    config.BAKE_GRIPPER_CLEARANCE_M; the rest at the live padding.
+    Gripper padding is expected_gripper_clearance(target).
     Arm links get route_arm_padding(target).
     """
     from . import scene
@@ -462,8 +454,7 @@ def baked_scene(path=None):
 def expected_gripper_clearance(name):
     """Return the gripper padding a route to `name` should be baked with."""
     return float(
-        config.BAKE_GRIPPER_CLEARANCE_M if name in OUTSIDE_TARGETS
-        else config.GRIPPER_PADDING_M
+        config.ROUTE_GRIPPER_CLEARANCE_M.get(name, config.GRIPPER_PADDING_M)
     )
 
 
