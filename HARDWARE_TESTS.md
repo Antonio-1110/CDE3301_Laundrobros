@@ -137,15 +137,16 @@ laundry gripper close && laundry gripper open && laundry gripper 80
   - open/close go through `gripper_node`'s services.
   - `ANGLE` drives the servo directly. The GPIO library is now loaded on first use rather than at import, so this is the first real check of that change.
 
-**6b. The claw holds when closed.** `gripper_node` now keeps driving the servo after `close`. Close the claw on a rolled towel, then try to pull the towel out by hand:
+**6b. The claw holds when closed.** `gripper_node` stops the servo's pulses 0.7 s after `close`, as it did originally. On 2026-09-29 the rig showed that driving it continuously (with `hold_closed:=true`) made the closed claw shake and grip worse, because the Pi's PWM is software-timed. Close the claw on a rolled towel, then try to pull the towel out by hand:
 
 ```bash
 laundry gripper close
 ```
 
-Wait 30 s, then feel whether the servo is warm, and run `laundry gripper open`.
+Wait 30 s, then run `laundry gripper open`.
 
-- **Paste back:** whether the claw resisted the pull (before this change it went limp 0.7 s after closing), whether the servo buzzes or gets hot while holding, and whether it opens afterwards.
+- **Paste back:** whether the claw resisted the pull, and whether it opens afterwards.
+- **If it gives way:** the servo needs pulses to hold. Relaunch the bring-up with `gripper_node` set to `hold_closed:=true`, preferably after moving the servo to hardware-timed pulses, such as the Pi 5's PWM hardware or a PCA9685 board.
 
 ## C. End scan and scanning
 

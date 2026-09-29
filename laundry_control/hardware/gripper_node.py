@@ -12,9 +12,10 @@ Services (std_srvs/Trigger):
     open_gripper  - move the servo to the `open_angle_deg` param,
                     then stop driving it.
     close_gripper - move the servo to the `close_angle_deg` param,
-                    and KEEP driving it, so the claw holds what it
-                    grabbed until the next open (see servo.py). The
-                    servo is released when the node shuts down.
+                    then stop driving it too - unless the
+                    `hold_closed` param is true, which keeps driving
+                    it until the next open (see servo.py, HOLDING).
+                    The servo is released when the node shuts down.
 
 Which raw servo angle actually opens/closes the physical claw
 depends on how it's linked to the servo horn - the defaults
@@ -44,6 +45,10 @@ class GripperNode(Node):
 
         self.declare_parameter('open_angle_deg', GRIPPER_OPEN_ANGLE_DEG)
         self.declare_parameter('close_angle_deg', GRIPPER_CLOSE_ANGLE_DEG)
+        # Off: on the rig, holding with the Pi's software-timed PWM
+        # made the closed claw shake and grip worse (2026-09-29) than
+        # stopping the pulses, which it holds without.
+        self.declare_parameter('hold_closed', False)
 
         self._open_srv = self.create_service(
             Trigger, OPEN_SERVICE, self._open_callback
@@ -66,7 +71,9 @@ class GripperNode(Node):
 
     def _close_callback(self, request, response):
         return self._move_to(
-            self.get_parameter('close_angle_deg').value, response, hold=True
+            self.get_parameter('close_angle_deg').value,
+            response,
+            hold=bool(self.get_parameter('hold_closed').value),
         )
 
     def _move_to(self, angle, response, hold):

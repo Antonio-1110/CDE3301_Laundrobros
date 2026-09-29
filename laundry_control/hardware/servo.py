@@ -31,13 +31,16 @@ instead of a crashed node.
 
 HOLDING
 -------
-A hobby servo only holds its position while it receives pulses: with
-PWM stopped it goes limp, and a claw closed on laundry springs open
-under the load on the way to DROP. ServoDriver therefore keeps
-driving the servo after a move with hold=True (gripper_node does this
-for close), and stops only after hold=False moves (open - holding an
-unloaded servo just makes it jitter and warm up). The driver stays
-alive in gripper_node, so the hold lasts until the next command.
+ServoDriver can keep driving the servo after a move (hold=True) until
+the next move or release(), or stop the pulses (hold=False). Some
+hobby servos go limp without pulses; the rig's does not - it held the
+claw closed with the pulses stopped. Holding, on the other hand, made
+it shake and grip worse (2026-09-29): lgpio's PWM is software timed
+too (tx_pwm, from a C thread), so on the loaded Pi pulses come out
+slightly off and the servo keeps chasing them. gripper_node therefore
+stops the pulses after close as well, by default; its `hold_closed`
+parameter turns holding back on (worth it with hardware-timed
+pulses).
 
 HARDWARE ONLY. From the terminal: `laundry gripper <ANGLE>` (a
 one-shot process, so it never holds).

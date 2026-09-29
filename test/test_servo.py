@@ -60,6 +60,56 @@ def test_close_frees_the_pin():
     assert not driver.holding
 
 
+class _Parameter:
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _GripperNode:
+    """gripper_node's service logic over a fake servo, no ROS graph."""
+
+    def __init__(self, hold_closed=None):
+        from laundry_control.hardware.gripper_node import GripperNode
+
+        self._close_callback = GripperNode._close_callback.__get__(self)
+        self._open_callback = GripperNode._open_callback.__get__(self)
+        self._move_to = GripperNode._move_to.__get__(self)
+        self._driver, self.made = _driver()
+        self.params = {'open_angle_deg': 55.0, 'close_angle_deg': 100.0,
+                       'hold_closed': False}
+
+        if hold_closed is not None:
+            self.params['hold_closed'] = hold_closed
+
+    def get_parameter(self, name):
+        return _Parameter(self.params[name])
+
+
+def test_close_stops_the_pulses_by_default():
+    from std_srvs.srv import Trigger
+
+    node = _GripperNode()
+
+    response = node._close_callback(Trigger.Request(), Trigger.Response())
+
+    assert response.success
+    assert node.made[0].angles == [100.0]
+    assert not node._driver.holding
+
+
+def test_hold_closed_keeps_driving_until_open():
+    from std_srvs.srv import Trigger
+
+    node = _GripperNode(hold_closed=True)
+
+    node._close_callback(Trigger.Request(), Trigger.Response())
+    assert node._driver.holding
+
+    node._open_callback(Trigger.Request(), Trigger.Response())
+    assert not node._driver.holding
+
+
 def test_out_of_range_angle_never_touches_the_servo():
     driver, made = _driver()
 
