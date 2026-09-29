@@ -195,3 +195,55 @@ def test_hardware_servo_writes_the_pulse_width(tmp_path):
     assert read('enable') == 0 and not driver.holding
     driver.move(100.0, hold=True)
     assert read('enable') == 1 and driver.holding
+
+
+def test_first_move_runs_at_real_time_priority_then_returns(monkeypatch):
+    from laundry_control.hardware import gripper_node
+    from std_srvs.srv import Trigger
+
+    calls = []
+    monkeypatch.setattr(
+        gripper_node, 'enter_realtime',
+        lambda priority: calls.append(('enter', priority)),
+    )
+    monkeypatch.setattr(
+        gripper_node, 'leave_realtime', lambda: calls.append(('leave',)),
+    )
+
+    node = _GripperNode()
+    node._driver = None
+    node._enter_realtime = gripper_node.GripperNode._enter_realtime.__get__(
+        node
+    )
+    node.params['rt_priority'] = 60
+    node.get_logger = lambda: type(
+        'Logger', (), {'info': print, 'warning': print}
+    )()
+
+    import laundry_control.hardware.servo as servo_module
+
+    made = []
+
+    def driver():
+        made.append(ServoDriver(make_servo=_FakeServo, settle_sec=0.0))
+        return made[-1]
+
+    monkeypatch.setattr(servo_module, 'ServoDriver', driver)
+
+    node._close_callback(Trigger.Request(), Trigger.Response())
+    node._open_callback(Trigger.Request(), Trigger.Response())
+
+    # Only around the first move, and back to normal after it.
+    assert calls == [('enter', 60), ('leave',)]
+
+
+def test_real_time_refused_is_reported_not_fatal():
+    from laundry_control.hardware import gripper_node
+
+    reason = gripper_node.enter_realtime(60)
+
+    if reason is None:
+        gripper_node.leave_realtime()
+        pytest.skip('this user may use real-time priority')
+
+    assert 'not permitted' in reason.lower()

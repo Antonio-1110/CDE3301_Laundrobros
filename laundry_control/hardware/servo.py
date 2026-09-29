@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""
+r"""
 Drive the gripper's hobby servo from Raspberry Pi GPIO.
 
 HARDWARE PWM (preferred)
@@ -12,6 +12,21 @@ hardware - exact whatever the CPU load. HardwarePwmServo drives it
 through the kernel's sysfs PWM interface. Otherwise the lgpio
 software PWM below is used, which on a loaded Pi makes the servo
 jitter and miss moves (2026-09-29).
+
+REAL-TIME PRIORITY
+------------------
+Software pulses are only as even as lgpio's pulse thread is prompt,
+and on the busy Pi other processes delay it. gripper_node therefore
+puts itself on real-time (SCHED_FIFO) scheduling just before the
+first move, when lgpio starts that thread, which inherits it; the node's
+own thread then goes back to normal (param rt_priority, 0 = off).
+Linux only allows this to users with a real-time allowance; without
+one gripper_node warns and runs as before. To allow it (once, then
+log out and back in; `ulimit -r` should then print 99):
+
+    sudo groupadd -f realtime && sudo usermod -aG realtime $USER
+    printf '@realtime - rtprio 99\n@realtime - memlock unlimited\n' \
+        | sudo tee /etc/security/limits.d/99-realtime.conf
 
 SOFTWARE PWM (fallback)
 -----------------------
