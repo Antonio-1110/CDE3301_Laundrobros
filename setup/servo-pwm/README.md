@@ -9,10 +9,16 @@ pulses whatever the CPU is doing. This sets it up. Once it's done,
 falls back to software PWM when it isn't set up.
 
 It needs sudo and one reboot. The servo stays on GPIO 18, so nothing
-is rewired. It works the same on Ubuntu 24.04 (this rig) and on Raspberry
-Pi OS: both boot through the Pi firmware, which reads
-`/boot/firmware/config.txt` and its overlays, and Ubuntu's `raspi` kernel
-includes the RP1 PWM driver (`pwm-rp1`).
+is rewired.
+
+> **Does not work on Ubuntu 24.04's 6.8 `raspi` kernel (tested 2026-09-29).**
+> The overlay switches the PWM block on and the channel exports, but the
+> RP1 PWM clock is not provided: every period is refused with an I/O
+> error, and the kernel logs `rpi-pwm 1f00098000.pwm: failed to get clock
+> rate`. While the overlay is active, GPIO 18 belongs to the PWM block, so
+> the software-PWM fallback can't drive the servo either: **undo it** (below).
+> Raspberry Pi OS's kernel provides this clock. On Ubuntu, use a PCA9685
+> servo board instead.
 
 ## 1. Switch on the PWM hardware on GPIO 18
 
