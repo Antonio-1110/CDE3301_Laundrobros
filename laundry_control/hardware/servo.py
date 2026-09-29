@@ -3,6 +3,18 @@
 """
 Drive the gripper's hobby servo from Raspberry Pi GPIO.
 
+HARDWARE PWM (preferred)
+------------------------
+When the Pi 5's RP1 PWM channel on GPIO 18 has been set up (see
+setup/servo-pwm/README.md: a config.txt overlay plus a boot service
+that exports the channel to this user), the pulses come from the PWM
+hardware - exact whatever the CPU load. HardwarePwmServo drives it
+through the kernel's sysfs PWM interface. Otherwise the lgpio
+software PWM below is used, which on a loaded Pi makes the servo
+jitter and miss moves (2026-09-29).
+
+SOFTWARE PWM (fallback)
+-----------------------
 Uses the lgpio pin factory instead of gpiozero's default
 (RPi.GPIO/software) factory: the default factory times PWM pulses
 from a Python thread, which is subject to OS scheduling jitter -
@@ -89,7 +101,100 @@ def validate_angle(angle):
         )
 
 
+# The RP1 PWM block whose channel 2 is GPIO 18 on the Pi 5, as its
+# device path ends; and the servo's pulse period (50 Hz).
+RP1_PWM_DEVICE = '1f00098000.pwm'
+SERVO_PWM_CHANNEL = 2
+SERVO_PERIOD_NS = 20_000_000
+PWM_CLASS_DIR = '/sys/class/pwm'
+
+
+def hardware_pwm_channel(pwm_class_dir=PWM_CLASS_DIR):
+    """
+    Return the sysfs directory of the servo's hardware PWM channel, or None.
+
+    Only a channel that is exported and writable counts (the boot
+    service in setup/servo-pwm does both), so without that setup the
+    servo falls back to software PWM instead of failing.
+    """
+    import glob
+    import os
+
+    for chip in sorted(glob.glob(os.path.join(pwm_class_dir, 'pwmchip*'))):
+        device = os.path.realpath(os.path.join(chip, 'device'))
+
+        if not device.endswith(RP1_PWM_DEVICE):
+            continue
+
+        channel = os.path.join(chip, f'pwm{SERVO_PWM_CHANNEL}')
+
+        if all(
+            os.access(os.path.join(channel, name), os.W_OK)
+            for name in ('period', 'duty_cycle', 'enable')
+        ):
+            return channel
+
+    return None
+
+
+class HardwarePwmServo:
+    """
+    The gpiozero AngularServo surface ServoDriver uses, on hardware PWM.
+
+    angle = ... sets the pulse width and turns the output on; value is
+    None while it is off (no pulses), as with gpiozero; detach() turns
+    it off.
+    """
+
+    def __init__(self, channel_dir):
+        self._dir = channel_dir
+        self.value = None
+        self._angle = None
+
+        self._write('enable', 0)
+        self._write('period', SERVO_PERIOD_NS)
+
+    def _write(self, name, value):
+        import os
+
+        with open(os.path.join(self._dir, name), 'w') as handle:
+            handle.write(str(int(value)))
+
+    @property
+    def angle(self):
+        """Return the last commanded position in degrees, or None."""
+        return self._angle
+
+    @angle.setter
+    def angle(self, angle):
+        span = SERVO_MAX_ANGLE_DEG - SERVO_MIN_ANGLE_DEG
+        fraction = (angle - SERVO_MIN_ANGLE_DEG) / span
+        pulse_s = SERVO_MIN_PULSE_WIDTH_S + fraction * (
+            SERVO_MAX_PULSE_WIDTH_S - SERVO_MIN_PULSE_WIDTH_S
+        )
+
+        self._write('duty_cycle', round(pulse_s * 1e9))
+        self._write('enable', 1)
+
+        self._angle = angle
+        self.value = 2.0 * fraction - 1.0
+
+    def detach(self):
+        """Stop the pulses."""
+        self._write('enable', 0)
+        self.value = None
+
+    def close(self):
+        """Stop the pulses (the channel stays exported for next time)."""
+        self.detach()
+
+
 def _make_servo():
+    channel = hardware_pwm_channel()
+
+    if channel is not None:
+        return HardwarePwmServo(channel)
+
     _ensure_pin_factory()
 
     from gpiozero import AngularServo

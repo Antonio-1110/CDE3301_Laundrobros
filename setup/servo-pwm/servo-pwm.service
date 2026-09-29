@@ -1,0 +1,12 @@
+[Unit]
+Description=Hardware PWM on GPIO 18 for the laundry gripper servo
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+# Replace cde3301a with the user that runs the bring-up.
+ExecStart=/usr/local/sbin/servo-pwm-setup.sh cde3301a
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

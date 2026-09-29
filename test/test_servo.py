@@ -132,3 +132,66 @@ def test_settle_time_is_how_long_pulses_go_out(monkeypatch):
     # The driver's own default (0 here), then the per-move override.
     assert slept == [0.0, 2.0]
     assert servo.SETTLE_SEC >= 1.5
+
+
+def _fake_pwm_class(tmp_path, device='1f00098000.pwm', exported=True):
+    """Build a /sys/class/pwm lookalike: one chip and, maybe, channel 2."""
+    platform = tmp_path / 'devices' / device
+    platform.mkdir(parents=True)
+    chip = tmp_path / 'class' / 'pwmchip3'
+    chip.mkdir(parents=True)
+    (chip / 'device').symlink_to(platform)
+
+    if exported:
+        channel = chip / 'pwm2'
+        channel.mkdir()
+        for name in ('period', 'duty_cycle', 'enable'):
+            (channel / name).write_text('0')
+
+    return str(tmp_path / 'class')
+
+
+def test_the_hardware_channel_is_found_only_when_set_up(tmp_path):
+    from laundry_control.hardware import servo
+
+    assert servo.hardware_pwm_channel(str(tmp_path / 'nothing')) is None
+
+    other = _fake_pwm_class(tmp_path / 'a', device='107d517a80.pwm')
+    assert servo.hardware_pwm_channel(other) is None
+
+    unexported = _fake_pwm_class(tmp_path / 'b', exported=False)
+    assert servo.hardware_pwm_channel(unexported) is None
+
+    ready = _fake_pwm_class(tmp_path / 'c')
+    assert servo.hardware_pwm_channel(ready).endswith('pwmchip3/pwm2')
+
+
+def test_hardware_servo_writes_the_pulse_width(tmp_path):
+    import os
+
+    from laundry_control.hardware import servo
+
+    channel = servo.hardware_pwm_channel(_fake_pwm_class(tmp_path))
+
+    def read(name):
+        with open(os.path.join(channel, name)) as handle:
+            return int(handle.read())
+
+    motor = servo.HardwarePwmServo(channel)
+    assert read('period') == 20_000_000 and read('enable') == 0
+
+    # 0.5-2.5 ms over 0-180 deg: 90 deg is 1.5 ms.
+    motor.angle = 90.0
+    assert read('duty_cycle') == 1_500_000 and read('enable') == 1
+    assert motor.value is not None
+
+    motor.detach()
+    assert read('enable') == 0 and motor.value is None
+
+    # ServoDriver works on it unchanged: close holds or releases.
+    driver = ServoDriver(make_servo=lambda: servo.HardwarePwmServo(channel),
+                         settle_sec=0.0)
+    driver.move(100.0)
+    assert read('enable') == 0 and not driver.holding
+    driver.move(100.0, hold=True)
+    assert read('enable') == 1 and driver.holding
