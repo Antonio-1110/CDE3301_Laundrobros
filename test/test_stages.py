@@ -135,8 +135,8 @@ def test_run_scan_restores_auto_naming_and_recording_when_scan_fails(
 
     assert recorder.cleared
     assert recorder.paths == [str(target), '']
-    # A scan that died with recording paused must not leave it so.
-    assert recorder.recording == [True]
+    # A scan that died while recording must not leave it on.
+    assert recorder.recording == [False]
 
 
 # ------------------------------------------------------------ grasp

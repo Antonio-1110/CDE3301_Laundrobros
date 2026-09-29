@@ -213,3 +213,69 @@ def test_paused_recording_ignores_readings():
     recorder._range_callback(_reading(9.99))
 
     assert len(recorder.recorded) == 1
+
+
+class _Publisher:
+
+    def __init__(self):
+        self.clouds = []
+
+    def publish(self, cloud):
+        self.clouds.append(cloud.width)
+
+
+class _CloudRecorder:
+    """The node's cloud publishing and clearing, over a fake publisher."""
+
+    _publish_point_cloud = ScanRecorderNode._publish_point_cloud
+    _clear_scan_callback = ScanRecorderNode._clear_scan_callback
+
+    def __init__(self):
+        self.now = 10.0
+        self.base_frame = 'link_base'
+        self.points_tcp_frame = []
+        self.points_base_frame = []
+        self.point_rays = []
+        self._pending = deque()
+        self._published_count = -1
+        self._point_cloud_pub = _Publisher()
+
+    def get_clock(self):
+        return _Clock(self)
+
+    def add_point(self):
+        from geometry_msgs.msg import PointStamped
+
+        point = PointStamped()
+        point.header.frame_id = 'link_base'
+        self.points_base_frame.append(point)
+
+
+def test_the_cloud_is_published_only_when_it_changes():
+    from std_srvs.srv import Trigger
+
+    recorder = _CloudRecorder()
+
+    # Startup: one empty cloud, then nothing while nothing changes.
+    recorder._publish_point_cloud()
+    recorder._publish_point_cloud()
+    assert recorder._point_cloud_pub.clouds == [0]
+
+    recorder.add_point()
+    recorder.add_point()
+    recorder._publish_point_cloud()
+    recorder._publish_point_cloud()
+    assert recorder._point_cloud_pub.clouds == [0, 2]
+
+    # A clear empties RViz too.
+    recorder._clear_scan_callback(Trigger.Request(), Trigger.Response())
+    recorder._publish_point_cloud()
+    assert recorder._point_cloud_pub.clouds == [0, 2, 0]
+
+
+def test_recording_is_off_until_a_scan_turns_it_on():
+    import inspect
+
+    source = inspect.getsource(ScanRecorderNode.__init__)
+
+    assert "self.declare_parameter('recording', False)" in source

@@ -312,7 +312,7 @@ def scan(
             return True
 
         arm.get_logger().error(
-            f"Could not {'resume' if on else 'pause'} scan_recorder_node's "
+            f"Could not {'start' if on else 'stop'} scan_recorder_node's "
             'recording (a bring-up started before the recorder had '
             "a 'recording' parameter? Restart it)."
         )

@@ -35,8 +35,14 @@ Services (std_srvs/Trigger):
     save_scan  - write accumulated points to the `csv_path` param.
     clear_scan - reset accumulated points (e.g. before a new scan).
 
-Parameter `recording` (default true): false ignores readings, so a
-scan can leave out the sensor's way into and out of the bucket.
+Parameter `recording` (default false): readings are only recorded
+while it is true, which a scan sets once the sensor is inside the
+bucket (scan.pattern) and clears afterwards - so the arm's other
+motions never pile points into the cloud. For a manual recording:
+`-p recording:=true`.
+
+The cloud (for RViz) is republished only when it changes; clear_scan
+publishes an empty one, so RViz drops the old scan too.
 
 If `csv_path` is left empty (the default), points are saved under
 `records_dir` (default: config.scan_records_dir(), the source tree's
@@ -108,10 +114,16 @@ class ScanRecorderNode(Node):
         self.declare_parameter('csv_path', '')
         self.declare_parameter('records_dir', '')
         self.declare_parameter('joint_state_topic', config.JOINT_STATE_TOPIC)
-        # False pauses recording: readings are ignored. The scan
-        # pauses it while the sensor enters and leaves the bucket
-        # (scan.pattern, entry_depth).
-        self.declare_parameter('recording', True)
+        # Readings are ignored unless this is true: a scan turns it on
+        # only while the sensor is inside the bucket (scan.pattern,
+        # entry_depth), and pipeline.run_scan turns it off after.
+        # Left on between scans, every motion of the arm piled points
+        # into the RViz cloud until the next scan cleared it.
+        self.declare_parameter('recording', False)
+
+        # Size of the cloud last published; -1 forces a publish (an
+        # empty cloud after a clear, so RViz drops the old one).
+        self._published_count = -1
 
         self.base_frame = self.get_parameter('base_frame').value
         self.flange_link = self.get_parameter('flange_link').value
@@ -395,8 +407,8 @@ class ScanRecorderNode(Node):
         )
 
     def _publish_point_cloud(self):
-
-        if not self.points_base_frame:
+        """Republish the cloud for RViz, only if it changed since last time."""
+        if len(self.points_base_frame) == self._published_count:
             return
 
         xyz = [
@@ -404,13 +416,17 @@ class ScanRecorderNode(Node):
             for p in self.points_base_frame
         ]
 
-        cloud = build_cloud(
-            frame_id=self.points_base_frame[-1].header.frame_id,
-            stamp=self.points_base_frame[-1].header.stamp,
-            xyz_points=xyz,
-        )
+        if self.points_base_frame:
+            frame_id = self.points_base_frame[-1].header.frame_id
+            stamp = self.points_base_frame[-1].header.stamp
+        else:
+            frame_id = self.base_frame
+            stamp = self.get_clock().now().to_msg()
+
+        cloud = build_cloud(frame_id=frame_id, stamp=stamp, xyz_points=xyz)
 
         self._point_cloud_pub.publish(cloud)
+        self._published_count = len(self.points_base_frame)
 
     def _save_scan_callback(self, request, response):
 
@@ -510,6 +526,9 @@ class ScanRecorderNode(Node):
         self.points_base_frame.clear()
         self.point_rays.clear()
         self._pending.clear()
+
+        # The next publish sends an empty cloud, clearing RViz too.
+        self._published_count = -1
 
         # clear_scan marks a scan boundary, so the TF tally starts
         # over with it - otherwise the next scan's accuracy report

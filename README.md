@@ -173,7 +173,7 @@ On the fake controller, Cartesian strokes are planned from the observed joint st
 
 ### Viewing scans in RViz
 
-The point cloud is published with `TRANSIENT_LOCAL` durability, so RViz opened late still shows it:
+The live ToF cloud ("ToF Scan Points") only fills during a scan. The recorder records only while a scan has the sensor inside the bucket, so moves, grabs and drops add nothing. The finished scan stays on screen until the next scan starts, or until you clear it with `ros2 service call /clear_scan std_srvs/srv/Trigger`. The cloud is republished only when it changes, with `TRANSIENT_LOCAL` durability, so RViz opened late still shows it:
 
 ```bash
 rviz2 -d install/laundry_control/share/laundry_control/rviz/scan_visualization.rviz

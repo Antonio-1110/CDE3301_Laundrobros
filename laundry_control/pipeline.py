@@ -81,13 +81,14 @@ def run_scan(arm, recorder, csv_path, scan_kwargs):
                 '    ros2 param set /scan_recorder_node csv_path ""'
             )
 
-        # The scan pauses recording on the way in and out; never
-        # leave it paused (a failed or interrupted scan would).
-        if not recorder.set_recording(True):
+        # The recorder records only during a scan; never leave it on
+        # (a failed or interrupted scan would), or every later motion
+        # piles points into the RViz cloud.
+        if not recorder.set_recording(False):
             print(
-                "WARNING: could not resume scan_recorder_node's "
-                'recording. Do it by hand before the next scan:\n'
-                '    ros2 param set /scan_recorder_node recording true'
+                "WARNING: could not stop scan_recorder_node's recording. "
+                'Do it by hand:\n'
+                '    ros2 param set /scan_recorder_node recording false'
             )
 
 

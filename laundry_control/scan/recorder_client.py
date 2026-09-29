@@ -131,10 +131,11 @@ class ScanRecorderClient:
 
     def set_recording(self, on, timeout_sec=5.0):
         """
-        Resume (True) or pause (False) the recorder's recording.
+        Start (True) or stop (False) the recorder's recording.
 
-        Callers that pause it must resume it afterwards (in a
-        finally): left paused, the next scan records nothing.
+        It is off except during a scan. Callers that start it must
+        stop it afterwards (in a finally, see pipeline.run_scan):
+        left on, every later arm motion piles points into the cloud.
         """
         return set_remote_string_param(
             self.arm,
