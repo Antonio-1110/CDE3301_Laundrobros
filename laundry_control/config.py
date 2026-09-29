@@ -280,10 +280,15 @@ def get_named_pose(name):
 RETRIEVE_GRID = {
     'depths_m': [0.40, 0.30, 0.20, 0.10],
     'floor_angles_deg': [0.0, -20.0, 20.0],
-    'heights_m': [0.02, 0.03, 0.04, 0.05, 0.06],
+    # Half-centimetre steps near the floor, and 0.5 cm gripper
+    # clearance (was 1 cm, whole-cm heights): grabs came out ~3 cm
+    # above the floor, which the rig confirmed by ruler (2026-09-29).
+    # Fake controller: 12/12 solve, median 2.0 cm (1 cm clearance:
+    # median 2.5; none: 1.5, but no margin for model error).
+    'heights_m': [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06],
     'tilts_deg': [0.0, 15.0, 30.0, 45.0, 60.0],
     'approach_m': 0.08,
-    'clearance_m': 0.01,
+    'clearance_m': 0.005,
 }
 
 # DETECTED items are grabbed the same way (IK over the item, straight
