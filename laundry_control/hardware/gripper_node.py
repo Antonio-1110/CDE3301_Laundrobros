@@ -35,6 +35,7 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 
 from .gripper_client import CLOSE_SERVICE, OPEN_SERVICE
+from .servo import SETTLE_SEC
 from ..config import GRIPPER_CLOSE_ANGLE_DEG, GRIPPER_OPEN_ANGLE_DEG
 
 
@@ -49,6 +50,9 @@ class GripperNode(Node):
         # made the closed claw shake and grip worse (2026-09-29) than
         # stopping the pulses, which it holds without.
         self.declare_parameter('hold_closed', False)
+        # Seconds each move keeps sending pulses before they stop (see
+        # servo.SETTLE_SEC); longer if the claw does not finish moving.
+        self.declare_parameter('settle_sec', SETTLE_SEC)
 
         self._open_srv = self.create_service(
             Trigger, OPEN_SERVICE, self._open_callback
@@ -87,7 +91,11 @@ class GripperNode(Node):
 
                 self._driver = ServoDriver()
 
-            self._driver.move(angle, hold=hold)
+            self._driver.move(
+                angle,
+                hold=hold,
+                settle_sec=float(self.get_parameter('settle_sec').value),
+            )
 
         except Exception as exc:
             response.success = False

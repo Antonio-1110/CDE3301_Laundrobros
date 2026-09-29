@@ -77,7 +77,7 @@ class _GripperNode:
         self._move_to = GripperNode._move_to.__get__(self)
         self._driver, self.made = _driver()
         self.params = {'open_angle_deg': 55.0, 'close_angle_deg': 100.0,
-                       'hold_closed': False}
+                       'hold_closed': False, 'settle_sec': 0.0}
 
         if hold_closed is not None:
             self.params['hold_closed'] = hold_closed
@@ -117,3 +117,18 @@ def test_out_of_range_angle_never_touches_the_servo():
         driver.move(400.0)
 
     assert made == []
+
+
+def test_settle_time_is_how_long_pulses_go_out(monkeypatch):
+    from laundry_control.hardware import servo
+
+    slept = []
+    monkeypatch.setattr(servo.time, 'sleep', slept.append)
+
+    driver, made = _driver()
+    driver.move(100.0)
+    driver.move(55.0, settle_sec=2.0)
+
+    # The driver's own default (0 here), then the per-move override.
+    assert slept == [0.0, 2.0]
+    assert servo.SETTLE_SEC >= 1.5

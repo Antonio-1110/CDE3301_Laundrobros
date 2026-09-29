@@ -56,8 +56,11 @@ from ..config import (
     SERVO_PIN,
 )
 
-# Give the servo enough time to reach the target before PWM stops.
-SETTLE_SEC = 0.7
+# How long a move keeps sending pulses (50 a second) before they stop,
+# so the servo has time to reach the target - against a load too.
+# 1.5 s, up from 0.7: at 0.7 the claw did not reliably finish its
+# moves on the rig (2026-09-29). gripper_node's settle_sec overrides.
+SETTLE_SEC = 1.5
 
 _pin_factory_ready = False
 
@@ -117,12 +120,13 @@ class ServoDriver:
         """Return True while PWM is being sent."""
         return self._servo is not None and self._servo.value is not None
 
-    def move(self, angle, hold=False):
+    def move(self, angle, hold=False, settle_sec=None):
         """
         Move to `angle` degrees and wait for it to get there.
 
-        hold=True keeps driving it afterwards (until the next move or
-        release()); hold=False stops the pulses.
+        Pulses go out for settle_sec (default: the driver's). hold=True
+        keeps driving it afterwards (until the next move or release());
+        hold=False stops the pulses then.
         """
         validate_angle(angle)
 
@@ -131,7 +135,7 @@ class ServoDriver:
 
         try:
             self._servo.angle = angle
-            time.sleep(self._settle_sec)
+            time.sleep(self._settle_sec if settle_sec is None else settle_sec)
 
         except BaseException:
             self._servo.detach()
