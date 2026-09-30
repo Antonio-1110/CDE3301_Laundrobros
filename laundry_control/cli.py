@@ -37,9 +37,12 @@ FULL AND QUICK SCANS
                             (but swings the arm low near the walls)
     --end-scan none         the QUICK scan: strokes only, no tilting
 
-Each has its own baselines (baseline_scans/ and baseline_scans_quick/),
-picked from --end-scan. `laundry run` defaults to the QUICK scan;
-every other command to the full one.
+Both are judged against the same full-scan baselines (baseline_scans/):
+a quick scan against their strokes alone (scan/segments.py). `laundry
+run` and `laundry clear` default to the QUICK scan, and when it finds
+nothing run the end scan on its own (straight in, end scan, straight
+out) before concluding the bucket is empty. Every other command
+defaults to the full scan.
 
 WHAT NEEDS WHAT
 ---------------
@@ -173,7 +176,7 @@ def _baseline_path(args):
     """Return --baseline, else the baseline set for this kind of scan."""
     from . import config
 
-    return args.baseline or config.baseline_dir(getattr(args, 'end_scan', None))
+    return args.baseline or config.baseline_dir()
 
 
 def _baselines_ready(args):
@@ -191,11 +194,9 @@ def _baselines_ready(args):
         return True
 
     print(
-        f'No baseline scans in {path} for this kind of scan '
-        f"(--end-scan {getattr(args, 'end_scan', None)}). Collect them "
-        'first, bucket empty:\n'
-        '    laundry baseline collect -- --end-scan '
-        f"{getattr(args, 'end_scan', None)}",
+        f'No baseline scans in {path}. Collect them first, bucket empty '
+        '(full scans; quick scans use their strokes):\n'
+        '    laundry baseline collect',
         file=sys.stderr,
     )
     return False
@@ -435,7 +436,12 @@ def cmd_detect(args):
     baseline = _baseline_path(args)
     params = _detect_params(args)
 
-    clusters, _surface = detect_scan(args.scan_csv, baseline, params)
+    from .scan.segments import for_end_scan
+
+    clusters, _surface = detect_scan(
+        args.scan_csv, baseline, params,
+        segments=for_end_scan(args.end_scan),
+    )
 
     if args.output:
         from .grasp.targets_io import save_targets
@@ -1122,6 +1128,9 @@ def cmd_clear(args):
     from .pipeline import run_clear
     from .scan.pattern import scan_kwargs_from_args
 
+    if not _baselines_ready(args):
+        return 2
+
     with _RosSession(args=args) as arm:
         ok = run_clear(
             arm,
@@ -1287,10 +1296,13 @@ def build_parser():
         '--end-scan', choices=('precession', 'none', 'bottom'),
         default='precession',
         help=(
-            "The kind of scan the CSV is, which picks its baselines: 'none' "
-            'for a quick scan (baseline_scans_quick/), else baseline_scans/.'
+            "The kind of scan the CSV is: 'none' for a quick scan (modelled "
+            "from the baselines' strokes alone), else a full scan."
         ),
     )
+    from .scan.pattern import add_quick_full_flags
+
+    add_quick_full_flags(detect)
     _add_detector_arguments(detect)
     detect.set_defaults(func=cmd_detect)
 
@@ -1487,8 +1499,9 @@ def build_parser():
     run = subparsers.add_parser(
         'run',
         help=(
-            'Full pipeline: scan -> detect -> grasp -> drop. Quick scan (no '
-            'end scan) by default; --end-scan precession for the full scan.'
+            'Full pipeline: scan -> detect -> grasp -> drop. Quick scan by '
+            'default, and if it finds nothing the end scan alone; --full '
+            'for a full scan.'
         ),
     )
     run.add_argument(
@@ -1512,7 +1525,9 @@ def build_parser():
         'clear',
         help=(
             'Empty the bucket: the grab-grid sweep, then scan -> detect -> '
-            'grasp -> drop until a scan finds nothing.'
+            'grasp -> drop until a scan finds nothing. Quick scans by '
+            'default, then the end scan alone once they find nothing; '
+            '--full for full scans throughout.'
         ),
     )
     clear.add_argument(
@@ -1541,7 +1556,9 @@ def build_parser():
         '--speed', type=float, default=1.0,
         help='Fraction of the baked speed for the grabs, (0, 1] (default: 1).',
     )
-    add_scan_arguments(clear)
+    # Quick scans, then the end scan alone once they find nothing
+    # (pipeline.run_clear).
+    add_scan_arguments(clear, end_scan_default='none')
     _add_detector_arguments(clear)
     _add_fake_arguments(clear, with_scan_from=True)
     clear.set_defaults(func=cmd_clear)

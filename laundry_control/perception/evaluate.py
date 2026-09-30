@@ -533,10 +533,14 @@ def add_evaluate_arguments(parser):
         '--end-scan', choices=('precession', 'none', 'bottom'),
         default='precession',
         help=(
-            "Which baseline set to evaluate by default: 'none' for the quick "
-            'scan (baseline_scans_quick/), else baseline_scans/.'
+            "The kind of scan to evaluate the detector for: 'none' for the "
+            "quick scan (the baselines' strokes alone), else the full scan."
         ),
     )
+
+    from ..scan.pattern import add_quick_full_flags
+
+    add_quick_full_flags(parser)
     parser.add_argument(
         '--baseline',
         type=str,
@@ -704,11 +708,13 @@ def add_evaluate_arguments(parser):
 
 def run_evaluate(args):
     """Run `laundry evaluate`; returns a process exit code."""
-    baseline = args.baseline or config.baseline_dir(
-        getattr(args, 'end_scan', None)
-    )
+    from ..scan.segments import for_end_scan
 
-    baseline_scans = load_baseline_scans(baseline)
+    baseline = args.baseline or config.baseline_dir()
+
+    baseline_scans = load_baseline_scans(
+        baseline, for_end_scan(getattr(args, 'end_scan', None))
+    )
 
     print(
         f'Loaded {len(baseline_scans)} baseline scan(s) from '

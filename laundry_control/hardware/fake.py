@@ -91,6 +91,10 @@ class FakeRecorder:
         """Pause or resume nothing: there are no readings."""
         return True
 
+    def set_segment(self, segment, timeout_sec=5.0):
+        """Label nothing: there are no readings."""
+        return True
+
     def clear_async(self):
         """Clear nothing: there is no accumulated state."""
 

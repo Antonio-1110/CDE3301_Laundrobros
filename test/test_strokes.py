@@ -81,20 +81,28 @@ def test_simulated_strokes_start_at_the_entry_depth():
     )
 
 
-def test_the_quick_scan_has_no_end_scan_and_its_own_baselines():
+def test_the_quick_scan_is_the_full_baselines_strokes():
     from laundry_control import config
+    from laundry_control.scan import segments
 
-    kwargs = pattern.scan_kwargs_from_args(_parse(['--end-scan', 'none']))
+    kwargs = pattern.scan_kwargs_from_args(_parse(['--quick']))
 
-    assert kwargs['end_scan'] == 'none' and kwargs['end_plan'] is None
-    assert config.baseline_dir('none').endswith('baseline_scans_quick')
-    assert config.baseline_dir('precession').endswith('baseline_scans')
+    # No plan needed to scan, but loaded for run/clear's end-scan pass.
+    assert kwargs['end_scan'] == 'none'
+    assert segments.for_end_scan('none') == (segments.STROKES,)
+    assert segments.for_end_scan('precession') is None
     assert config.baseline_dir().endswith('baseline_scans')
 
 
-def test_baseline_collect_picks_the_set_from_the_forwarded_scan_kind():
-    from laundry_control.scan.baselines import forwarded_end_scan
+def test_baselines_are_full_scans_only(capsys):
+    from argparse import Namespace
+
+    from laundry_control.scan.baselines import forwarded_end_scan, run_collect
 
     assert forwarded_end_scan(['--end-scan', 'none']) == 'none'
     assert forwarded_end_scan(['--depth', '0.4', '--end-scan=none']) == 'none'
+    assert forwarded_end_scan(['--quick']) == 'none'
     assert forwarded_end_scan(['--depth', '0.4']) is None
+
+    assert run_collect(Namespace(dest=None), ['--quick']) == 2
+    assert 'full scans' in capsys.readouterr().err

@@ -48,7 +48,7 @@ def test_extended_schema_round_trips(tmp_path):
 
     save_xyz_csv(
         str(path),
-        [(0.1, 0.2, 0.3, stamp, 0.12, 1.0, 2.0, 3.0, 1.23)],
+        [(0.1, 0.2, 0.3, stamp, 0.12, 1.0, 2.0, 3.0, 1.23, 1)],
     )
 
     columns = load_scan_csv(str(path))
@@ -59,6 +59,19 @@ def test_extended_schema_round_trips(tmp_path):
     assert columns['raw_range'][0] == pytest.approx(0.12)
     assert columns['ox'][0] == pytest.approx(1.0)
     assert columns['j7'][0] == pytest.approx(1.23)
+    assert columns['segment'][0] == 1
+
+
+def test_rays_without_a_segment_still_save(tmp_path):
+    stamp = Time()
+    path = tmp_path / 'older.csv'
+
+    save_xyz_csv(str(path), [(0.1, 0.2, 0.3, stamp, 0.12, 1.0, 2.0, 3.0, 1.23)])
+
+    columns = load_scan_csv(str(path))
+
+    assert columns['j7'][0] == pytest.approx(1.23)
+    assert 'segment' not in columns
 
 
 def test_extended_file_still_loads_as_plain_points(tmp_path):

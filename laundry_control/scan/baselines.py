@@ -556,7 +556,7 @@ def add_collect_arguments(parser):
 
 
 def forwarded_end_scan(scan_args):
-    """Return the --end-scan in the options forwarded to `laundry scan`."""
+    """Return the scan kind the options forwarded to `laundry scan` ask for."""
     end_scan = None
 
     for index, arg in enumerate(scan_args):
@@ -564,14 +564,29 @@ def forwarded_end_scan(scan_args):
             end_scan = scan_args[index + 1]
         elif arg.startswith('--end-scan='):
             end_scan = arg.split('=', 1)[1]
+        elif arg == '--quick':
+            end_scan = 'none'
+        elif arg == '--full':
+            end_scan = 'precession'
 
     return end_scan
 
 
 def run_collect(args, scan_args):
     """Run `laundry baseline collect`; returns a process exit code."""
-    # Each kind of scan has its own set (config.baseline_dir).
-    dest = args.dest or config.baseline_dir(forwarded_end_scan(scan_args))
+    # Baselines are full scans: a quick scan is modelled from their
+    # strokes (scan/segments.py), so quick-scan baselines could serve
+    # nothing a full set does not.
+    if forwarded_end_scan(scan_args) == 'none':
+        print(
+            'Baselines must be full scans: quick scans are judged against '
+            "the full baselines' strokes. Collect without --end-scan none "
+            '/ --quick.',
+            file=sys.stderr,
+        )
+        return 2
+
+    dest = args.dest or config.baseline_dir()
 
     if args.count < 1:
         print('--count must be at least 1.', file=sys.stderr)

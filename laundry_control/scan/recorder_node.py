@@ -120,6 +120,10 @@ class ScanRecorderNode(Node):
         # Left on between scans, every motion of the arm piled points
         # into the RViz cloud until the next scan cleared it.
         self.declare_parameter('recording', False)
+        # The scan segment readings are recorded as (scan/segments.py:
+        # 0 strokes, 1 end scan), set by the scan around its end scan
+        # and written to the CSV's segment column.
+        self.declare_parameter('segment', 0)
 
         # Size of the cloud last published; -1 forces a publish (an
         # empty cloud after a clear, so RViz drops the old one).
@@ -252,7 +256,11 @@ class ScanRecorderNode(Node):
         if not (msg.min_range <= msg.range <= msg.max_range):
             return
 
-        self._pending.append(msg)
+        # The segment in force when the reading ARRIVED: it is placed
+        # up to TF_WAIT_SEC later, when the scan may have moved on.
+        self._pending.append(
+            (msg, int(self.get_parameter('segment').value))
+        )
         self._drain()
 
     def _lookup(self, sensor_frame, when):
@@ -281,7 +289,7 @@ class ScanRecorderNode(Node):
         now_ns = self.get_clock().now().nanoseconds
 
         while self._pending:
-            msg = self._pending[0]
+            msg, segment = self._pending[0]
             sensor_frame = msg.header.frame_id or TOF_SENSOR_FRAME
             stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
             waiting = not force and (now_ns - stamp_ns) * 1e-9 < TF_WAIT_SEC
@@ -293,7 +301,7 @@ class ScanRecorderNode(Node):
                     return
 
                 self._pending.popleft()
-                self._record_fallback(msg, sensor_frame, exact_exc)
+                self._record_fallback(msg, sensor_frame, exact_exc, segment)
                 continue
 
             # The J7 column is interpolated from /joint_states, which
@@ -309,9 +317,9 @@ class ScanRecorderNode(Node):
 
             self._pending.popleft()
             self._tf_exact_count += 1
-            self._record(msg, sensor_frame, *transforms)
+            self._record(msg, sensor_frame, *transforms, segment=segment)
 
-    def _record_fallback(self, msg, sensor_frame, exact_exc):
+    def _record_fallback(self, msg, sensor_frame, exact_exc, segment=0):
         """Place a reading with the latest transform (the arm's pose NOW)."""
         try:
             transforms = self._lookup(sensor_frame, Time())
@@ -352,9 +360,11 @@ class ScanRecorderNode(Node):
                 throttle_duration_sec=5.0,
             )
 
-        self._record(msg, sensor_frame, *transforms)
+        self._record(msg, sensor_frame, *transforms, segment=segment)
 
-    def _record(self, msg, sensor_frame, tcp_transform, base_transform):
+    def _record(
+        self, msg, sensor_frame, tcp_transform, base_transform, segment=0
+    ):
         """Store one reading as a point (flange and base frames) plus its ray."""
         sensor_point = PointStamped()
         sensor_point.header.frame_id = sensor_frame
@@ -403,6 +413,7 @@ class ScanRecorderNode(Node):
                 self._sweep_angle_at(
                     Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
                 ),
+                int(segment),
             )
         )
 

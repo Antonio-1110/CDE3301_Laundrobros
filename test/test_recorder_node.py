@@ -64,13 +64,15 @@ class _Recorder:
         self._tf_dropped_count = 0
         self.recorded = []
         self.recording = True
+        self.segment = 0
+        self.segments = []
 
     def get_clock(self):
         return _Clock(self)
 
     def get_parameter(self, name):
-        assert name == 'recording'
-        return type('Parameter', (), {'value': self.recording})()
+        value = {'recording': self.recording, 'segment': self.segment}[name]
+        return type('Parameter', (), {'value': value})()
 
     def get_logger(self):
         return _Logger()
@@ -86,9 +88,12 @@ class _Recorder:
 
         return 'exact', 'exact'
 
-    def _record(self, msg, sensor_frame, tcp_transform, base_transform):
+    def _record(
+        self, msg, sensor_frame, tcp_transform, base_transform, segment=0
+    ):
         stamp = msg.header.stamp
         self.recorded.append((stamp.sec + stamp.nanosec * 1e-9, tcp_transform))
+        self.segments.append(segment)
 
 
 def test_a_reading_waits_for_tf_then_uses_its_own_time():
@@ -279,3 +284,17 @@ def test_recording_is_off_until_a_scan_turns_it_on():
     source = inspect.getsource(ScanRecorderNode.__init__)
 
     assert "self.declare_parameter('recording', False)" in source
+
+
+def test_a_reading_keeps_the_segment_it_arrived_in():
+    recorder = _Recorder(now=10.00, tf_latest=9.90)
+
+    recorder.segment = 1
+    recorder._range_callback(_reading(9.95))
+
+    # The scan moves on before /tf catches up.
+    recorder.segment = 0
+    recorder.tf_latest = 10.0
+    recorder._drain()
+
+    assert recorder.segments == [1]

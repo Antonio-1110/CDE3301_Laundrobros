@@ -536,7 +536,7 @@ def inter_mismatch(arm, plan):
     )
 
 
-def run_plan(arm, plan, depth_m, time_scale=1.0):
+def run_plan(arm, plan, depth_m, time_scale=1.0, on_replay=None):
     """
     Replay a baked end scan from wherever the strokes left the arm.
 
@@ -604,9 +604,20 @@ def run_plan(arm, plan, depth_m, time_scale=1.0):
             )
             return False
 
-        return arm.execute_joint_path(
-            plan.waypoints, plan.times, plan.velocities, time_scale=time_scale
-        )
+        # on_replay(True/False) brackets the replay alone - not the
+        # moves on and off it - so the scan can label exactly these
+        # readings as the end scan (scan/segments.py).
+        if on_replay is not None:
+            on_replay(True)
+
+        try:
+            return arm.execute_joint_path(
+                plan.waypoints, plan.times, plan.velocities,
+                time_scale=time_scale,
+            )
+        finally:
+            if on_replay is not None:
+                on_replay(False)
 
     finally:
         arm.set_arm_padding(config.OBSTACLE_PADDING_M)

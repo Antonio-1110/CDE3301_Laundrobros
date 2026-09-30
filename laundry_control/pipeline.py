@@ -31,6 +31,7 @@ from .perception.detect import detect_on_points, load_baseline_scans
 from .perception.detect import load_points_xyz
 from .perception.report import print_model_report, print_report
 from .scan.pattern import scan
+from .scan.segments import STROKES
 
 
 def timestamped_scan_path(prefix='scan'):
@@ -92,9 +93,14 @@ def run_scan(arm, recorder, csv_path, scan_kwargs):
             )
 
 
-def build_model(baseline):
-    """Fit the empty-bucket model from the baselines, and report it."""
-    baseline_scans = load_baseline_scans(baseline)
+def build_model(baseline, segments=None):
+    """
+    Fit the empty-bucket model from the baselines, and report it.
+
+    segments: model only these scan segments of the baselines (scan/
+    segments.py) - (STROKES,) for quick scans; None for full scans.
+    """
+    baseline_scans = load_baseline_scans(baseline, segments)
     surface = build_baseline_surface(baseline_scans)
 
     print_model_report(surface, baseline_scans, baseline)
@@ -102,7 +108,8 @@ def build_model(baseline):
     return surface
 
 
-def detect_scan(csv_path, baseline, detect_params, surface=None):
+def detect_scan(csv_path, baseline, detect_params, surface=None,
+                segments=None):
     """
     Build the bucket model, report it, and detect laundry in csv_path.
 
@@ -113,9 +120,17 @@ def detect_scan(csv_path, baseline, detect_params, surface=None):
     skip the fit (run_clear detects many scans against one model).
     """
     if surface is None:
-        surface = build_model(baseline)
+        surface = build_model(baseline, segments)
 
-    candidate_xyz = load_points_xyz(csv_path)
+    if segments is None:
+        candidate_xyz = load_points_xyz(csv_path)
+    else:
+        # Judge like with like: only the scan's readings of the
+        # segments the model was built from (a quick scan has no
+        # others anyway).
+        from .scan.segments import load_points
+
+        candidate_xyz = load_points(csv_path, segments)
 
     clusters, _result = detect_on_points(
         candidate_xyz, surface, **detect_params
@@ -150,6 +165,108 @@ def open_for_scan(gripper, dry_run=False):
     return True
 
 
+def bucket_models(baseline):
+    """
+    Return model(kind): the bucket model for 'strokes' or 'full' scans.
+
+    Each is fitted from the same baselines on first use (all of each
+    scan for 'full', its strokes for 'strokes' - scan/segments.py) and
+    reused after, so `clear` fits each at most once.
+    """
+    cache = {}
+
+    def model(kind):
+        if kind not in cache:
+            print(f'========== BUCKET MODEL ({kind}) ==========')
+            cache[kind] = build_model(
+                baseline, (STROKES,) if kind == 'strokes' else None
+            )
+
+        return cache[kind]
+
+    return model
+
+
+def run_end_scan_only(arm, recorder, csv_path, scan_kwargs):
+    """
+    Run the end scan alone into exactly csv_path; True on success.
+
+    Unlike run_scan, the recorder is NOT cleared: the quick scan just
+    recorded is kept, so csv_path gets its strokes plus the end scan -
+    a full scan's readings (scan.pattern.end_scan_only).
+    """
+    from .scan.pattern import end_scan_only
+
+    csv_path = os.path.abspath(csv_path)
+
+    if not recorder.set_csv_path(csv_path):
+        print("Failed to pin the recorder's csv_path; aborting.")
+        return False
+
+    try:
+        if not end_scan_only(arm=arm, recorder=recorder, **scan_kwargs):
+            return False
+
+        return recorder.save_blocking()
+
+    finally:
+        recorder.set_csv_path('')
+        recorder.set_recording(False)
+
+
+def scan_and_detect(
+    arm, recorder, csv_path, baseline, scan_kwargs, detect_params, model
+):
+    """
+    Scan and detect; returns (clusters, surface, scan CSV), or None.
+
+    A full scan (end_scan 'precession') is detected against the full
+    model. A QUICK scan (end_scan 'none') against the strokes-only
+    model; if it finds nothing, the end scan runs on its own (no
+    second pass of strokes) and the quick scan plus that pass - a full
+    scan's readings, saved to <csv_path>_end.csv - is detected against
+    the full model, so laundry against the closed end is still found.
+    None if a motion failed.
+    """
+    quick = scan_kwargs.get('end_scan') == 'none'
+
+    if not run_scan(arm, recorder, csv_path, scan_kwargs):
+        print('Scan failed.')
+        return None
+
+    print('========== DETECT ==========')
+
+    clusters, surface = detect_scan(
+        csv_path, baseline, detect_params,
+        surface=model('strokes' if quick else 'full'),
+        segments=(STROKES,) if quick else None,
+    )
+
+    if clusters or not quick:
+        return clusters, surface, csv_path
+
+    if scan_kwargs.get('end_plan') is None:
+        print('The quick scan found nothing; no baked end scan to check '
+              'the closed end with.')
+        return clusters, surface, csv_path
+
+    print('========== THE QUICK SCAN FOUND NOTHING: END SCAN ONLY ==========')
+
+    end_csv = os.path.splitext(csv_path)[0] + '_end.csv'
+
+    if not run_end_scan_only(arm, recorder, end_csv, scan_kwargs):
+        print('The end-scan pass failed.')
+        return None
+
+    print('========== DETECT (quick scan + end scan) ==========')
+
+    clusters, surface = detect_scan(
+        end_csv, baseline, detect_params, surface=model('full')
+    )
+
+    return clusters, surface, end_csv
+
+
 def run_full(
     arm,
     recorder,
@@ -160,19 +277,26 @@ def run_full(
     detect_params,
     dry_run=False,
 ):
-    """Run scan -> detect -> grasp -> drop; True on success."""
+    """
+    Run scan -> detect -> grasp -> drop; True on success.
+
+    With a quick scan that finds nothing, the end scan runs on its own
+    before giving up (scan_and_detect).
+    """
     print('========== SCAN ==========')
 
     if not open_for_scan(gripper, dry_run):
         return False
 
-    if not run_scan(arm, recorder, csv_path, scan_kwargs):
-        print('Scan failed; aborting.')
+    result = scan_and_detect(
+        arm, recorder, csv_path, baseline, scan_kwargs, detect_params,
+        bucket_models(baseline),
+    )
+
+    if result is None:
         return False
 
-    print('========== DETECT ==========')
-
-    clusters, surface = detect_scan(csv_path, baseline, detect_params)
+    clusters, surface, _csv = result
 
     if not clusters:
         print('No laundry detected; nothing to retrieve.')
@@ -268,7 +392,15 @@ def run_clear(
         2. open -> scan -> detect -> grasp the best reachable item ->
            DROP, repeated until a scan finds nothing.
 
-    The bucket model is fitted once and every scan is judged against
+    With quick scans (end_scan 'none', the default for `laundry
+    clear`) each round is scan_and_detect's: a quick scan, and only
+    when that finds nothing the end scan on its own. So the bucket is
+    emptied with quick scans - which never swing the arm low - and the
+    tilting end scan runs only once they find nothing, when little is
+    left for it to disturb; the bucket is clear when that finds
+    nothing too.
+
+    Each bucket model is fitted once and every scan is judged against
     it. Stops after max_rounds, or max_failed failed grasps in a row.
     scan_path(round) names each round's scan CSV. Returns True only if
     the last scan found the bucket clear.
@@ -277,9 +409,11 @@ def run_clear(
         lambda index: timestamped_scan_path(f'clear_{index:02d}')
     )
 
-    print('========== BUCKET MODEL ==========')
+    model = bucket_models(baseline)
 
-    surface = build_model(baseline)
+    # Fit the model the first scan needs before anything moves: a
+    # baseline problem should stop the run here, not mid-sweep.
+    model('strokes' if scan_kwargs.get('end_scan') == 'none' else 'full')
 
     if sweep:
         print('========== GRAB SWEEP ==========')
@@ -301,13 +435,16 @@ def run_clear(
         if not open_for_scan(gripper):
             return False
 
-        if not run_scan(arm, recorder, csv_path, scan_kwargs):
+        result = scan_and_detect(
+            arm, recorder, csv_path, baseline, scan_kwargs, detect_params,
+            model,
+        )
+
+        if result is None:
             print('Scan failed; stopping.')
             return False
 
-        clusters, _surface = detect_scan(
-            csv_path, baseline, detect_params, surface=surface
-        )
+        clusters, surface, csv_path = result
 
         if not clusters:
             print(

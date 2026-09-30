@@ -17,6 +17,7 @@ import os
 
 import rclpy
 
+from . import segments
 from .strokes import MAX_STEP_M, stroke_plan
 from .. import config
 from ..arm.transfers import go_to
@@ -311,6 +312,14 @@ def scan(
 
     # Used only for logging our nominal insertion depth.
     current_depth = 0.0
+
+    def mark_segment(segment):
+        """Label the readings from now on as this scan segment."""
+        if recorder is not None and not recorder.set_segment(segment):
+            arm.get_logger().error(
+                'Could not label the end-scan readings in the recorder; '
+                'this scan cannot be split into strokes and end scan.'
+            )
 
     def set_recording(on):
         """Start or pause scan_recorder_node's recording; False if it would not."""
@@ -724,6 +733,9 @@ def scan(
             pre_bottom_joints,
             phase_twist,
             end_scan_time_scale,
+            on_replay=lambda active: mark_segment(
+                segments.END if active else segments.STROKES
+            ),
         )
 
     if not success:
@@ -921,8 +933,99 @@ def scan(
     return True
 
 
+# Speed scaling for the end-scan-only pass's straight moves in and
+# out: nothing is recorded or twisted on them.
+END_ONLY_VELOCITY = 0.1
+
+
+def end_scan_only(
+    arm,
+    recorder=None,
+    depth=DEFAULT_DEPTH_M,
+    end_plan=None,
+    end_scan_time_scale=1.0,
+    cartesian_step=DEFAULT_CARTESIAN_STEP_M,
+    **_scan_options,
+):
+    """
+    Run the end scan on its own: straight in, the end scan, straight out.
+
+    For after a quick scan that found nothing: that scan's strokes plus
+    these end-scan readings are a full scan's readings (scan/
+    segments.py), without swinging through the bucket twice. The
+    recorder is NOT cleared - its quick-scan points stay - and only the
+    end scan's replay is recorded, labelled END; recording is off
+    afterwards. The caller pins the CSV and saves (pipeline).
+
+    MOVES THE ARM. Returns True on success.
+    """
+    from .endcap import run_plan
+
+    log = arm.get_logger()
+
+    if end_plan is None:
+        log.error('The end-scan pass needs a baked end scan (laundry plan bake).')
+        return False
+
+    def set_recording(on):
+        return recorder is None or recorder.set_recording(on)
+
+    def replay(active):
+        if recorder is None:
+            return
+
+        recorder.set_segment(segments.END if active else segments.STROKES)
+        recorder.set_recording(active)
+
+    if not set_recording(False):
+        log.error("Could not stop scan_recorder_node's recording.")
+        return False
+
+    log.info('========== END SCAN ONLY: STRAIGHT IN ==========')
+
+    if not go_to(arm, 'inter'):
+        log.error('Move to INTER failed.')
+        return False
+
+    if not arm.move_tool_z(
+        depth,
+        max_step=cartesian_step,
+        velocity=END_ONLY_VELOCITY,
+        acceleration=END_ONLY_VELOCITY,
+    ):
+        log.error(f'Straight insertion to {depth:.3f} m failed.')
+        return False
+
+    log.info('========== END SCAN ONLY: END SCAN ==========')
+
+    if not run_plan(
+        arm, end_plan, depth, time_scale=end_scan_time_scale,
+        on_replay=replay,
+    ):
+        log.error('End scan failed.')
+        return False
+
+    log.info('========== END SCAN ONLY: STRAIGHT OUT ==========')
+
+    if not arm.move_tool_z(
+        -depth,
+        max_step=cartesian_step,
+        velocity=END_ONLY_VELOCITY,
+        acceleration=END_ONLY_VELOCITY,
+    ):
+        log.error('Straight retraction from the end scan failed.')
+        return False
+
+    if not go_to(arm, 'inter'):
+        log.error('Return to INTER failed.')
+        return False
+
+    return True
+
+
 def _precession_end_scan(
-    arm, plan, depth, pre_end_joints, phase_twist, time_scale
+    arm, plan, depth, pre_end_joints, phase_twist, time_scale,
+    on_replay=None,
 ):
     """
     Replay the baked precession end scan, then turn J7 for the way out.
@@ -941,7 +1044,9 @@ def _precession_end_scan(
         + (f', replayed at {time_scale:g}x speed' if time_scale < 1.0 else '')
     )
 
-    if not run_plan(arm, plan, depth, time_scale=time_scale):
+    if not run_plan(
+        arm, plan, depth, time_scale=time_scale, on_replay=on_replay
+    ):
         arm.get_logger().error('Precession end scan failed.')
         return False
 
@@ -1089,6 +1194,18 @@ def _stroke_spacing(text):
     return value
 
 
+def add_quick_full_flags(parser):
+    """Add --quick / --full: shorthands for --end-scan none / precession."""
+    parser.add_argument(
+        '--quick', dest='end_scan', action='store_const', const='none',
+        help='The quick scan: same as --end-scan none.',
+    )
+    parser.add_argument(
+        '--full', dest='end_scan', action='store_const', const='precession',
+        help='The full scan: same as --end-scan precession.',
+    )
+
+
 def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):
     """
     Add every scan() tuning option to an argparse parser.
@@ -1103,11 +1220,13 @@ def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):
         help=(
             "How to cover the closed end: 'precession' (the full scan: "
             "the baked coning sweep), 'none' (the quick scan: no end "
-            'scan, no tilting; uses its own baselines, '
-            "baseline_scans_quick/) or 'bottom' (the old BOTTOM-pose "
-            f"detour). Default: '{end_scan_default}'."
+            "scan, no tilting; judged against the baselines' strokes) "
+            "or 'bottom' (the old BOTTOM-pose detour). Default: "
+            f"'{end_scan_default}'."
         ),
     )
+
+    add_quick_full_flags(parser)
 
     parser.add_argument(
         '--end-plan',
@@ -1251,6 +1370,16 @@ def scan_kwargs_from_args(args):
     so a missing or mismatched plan is reported before the arm moves.
     """
     end_plan = None
+
+    if args.end_scan == 'none':
+        # The quick scan itself needs no plan; `run` and `clear` use it
+        # for their end-scan-only pass when a quick scan finds nothing.
+        from .endcap import default_plan_path, EndcapPlan
+
+        path = args.end_plan or default_plan_path()
+
+        if os.path.isfile(path):
+            end_plan = EndcapPlan.load(path)
 
     if args.end_scan == 'precession':
         from .endcap import default_plan_path, EndcapPlan
