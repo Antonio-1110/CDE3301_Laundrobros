@@ -530,6 +530,14 @@ def report_coverage(surface, baseline_scans, extra_scans=()):
 def add_evaluate_arguments(parser):
     """Add `laundry evaluate` options to a parser."""
     parser.add_argument(
+        '--end-scan', choices=('precession', 'none', 'bottom'),
+        default='precession',
+        help=(
+            "Which baseline set to evaluate by default: 'none' for the quick "
+            'scan (baseline_scans_quick/), else baseline_scans/.'
+        ),
+    )
+    parser.add_argument(
         '--baseline',
         type=str,
         default=None,
@@ -696,7 +704,9 @@ def add_evaluate_arguments(parser):
 
 def run_evaluate(args):
     """Run `laundry evaluate`; returns a process exit code."""
-    baseline = args.baseline or config.baseline_dir()
+    baseline = args.baseline or config.baseline_dir(
+        getattr(args, 'end_scan', None)
+    )
 
     baseline_scans = load_baseline_scans(baseline)
 

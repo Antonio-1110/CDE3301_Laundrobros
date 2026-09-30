@@ -715,9 +715,17 @@ def repo_root():
     return os.getcwd()
 
 
-def baseline_dir():
-    """Directory of empty-bucket baseline scans the detector models."""
-    return os.path.join(repo_root(), 'baseline_scans')
+def baseline_dir(end_scan=None):
+    """
+    Directory of the empty-bucket baselines for a kind of scan.
+
+    Detection compares a scan with baselines taken along the same path,
+    so the quick scan (end_scan 'none', scan.pattern) has its own set,
+    baseline_scans_quick/; every other scan uses baseline_scans/.
+    """
+    name = 'baseline_scans_quick' if end_scan == 'none' else 'baseline_scans'
+
+    return os.path.join(repo_root(), name)
 
 
 def scan_records_dir():

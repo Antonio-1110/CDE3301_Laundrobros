@@ -371,3 +371,18 @@ def test_cli_gripper_rejects_out_of_range_angle():
 def test_cli_gripper_fake_angle_does_not_touch_gpio(capsys):
     assert cli.cmd_gripper(_parse(['gripper', '90', '--fake-hardware'])) == 0
     assert 'fake gripper' in capsys.readouterr().out
+
+
+def test_run_detect_and_evaluate_use_the_quick_baselines_for_quick_scans():
+    from laundry_control.cli import _baseline_path
+
+    assert _baseline_path(_parse(['run', '--end-scan', 'none'])).endswith(
+        'baseline_scans_quick'
+    )
+    assert _baseline_path(_parse(['run'])).endswith('baseline_scans')
+    assert _baseline_path(
+        _parse(['detect', 'x.csv', '--end-scan', 'none'])
+    ).endswith('baseline_scans_quick')
+    assert _baseline_path(
+        _parse(['run', '--end-scan', 'none', '--baseline', '/tmp/b'])
+    ) == '/tmp/b'

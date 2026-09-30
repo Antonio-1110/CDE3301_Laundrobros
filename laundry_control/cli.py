@@ -156,9 +156,10 @@ def _detect_params(args):
 
 
 def _baseline_path(args):
+    """Return --baseline, else the baseline set for this kind of scan."""
     from . import config
 
-    return args.baseline or config.baseline_dir()
+    return args.baseline or config.baseline_dir(getattr(args, 'end_scan', None))
 
 
 def _add_observed_state_argument(parser):
@@ -1239,6 +1240,14 @@ def build_parser():
     detect.add_argument(
         '--topic', type=str, default=DEFAULT_TOPIC,
         help=f'Topic for --publish (default: {DEFAULT_TOPIC}).',
+    )
+    detect.add_argument(
+        '--end-scan', choices=('precession', 'none', 'bottom'),
+        default='precession',
+        help=(
+            "The kind of scan the CSV is, which picks its baselines: 'none' "
+            'for a quick scan (baseline_scans_quick/), else baseline_scans/.'
+        ),
     )
     _add_detector_arguments(detect)
     detect.set_defaults(func=cmd_detect)

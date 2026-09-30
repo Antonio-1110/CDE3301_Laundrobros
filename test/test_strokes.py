@@ -79,3 +79,22 @@ def test_simulated_strokes_start_at_the_entry_depth():
         len(origins),
         2 * 12 * coverage.DEFAULT_SAMPLES_PER_STROKE,
     )
+
+
+def test_the_quick_scan_has_no_end_scan_and_its_own_baselines():
+    from laundry_control import config
+
+    kwargs = pattern.scan_kwargs_from_args(_parse(['--end-scan', 'none']))
+
+    assert kwargs['end_scan'] == 'none' and kwargs['end_plan'] is None
+    assert config.baseline_dir('none').endswith('baseline_scans_quick')
+    assert config.baseline_dir('precession').endswith('baseline_scans')
+    assert config.baseline_dir().endswith('baseline_scans')
+
+
+def test_baseline_collect_picks_the_set_from_the_forwarded_scan_kind():
+    from laundry_control.scan.baselines import forwarded_end_scan
+
+    assert forwarded_end_scan(['--end-scan', 'none']) == 'none'
+    assert forwarded_end_scan(['--depth', '0.4', '--end-scan=none']) == 'none'
+    assert forwarded_end_scan(['--depth', '0.4']) is None

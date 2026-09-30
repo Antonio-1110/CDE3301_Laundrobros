@@ -555,9 +555,23 @@ def add_collect_arguments(parser):
     )
 
 
+def forwarded_end_scan(scan_args):
+    """Return the --end-scan in the options forwarded to `laundry scan`."""
+    end_scan = None
+
+    for index, arg in enumerate(scan_args):
+        if arg == '--end-scan' and index + 1 < len(scan_args):
+            end_scan = scan_args[index + 1]
+        elif arg.startswith('--end-scan='):
+            end_scan = arg.split('=', 1)[1]
+
+    return end_scan
+
+
 def run_collect(args, scan_args):
     """Run `laundry baseline collect`; returns a process exit code."""
-    dest = args.dest or config.baseline_dir()
+    # Each kind of scan has its own set (config.baseline_dir).
+    dest = args.dest or config.baseline_dir(forwarded_end_scan(scan_args))
 
     if args.count < 1:
         print('--count must be at least 1.', file=sys.stderr)

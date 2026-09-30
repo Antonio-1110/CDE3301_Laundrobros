@@ -58,9 +58,14 @@ DEFAULT_PAUSE_SEC = 0.0
 DEFAULT_SAVE_INTERVAL_SEC = 5.0
 
 # How the closed end is covered: 'precession' (default, baked - see
-# scan/endcap.py) or 'bottom' (the old recorded-pose detour, only
+# scan/endcap.py), 'none' (the QUICK scan: no end scan, only a J7
+# turnaround at the deepest stroke - the tilting end scan swings the
+# wrist and elbow low, rubbing laundry on the lower walls, and the
+# quick scan never does; it sees ~86% of the floor and lower walls and
+# none of the closed end, and has its own baselines,
+# config.baseline_dir) or 'bottom' (the old recorded-pose detour, only
 # when asked for).
-END_SCANS = ('precession', 'bottom')
+END_SCANS = ('precession', 'none', 'bottom')
 DEFAULT_END_SCAN = 'precession'
 
 
@@ -162,7 +167,8 @@ def scan(
     end_scan:
         How the closed end is covered at maximum depth: 'precession'
         (default) replays the baked coning sweep in end_plan (see
-        scan/endcap.py); 'bottom' runs the old recorded-pose BOTTOM
+        scan/endcap.py); 'none' (the quick scan) only turns J7 for
+        the way out; 'bottom' runs the old recorded-pose BOTTOM
         detour and is only used when asked for.
 
     end_plan:
@@ -703,6 +709,13 @@ def scan(
             rotation_acceleration,
             wait_between_movements,
         )
+    elif end_scan == 'none':
+        # The quick scan: no end scan, only the turnaround, as a J7
+        # turn on the spot (straight, collision-checked joint move),
+        # so the outward strokes still interleave with the inward.
+        turned = list(pre_bottom_joints)
+        turned[6] += math.radians(phase_twist)
+        success = arm.move_joints_linear(turned)
     else:
         success = _precession_end_scan(
             arm,
@@ -1084,8 +1097,9 @@ def add_scan_arguments(parser):
         default=DEFAULT_END_SCAN,
         help=(
             "How to cover the closed end: 'precession' (default, the "
-            "baked coning sweep) or 'bottom' (the old BOTTOM-pose "
-            'detour).'
+            "baked coning sweep), 'none' (the quick scan: no end scan, "
+            'no tilting; uses its own baselines, baseline_scans_quick/) '
+            "or 'bottom' (the old BOTTOM-pose detour)."
         ),
     )
 
