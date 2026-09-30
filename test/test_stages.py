@@ -379,10 +379,30 @@ def test_run_detect_and_evaluate_use_the_quick_baselines_for_quick_scans():
     assert _baseline_path(_parse(['run', '--end-scan', 'none'])).endswith(
         'baseline_scans_quick'
     )
-    assert _baseline_path(_parse(['run'])).endswith('baseline_scans')
+    # `laundry run` scans quick by default; the full scan on request.
+    assert _parse(['run']).end_scan == 'none'
+    assert _baseline_path(_parse(['run'])).endswith('baseline_scans_quick')
+    assert _baseline_path(
+        _parse(['run', '--end-scan', 'precession'])
+    ).endswith('baseline_scans')
+    # Everything else still defaults to the full scan.
+    assert _parse(['scan']).end_scan == 'precession'
+    assert _parse(['clear']).end_scan == 'precession'
     assert _baseline_path(
         _parse(['detect', 'x.csv', '--end-scan', 'none'])
     ).endswith('baseline_scans_quick')
     assert _baseline_path(
         _parse(['run', '--end-scan', 'none', '--baseline', '/tmp/b'])
     ) == '/tmp/b'
+
+
+def test_run_refuses_before_moving_without_baselines(tmp_path, capsys):
+    from laundry_control.cli import _baselines_ready
+
+    args = _parse(['run', '--baseline', str(tmp_path)])
+
+    assert not _baselines_ready(args)
+    assert 'baseline collect -- --end-scan none' in capsys.readouterr().err
+
+    (tmp_path / 'baseline_x_01.csv').write_text('x,y,z\n')
+    assert _baselines_ready(args)

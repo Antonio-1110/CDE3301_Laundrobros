@@ -7,11 +7,12 @@
     laundry move joints J1 .. J7 [--degrees]
     laundry move joint6 DEG | joint7 DEG
     laundry move linear M | twist M DEG
-    laundry scan [--save scan.csv]
-    laundry detect scan.csv [-o targets.json] [--publish]   # offline
+    laundry scan [--save scan.csv] [--end-scan precession|none]
+    laundry detect scan.csv [--end-scan none] [-o targets.json] [--publish]
     laundry grasp targets.json [--drop] [--dry-run]
     laundry gripper open|close|ANGLE
     laundry baseline collect [--count N] [--archive] [-- <scan options>]
+    laundry baseline collect -- --end-scan none      # the quick-scan set
     laundry baseline promote scan.csv|dir ... [--move] [--archive]
     laundry baseline archive | list | restore LABEL
     laundry replay scan.csv
@@ -19,14 +20,26 @@
     laundry scene apply | check
     laundry plan bake [endcap|transfers|retrieve|all] [--depth 0.42]
     laundry plan replay [--speed 0.3]
-    laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
-    laundry run [--dry-run]                                 # one item
-    laundry clear [--no-grabs] [--max-rounds N]             # the bucket
+    laundry evaluate [--end-scan none] [--sweep] [--synthetic]
+                     [--laundry scan.csv ...]
+    laundry run [--end-scan precession] [--dry-run]         # one item
+    laundry clear [--end-scan none] [--no-grabs] [--max-rounds N]
     laundry preplanned [--limit N] [--speed 0.3]
 
 Stages hand off through files - a scan CSV, then a targets JSON - so
 each one can run alone, be rerun offline, or be inspected in
 between. `laundry run` chains them in memory in one process.
+
+FULL AND QUICK SCANS
+--------------------
+    --end-scan precession   the FULL scan: strokes plus the tilting
+                            end scan, which alone sees the closed end
+                            (but swings the arm low near the walls)
+    --end-scan none         the QUICK scan: strokes only, no tilting
+
+Each has its own baselines (baseline_scans/ and baseline_scans_quick/),
+picked from --end-scan. `laundry run` defaults to the QUICK scan;
+every other command to the full one.
 
 WHAT NEEDS WHAT
 ---------------
@@ -54,6 +67,7 @@ Heavy imports (rclpy, MoveIt messages) happen inside each command, so
 
 import argparse
 import math
+import os
 import sys
 
 # =============================================================
@@ -160,6 +174,31 @@ def _baseline_path(args):
     from . import config
 
     return args.baseline or config.baseline_dir(getattr(args, 'end_scan', None))
+
+
+def _baselines_ready(args):
+    """
+    Return True if this scan's baseline set exists; say what to do if not.
+
+    Checked before the arm moves: a scan detection cannot use (e.g. a
+    quick scan with no quick baselines yet) only fails after scanning.
+    """
+    import glob
+
+    path = _baseline_path(args)
+
+    if os.path.isfile(path) or glob.glob(os.path.join(path, '*.csv')):
+        return True
+
+    print(
+        f'No baseline scans in {path} for this kind of scan '
+        f"(--end-scan {getattr(args, 'end_scan', None)}). Collect them "
+        'first, bucket empty:\n'
+        '    laundry baseline collect -- --end-scan '
+        f"{getattr(args, 'end_scan', None)}",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _add_observed_state_argument(parser):
@@ -1057,6 +1096,9 @@ def cmd_run(args):
 
     csv_path = args.save or timestamped_scan_path('run')
 
+    if not _baselines_ready(args):
+        return 2
+
     with _RosSession(args=args) as arm:
         recorder = _make_recorder(arm, args)
         gripper = _make_gripper(arm, args.fake_hardware)
@@ -1443,7 +1485,11 @@ def build_parser():
     evaluate.set_defaults(func=cmd_evaluate)
 
     run = subparsers.add_parser(
-        'run', help='Full pipeline: scan -> detect -> grasp -> drop.'
+        'run',
+        help=(
+            'Full pipeline: scan -> detect -> grasp -> drop. Quick scan (no '
+            'end scan) by default; --end-scan precession for the full scan.'
+        ),
     )
     run.add_argument(
         '--save', type=str, default=None,
@@ -1453,7 +1499,9 @@ def build_parser():
         '--dry-run', action='store_true',
         help='Stop after printing the grasp target.',
     )
-    add_scan_arguments(run)
+    # The quick scan: it leaves the laundry where it lies (the full
+    # scan's tilting end scan swings the arm low - scan.pattern).
+    add_scan_arguments(run, end_scan_default='none')
     _add_detector_arguments(run)
     _add_fake_arguments(run, with_scan_from=True)
     run.set_defaults(func=cmd_run)

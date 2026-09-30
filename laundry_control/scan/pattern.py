@@ -1089,17 +1089,23 @@ def _stroke_spacing(text):
     return value
 
 
-def add_scan_arguments(parser):
-    """Add every scan() tuning option to an argparse parser."""
+def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):
+    """
+    Add every scan() tuning option to an argparse parser.
+
+    end_scan_default: the command's own --end-scan default (`laundry
+    run` defaults to the quick scan, 'none').
+    """
     parser.add_argument(
         '--end-scan',
         choices=END_SCANS,
-        default=DEFAULT_END_SCAN,
+        default=end_scan_default,
         help=(
-            "How to cover the closed end: 'precession' (default, the "
-            "baked coning sweep), 'none' (the quick scan: no end scan, "
-            'no tilting; uses its own baselines, baseline_scans_quick/) '
-            "or 'bottom' (the old BOTTOM-pose detour)."
+            "How to cover the closed end: 'precession' (the full scan: "
+            "the baked coning sweep), 'none' (the quick scan: no end "
+            'scan, no tilting; uses its own baselines, '
+            "baseline_scans_quick/) or 'bottom' (the old BOTTOM-pose "
+            f"detour). Default: '{end_scan_default}'."
         ),
     )
 
