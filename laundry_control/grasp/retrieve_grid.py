@@ -18,9 +18,12 @@ solve() places a grab at every (depth, floor angle) of
 config.RETRIEVE_GRID, in the configured bucket (config.OBSTACLES, via
 perception.bucket_model.seed_cone), and for each finds by IK:
 
-  - the LOWEST contact-point height above the floor, then
   - the most VERTICAL approach (tool axis tilted toward the closed end
-    only as far as needed to reach in),
+    only as far as needed to reach in), then
+  - the HIGHEST contact point above the floor in heights_m at that
+    tilt - the drum is expected well filled when the sweep runs (see
+    config.RETRIEVE_GRID; tilt_first=False gives the old order,
+    lowest height first),
 
 that is collision-free with the gripper padded by clearance_m, whose
 approach pose (approach_m back along the tool axis) is too, and
@@ -155,47 +158,62 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
     inter = np.array(config.get_named_pose('inter'))
     seeds = seeds or _seeds()
 
-    for height in grid['heights_m']:
-        for tilt in grid['tilts_deg']:
-            contact, tool_z, claw_x = grab_geometry(
-                depth_m, floor_angle_deg, height, tilt
+    # tilt_first: the least tilt that reaches any height wins, and at
+    # it the first listed height; otherwise the first height that any
+    # tilt reaches.
+    if grid.get('tilt_first', False):
+        candidates = [
+            (height, tilt)
+            for tilt in grid['tilts_deg']
+            for height in grid['heights_m']
+        ]
+    else:
+        candidates = [
+            (height, tilt)
+            for height in grid['heights_m']
+            for tilt in grid['tilts_deg']
+        ]
+
+    for height, tilt in candidates:
+        contact, tool_z, claw_x = grab_geometry(
+            depth_m, floor_angle_deg, height, tilt
+        )
+
+        best = None
+
+        for seed in seeds:
+            grab = arm.compute_ik(_flange_pose(contact, tool_z, claw_x), seed)
+
+            if grab is None or flipped(grab, inter):
+                continue
+
+            approach = arm.compute_ik(
+                _flange_pose(contact, tool_z, claw_x, grid['approach_m']),
+                grab,
             )
 
-            best = None
+            if approach is None or flipped(approach, inter):
+                continue
 
-            for seed in seeds:
-                grab = arm.compute_ik(_flange_pose(contact, tool_z, claw_x), seed)
+            if arm.first_invalid_state([approach, grab]) is not None:
+                continue
 
-                if grab is None or flipped(grab, inter):
-                    continue
+            cost = weighted_travel_deg([inter, approach])
 
-                approach = arm.compute_ik(
-                    _flange_pose(contact, tool_z, claw_x, grid['approach_m']),
-                    grab,
-                )
+            if best is None or cost < best['travel_deg']:
+                best = {
+                    'depth_m': float(depth_m),
+                    'floor_angle_deg': float(floor_angle_deg),
+                    'height_m': float(height),
+                    'tilt_deg': float(tilt),
+                    'contact': [round(float(v), 4) for v in contact],
+                    'approach': [round(float(v), 6) for v in approach],
+                    'grab': [round(float(v), 6) for v in grab],
+                    'travel_deg': round(cost, 1),
+                }
 
-                if approach is None or flipped(approach, inter):
-                    continue
-
-                if arm.first_invalid_state([approach, grab]) is not None:
-                    continue
-
-                cost = weighted_travel_deg([inter, approach])
-
-                if best is None or cost < best['travel_deg']:
-                    best = {
-                        'depth_m': float(depth_m),
-                        'floor_angle_deg': float(floor_angle_deg),
-                        'height_m': float(height),
-                        'tilt_deg': float(tilt),
-                        'contact': [round(float(v), 4) for v in contact],
-                        'approach': [round(float(v), 6) for v in approach],
-                        'grab': [round(float(v), 6) for v in grab],
-                        'travel_deg': round(cost, 1),
-                    }
-
-            if best is not None:
-                return best
+        if best is not None:
+            return best
 
     return None
 
@@ -297,6 +315,8 @@ def plan_floor_grab(arm, point, grabs, grid=None):
     sink = min(FLOOR_GRAB_SINK_FRACTION * top_height, FLOOR_GRAB_MAX_SINK_M)
     lowest = max(min(grid['heights_m']), top_height - sink)
     grid['heights_m'] = [lowest + 0.01 * k for k in range(4)]
+    # Into the item, not over it: lowest height first, as before.
+    grid['tilt_first'] = False
 
     # Seed IK from the grabs nearest this spot: same elbow, same wrist.
     nearby = sorted(

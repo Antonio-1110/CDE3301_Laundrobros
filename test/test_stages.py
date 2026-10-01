@@ -373,14 +373,16 @@ def test_cli_gripper_fake_angle_does_not_touch_gpio(capsys):
     assert 'fake gripper' in capsys.readouterr().out
 
 
-def test_run_and_clear_scan_quick_by_default_everything_else_full():
+def test_scan_run_and_clear_scan_quick_by_default():
     from laundry_control.cli import _baseline_path
 
     assert _parse(['run']).end_scan == 'none'
     assert _parse(['clear']).end_scan == 'none'
+    assert _parse(['scan']).end_scan == 'none'
     assert _parse(['run', '--full']).end_scan == 'precession'
-    assert _parse(['scan']).end_scan == 'precession'
-    assert _parse(['detect', 'x.csv']).end_scan == 'precession'
+    assert _parse(['scan', '--full']).end_scan == 'precession'
+    # detect reads the kind from the CSV unless told.
+    assert _parse(['detect', 'x.csv']).end_scan is None
     assert _parse(['detect', 'x.csv', '--quick']).end_scan == 'none'
     # One baseline set for both kinds of scan.
     assert _baseline_path(_parse(['run'])).endswith('baseline_scans')

@@ -98,6 +98,26 @@ def load_points(path, segments=None):
     return points[keep]
 
 
+def end_scan_of(path):
+    """
+    Return the --end-scan kind a scan CSV was recorded as.
+
+    'precession' (full) if any reading is labelled END, else 'none'
+    (quick). Files too old to label (no segment or ray columns) are
+    taken as full, which is how they were always judged.
+    """
+    from .cloud_io import load_scan_csv
+
+    columns = load_scan_csv(path)
+
+    if 'segment' not in columns and not all(
+        name in columns for name in ('ox', 'oy', 'oz')
+    ):
+        return 'precession'
+
+    return 'precession' if np.any(labels(columns) == END) else 'none'
+
+
 def for_end_scan(end_scan):
     """Return the segments a scan of this --end-scan kind records."""
     return (STROKES,) if end_scan == 'none' else None

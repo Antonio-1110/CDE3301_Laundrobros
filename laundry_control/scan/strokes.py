@@ -20,9 +20,13 @@ Pure arithmetic, no ROS: scan.pattern (the arm) and scan.coverage
 
 import math
 
-# The largest allowed stroke spacing. Wider strokes leave gaps the
-# beam never sees; `--step` above this is rejected, not clamped.
-MAX_STEP_M = 0.03
+# The largest allowed stroke spacing; `--step` above this is rejected,
+# not clamped. Spacing over the 3 cm default leaves gaps the beam never
+# sees, so a coarse scan is only for finding the bigger items fast: in
+# simulation (8 baselines, 2026-10-01), 12 cm still found every towel
+# and ~93% of shirts but only about half the socks and flat cloths.
+# Saying the bucket is EMPTY needs the default spacing.
+MAX_STEP_M = 0.12
 
 # Slack for floating-point division: 0.36 / 0.03 must be 12, not 13.
 _EPSILON = 1e-9

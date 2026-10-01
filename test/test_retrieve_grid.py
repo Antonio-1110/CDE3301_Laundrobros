@@ -164,3 +164,63 @@ def test_a_flipped_ik_solution_is_skipped_for_the_next_height(monkeypatch):
 
     assert grab['height_m'] == pytest.approx(0.03)
     assert not retrieve_grid.flipped(grab['grab'], config.get_named_pose('inter'))
+
+
+class _ReachArm:
+    """Reaches a grab only at the given (height, tilt) pairs."""
+
+    def __init__(self, reachable):
+        self.reachable = reachable
+        self.current = None
+
+    def compute_ik(self, pose, seed):
+        if self.current not in self.reachable:
+            return None
+
+        return list(np.array(config.get_named_pose('inter')) + 0.1)
+
+    def first_invalid_state(self, waypoints):
+        return None
+
+
+def _solve_with(monkeypatch, grid, reachable):
+    arm = _ReachArm(reachable)
+    real_geometry = retrieve_grid.grab_geometry
+
+    def geometry(depth, angle, height, tilt, cone=None):
+        arm.current = (height, tilt)
+        return real_geometry(depth, angle, height, tilt, cone)
+
+    monkeypatch.setattr(retrieve_grid, 'grab_geometry', geometry)
+
+    return retrieve_grid.solve_one(arm, 0.30, 0.0, grid, seeds=[[0.0] * 7])
+
+
+def test_tilt_first_takes_the_least_tilt_then_the_first_height(monkeypatch):
+    grid = dict(
+        config.RETRIEVE_GRID,
+        heights_m=[0.15, 0.11, 0.07], tilts_deg=[0.0, 30.0], tilt_first=True,
+    )
+    # 15 cm only reaches tilted; 11 and 7 cm reach vertical.
+    reachable = {(0.15, 30.0), (0.11, 0.0), (0.07, 0.0)}
+
+    grab = _solve_with(monkeypatch, grid, reachable)
+
+    assert (grab['height_m'], grab['tilt_deg']) == (0.11, 0.0)
+
+
+def test_height_first_takes_the_first_height_at_any_tilt(monkeypatch):
+    grid = dict(
+        config.RETRIEVE_GRID,
+        heights_m=[0.15, 0.11, 0.07], tilts_deg=[0.0, 30.0], tilt_first=False,
+    )
+    reachable = {(0.15, 30.0), (0.11, 0.0), (0.07, 0.0)}
+
+    grab = _solve_with(monkeypatch, grid, reachable)
+
+    assert (grab['height_m'], grab['tilt_deg']) == (0.15, 30.0)
+
+
+def test_the_sweep_grid_stays_clear_of_the_floor():
+    assert min(config.RETRIEVE_GRID['heights_m']) >= 0.07
+    assert config.RETRIEVE_GRID['tilt_first']

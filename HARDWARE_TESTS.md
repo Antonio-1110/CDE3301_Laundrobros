@@ -303,7 +303,7 @@ Everything detection-related is currently tuned on synthetic items injected into
 **How to take each one:**
 
 1. Place the item and take a photo into the bucket from behind the arm.
-2. Run `laundry scan --save validation_scans/<name>.csv`, using the file names below.
+2. Run `laundry scan --full --save validation_scans/<name>.csv`, using the file names below. `--full` adds the end scan: several placements are at the closed end, which only the end scan sees.
 3. Add one line to `validation_scans/notes.csv`:
 
    ```text

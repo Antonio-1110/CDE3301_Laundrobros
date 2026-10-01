@@ -3,66 +3,119 @@
 """
 `laundry`: one command for every stage of the pipeline.
 
-    laundry move home|inter|bottom|drop|grab_NN
-    laundry move joints J1 .. J7 [--degrees]
-    laundry move joint6 DEG | joint7 DEG
-    laundry move linear M | twist M DEG
-    laundry scan [--save scan.csv] [--end-scan precession|none]
-    laundry detect scan.csv [--end-scan none] [-o targets.json] [--publish]
-    laundry grasp targets.json [--drop] [--dry-run]
+HOW TO READ THE USAGE LINES
+---------------------------
+    [--opt]     optional
+    a|b|c       pick one of these
+    N, M, DEG   a number you supply (count, metres, degrees)
+    ...         more of the same
+
+Every command has `--help` with the full list of options; below are
+only the ones you normally need. Commands marked * MOVE THE ARM.
+
+THE MAIN JOBS
+-------------
+  * laundry clear [--no-grabs] [--max-rounds N]
+        Empty the bucket: blind grabs over the grab grid, then
+        scan -> grasp rounds until a scan finds nothing.
+  * laundry run [--dry-run]
+        One round: scan -> detect -> grasp the best item -> DROP.
+  * laundry preplanned [--limit N] [--speed 0.3]
+        Blind grabs only: every grab_NN in turn, no sensing.
+
+ONE STAGE AT A TIME
+-------------------
+Stages hand off through files (a scan CSV, then a targets JSON), so
+each can be run alone, rerun offline, or inspected in between.
+`run` and `clear` chain the same stages in memory.
+
+  * laundry scan [--save scan.csv] [--full]
+        Sweep the ToF sensor through the bucket into a CSV.
+    laundry detect scan.csv [-o targets.json] [--publish]
+        Find laundry in a scan by comparing it with the baselines.
+  * laundry grasp targets.json [--drop] [--dry-run]
+        Grasp the best reachable target from `detect -o`.
+    laundry replay scan.csv
+        Publish a saved scan to RViz.
+
+MOVING AND CHECKING THE ARM
+---------------------------
+  * laundry move home|inter|bottom|drop|grab_NN
+        Go to a named pose (baked route if there is one).
+  * laundry move joints J1 .. J7 [--degrees]
+  * laundry move joint6 DEG | joint7 DEG       turn one joint by DEG
+  * laundry move linear M | twist M DEG        along the tool axis by M
+                                               metres (twist: also J7)
     laundry gripper open|close|ANGLE
-    laundry baseline collect [--count N] [--archive] [-- <scan options>]
-    laundry baseline collect -- --end-scan none      # the quick-scan set
+    laundry check-flange
+        Is the tool axis at INTER lined up with the bucket axis?
+
+THE BUCKET, OBSTACLES AND BAKED MOTIONS
+---------------------------------------
+    laundry scene apply|check|fit
+        apply: put the padded bucket and table into MoveIt.
+        check: collision-check every named pose and baked route.
+        fit:   measure where the bucket really is, from the baselines.
+  * laundry plan bake [poses|retrieve|transfers|endcap|all]
+        Solve and save the fixed motions in scan_plans/ (INTER/BOTTOM,
+        grab grid, routes from INTER, end scan). Run it through
+        ./rebake.sh, on the fake controller.
+  * laundry plan replay [--speed 0.3]
+        Run only the end scan, INTER to INTER.
+
+BASELINES AND DETECTOR TUNING
+-----------------------------
+  * laundry baseline collect [--count N] [--archive]
+        Record N empty-bucket scans. --archive replaces the current
+        set (the old one moves to baseline_scans/archive/).
     laundry baseline promote scan.csv|dir ... [--move] [--archive]
     laundry baseline archive | list | restore LABEL
-    laundry replay scan.csv
-    laundry check-flange
-    laundry scene apply | check
-    laundry plan bake [endcap|transfers|retrieve|all] [--depth 0.42]
-    laundry plan replay [--speed 0.3]
-    laundry evaluate [--end-scan none] [--sweep] [--synthetic]
-                     [--laundry scan.csv ...]
-    laundry run [--end-scan precession] [--dry-run]         # one item
-    laundry clear [--end-scan none] [--no-grabs] [--max-rounds N]
-    laundry preplanned [--limit N] [--speed 0.3]
+    laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
+        Measure the detector: false positives on the baselines, and
+        recall on scans with known laundry.
 
-Stages hand off through files - a scan CSV, then a targets JSON - so
-each one can run alone, be rerun offline, or be inspected in
-between. `laundry run` chains them in memory in one process.
+FULL AND QUICK SCANS (--full / --quick)
+---------------------------------------
+    quick  (--quick, --end-scan none)
+           Strokes in and out of the bucket only. Doesn't disturb the
+           laundry, but never sees the closed end.
+    full   (--full, --end-scan precession)
+           The strokes plus the end scan: the tool tilts in a cone at
+           the deepest point - the only view of the closed end, but it
+           swings the arm low near the walls.
 
-FULL AND QUICK SCANS
---------------------
-    --end-scan precession   the FULL scan: strokes plus the tilting
-                            end scan, which alone sees the closed end
-                            (but swings the arm low near the walls)
-    --end-scan none         the QUICK scan: strokes only, no tilting
+    Which one each command does by default:
+        scan, run, clear     quick. run/clear add the end scan on its
+                             own when a quick scan finds nothing,
+                             before saying the bucket is empty.
+        baseline collect     always full.
+        evaluate             full.
+        detect               reads it from the CSV (were end-scan
+                             readings recorded?); --quick/--full
+                             override.
 
-Both are judged against the same full-scan baselines (baseline_scans/):
-a quick scan against their strokes alone (scan/segments.py). `laundry
-run` and `laundry clear` default to the QUICK scan, and when it finds
-nothing run the end scan on its own (straight in, end scan, straight
-out) before concluding the bucket is empty. Every other command
-defaults to the full scan.
+    There is one baseline set, baseline_scans/, of full scans. A quick
+    scan is compared with their stroke readings alone
+    (scan/segments.py).
 
-WHAT NEEDS WHAT
----------------
-    detect, evaluate, baseline promote   nothing: plain files, no ROS
-                                         graph, no arm
-    replay                               a ROS graph (for RViz)
-    move, check-flange, plan bake,       MoveIt (real or fake)
-    scene
-    scan, grasp, run, clear, preplanned  MoveIt + scan_recorder_node/
-                                         tof_sensor/gripper_node - or
-                                         --fake-hardware
-    gripper open|close                   gripper_node
-    gripper ANGLE                        the servo on this machine's GPIO
+WHAT EACH COMMAND NEEDS RUNNING
+-------------------------------
+    detect, evaluate, scene fit,   nothing: plain files
+    baseline promote|archive|list|restore
+    replay                         a ROS graph (RViz to look at it)
+    move, check-flange,            MoveIt, real or fake
+    scene apply|check, plan
+    scan, grasp, run, clear,       the full bring-up: MoveIt plus the
+    preplanned, baseline collect   ToF, recorder and gripper nodes
+    gripper open|close             gripper_node
+    gripper ANGLE                  the servo on this machine's GPIO
 
---fake-hardware swaps the gripper and the ToF recorder for stand-ins
-(hardware/fake.py) while every arm motion still goes through MoveIt,
-so the whole pipeline runs against the fake controller:
+    Without the hardware, --fake-hardware swaps the gripper and the
+    ToF recorder for stand-ins (hardware/fake.py); the arm still goes
+    through MoveIt, on the fake controller:
 
-    ros2 launch laundry_control laundry_bringup.launch.py fake:=true
-    laundry run --fake-hardware --scan-from baseline_scans/<one>.csv
+        ros2 launch laundry_control laundry_bringup.launch.py fake:=true
+        laundry run --fake-hardware --scan-from baseline_scans/<one>.csv
 
 Heavy imports (rclpy, MoveIt messages) happen inside each command, so
 `laundry --help` and the offline commands stay fast.
@@ -436,11 +489,23 @@ def cmd_detect(args):
     baseline = _baseline_path(args)
     params = _detect_params(args)
 
-    from .scan.segments import for_end_scan
+    from .scan.segments import end_scan_of, for_end_scan
+
+    end_scan = args.end_scan
+
+    if end_scan is None:
+        end_scan = end_scan_of(args.scan_csv)
+        if end_scan == 'none':
+            print(
+                'No end-scan readings: judging it as a QUICK scan, '
+                "against the baselines' strokes."
+            )
+        else:
+            print('Judging it as a FULL scan.')
 
     clusters, _surface = detect_scan(
         args.scan_csv, baseline, params,
-        segments=for_end_scan(args.end_scan),
+        segments=for_end_scan(end_scan),
     )
 
     if args.output:
@@ -1294,10 +1359,11 @@ def build_parser():
     )
     detect.add_argument(
         '--end-scan', choices=('precession', 'none', 'bottom'),
-        default='precession',
+        default=None,
         help=(
             "The kind of scan the CSV is: 'none' for a quick scan (modelled "
-            "from the baselines' strokes alone), else a full scan."
+            "from the baselines' strokes alone), else a full scan. Default: "
+            'read from the CSV (full if it has end-scan readings).'
         ),
     )
     from .scan.pattern import add_quick_full_flags

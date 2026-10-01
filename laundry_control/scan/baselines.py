@@ -106,7 +106,13 @@ def count_points(csv_path):
 
 
 def run_one_scan(csv_path, scan_args, timeout_sec):
-    """Run one `laundry scan --save csv_path`; True if it reported success."""
+    """
+    Run one `laundry scan --save csv_path`; True if it reported success.
+
+    Always a full scan: `laundry scan` defaults to the quick one, and
+    baselines must include the end scan (run_collect). Forwarded
+    options come after, so --end-scan bottom still overrides it.
+    """
     command = [
         sys.executable,
         '-m',
@@ -114,6 +120,8 @@ def run_one_scan(csv_path, scan_args, timeout_sec):
         'scan',
         '--save',
         csv_path,
+        '--end-scan',
+        'precession',
     ] + list(scan_args)
 
     try:
@@ -572,8 +580,39 @@ def forwarded_end_scan(scan_args):
     return end_scan
 
 
+def forwarded_step(scan_args):
+    """Return the --step the forwarded options ask for, or None."""
+    step = None
+
+    for index, arg in enumerate(scan_args):
+        if arg == '--step' and index + 1 < len(scan_args):
+            step = scan_args[index + 1]
+        elif arg.startswith('--step='):
+            step = arg.split('=', 1)[1]
+
+    try:
+        return None if step is None else float(step)
+    except ValueError:
+        return None  # `laundry scan` itself reports it
+
+
 def run_collect(args, scan_args):
     """Run `laundry baseline collect`; returns a process exit code."""
+    from .pattern import DEFAULT_STEP_M
+
+    # Coarse scans are judged against the baselines' wall cells, which
+    # only a scan at the default spacing (or finer) fills.
+    step = forwarded_step(scan_args)
+
+    if step is not None and step > DEFAULT_STEP_M + 1e-9:
+        print(
+            f'Baselines must be at most {DEFAULT_STEP_M} m apart: coarser '
+            'scans are judged against them. Collect without --step '
+            f'{step:g}.',
+            file=sys.stderr,
+        )
+        return 2
+
     # Baselines are full scans: a quick scan is modelled from their
     # strokes (scan/segments.py), so quick-scan baselines could serve
     # nothing a full set does not.

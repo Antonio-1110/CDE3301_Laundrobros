@@ -201,15 +201,16 @@ def test_precession_end_scan_gets_on_replays_and_turns_around():
 
 
 def _scan_args(**overrides):
+    # The full scan: the end-scan plan is only checked for it.
     parser = argparse.ArgumentParser()
     pattern.add_scan_arguments(parser)
-    args = parser.parse_args([])
+    args = parser.parse_args(['--full'])
     for key, value in overrides.items():
         setattr(args, key, value)
     return args
 
 
-def test_scan_kwargs_default_to_the_committed_precession_plan():
+def test_full_scan_kwargs_use_the_committed_precession_plan():
     kwargs = pattern.scan_kwargs_from_args(_scan_args())
 
     assert kwargs['end_scan'] == 'precession'

@@ -23,9 +23,11 @@ from .. import config
 from ..arm.transfers import go_to
 
 # Defaults for every scan parameter, shared by scan() and the CLI so
-# the two can never drift apart. Baselines and detection scans MUST
-# use the same values: the detector's learned residual field is only
-# valid for the trajectory it was learned on.
+# the two can never drift apart. Baselines and detection scans must
+# see the wall the same way: same depth range, sweep and J7 speed.
+# The step may be coarser than the baselines' (the model is per wall
+# cell, and every stroke views the wall square-on), as long as the
+# stroke speed scales with it - see scaled_stroke_speed().
 DEFAULT_DEPTH_M = 0.42
 # How far the arm moves straight in from INTER, without recording or
 # turning J7, before the strokes start: at INTER the sensor is at the
@@ -50,24 +52,45 @@ DEFAULT_SWEEP_DEG = 150.0
 # the denser scan cut the grasp point's median error ~1.0 -> 0.65cm;
 # 0.02 gained nothing more. The committed baselines were recorded at
 # 0.1: re-collect them at this speed (HARDWARE_TESTS.md D).
+#
+# These are the speeds for the DEFAULT step. A stroke's duration is set
+# by its tool-Z distance (the J7 twist rides on MoveIt's timing,
+# arm/controller._add_joint7_twist), so a coarser step at the same
+# scaling would just take longer per stroke and save no time. The CLI
+# therefore scales both with the step (scaled_stroke_speed): 12 cm at
+# 0.12 sweeps J7 as fast as 3 cm at 0.03, in a quarter of the strokes.
 DEFAULT_VELOCITY = 0.03
 DEFAULT_ACCELERATION = 0.03
+
+
+def scaled_stroke_speed(step, base=DEFAULT_VELOCITY):
+    """
+    Return the stroke velocity/acceleration scaling for this step.
+
+    base * step / DEFAULT_STEP_M, capped at 1: every stroke then takes
+    about as long as a default one, so J7 sweeps at the baselines' speed
+    and each sweep gets as many readings.
+    """
+    return min(1.0, base * step / DEFAULT_STEP_M)
+
+
 DEFAULT_ROTATION_VELOCITY = 0.5
 DEFAULT_ROTATION_ACCELERATION = 0.5
 DEFAULT_CARTESIAN_STEP_M = 0.005
 DEFAULT_PAUSE_SEC = 0.0
 DEFAULT_SAVE_INTERVAL_SEC = 5.0
 
-# How the closed end is covered: 'precession' (default, baked - see
-# scan/endcap.py), 'none' (the QUICK scan: no end scan, only a J7
-# turnaround at the deepest stroke - the tilting end scan swings the
-# wrist and elbow low, rubbing laundry on the lower walls, and the
-# quick scan never does; it sees ~86% of the floor and lower walls and
-# none of the closed end, and has its own baselines,
-# config.baseline_dir) or 'bottom' (the old recorded-pose detour, only
-# when asked for).
+# How the closed end is covered: 'precession' (the FULL scan, baked -
+# see scan/endcap.py), 'none' (the QUICK scan, the CLI default: no end
+# scan, only a J7 turnaround at the deepest stroke - the tilting end
+# scan swings the wrist and elbow low, rubbing laundry on the lower
+# walls, and the quick scan never does; it sees ~86% of the floor and
+# lower walls and none of the closed end, and is judged against the
+# baselines' strokes, scan/segments.py) or 'bottom' (the old
+# recorded-pose detour, only when asked for). Baselines are always
+# collected full (scan/baselines.run_one_scan asks for it).
 END_SCANS = ('precession', 'none', 'bottom')
-DEFAULT_END_SCAN = 'precession'
+DEFAULT_END_SCAN = 'none'
 
 
 def scan(
@@ -112,9 +135,11 @@ def scan(
 
     step:
         The LARGEST linear distance per scan stroke, at most
-        strokes.MAX_STEP_M (0.03 m). The strokes are spread evenly
+        strokes.MAX_STEP_M (0.12 m). The strokes are spread evenly
         from entry_depth to depth (scan/strokes.stroke_plan), so each
-        may be a little shorter.
+        may be a little shorter. Over the default, pass velocity and
+        acceleration from scaled_stroke_speed(step), or the scan only
+        gets slower, not faster.
 
         Default:
             0.03 m
@@ -1273,7 +1298,10 @@ def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):
         help=(
             'Largest distance between scan strokes in metres, at most '
             f'{MAX_STEP_M} (default: {DEFAULT_STEP_M}); the strokes are '
-            'spread evenly from --entry-depth to --depth.'
+            'spread evenly from --entry-depth to --depth. Coarser is '
+            'faster but misses small items (12 cm: about half the '
+            'socks); the stroke speed scales with it unless --velocity '
+            'is given.'
         ),
     )
 
@@ -1291,10 +1319,11 @@ def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):
         '--velocity',
         dest='scan_velocity',
         type=float,
-        default=DEFAULT_VELOCITY,
+        default=None,
         help=(
-            'MoveIt velocity scaling for the scan strokes '
-            f'(default: {DEFAULT_VELOCITY}).'
+            'MoveIt velocity scaling for the scan strokes (default: '
+            f'{DEFAULT_VELOCITY} at the default --step, scaled with it: '
+            f'{scaled_stroke_speed(MAX_STEP_M):g} at {MAX_STEP_M:g}).'
         ),
     )
 
@@ -1302,10 +1331,11 @@ def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):
         '--acceleration',
         dest='scan_acceleration',
         type=float,
-        default=DEFAULT_ACCELERATION,
+        default=None,
         help=(
-            'MoveIt acceleration scaling for the scan strokes '
-            f'(default: {DEFAULT_ACCELERATION}).'
+            'MoveIt acceleration scaling for the scan strokes (default: '
+            f'{DEFAULT_ACCELERATION} at the default --step, scaled with '
+            'it like --velocity).'
         ),
     )
 
@@ -1410,8 +1440,15 @@ def scan_kwargs_from_args(args):
         'entry_depth': args.entry_depth,
         'step': args.step,
         'sweep_deg': args.sweep,
-        'velocity': args.scan_velocity,
-        'acceleration': args.scan_acceleration,
+        # Unless given, both scale with the step (scaled_stroke_speed).
+        'velocity': (
+            args.scan_velocity if args.scan_velocity is not None
+            else scaled_stroke_speed(args.step, DEFAULT_VELOCITY)
+        ),
+        'acceleration': (
+            args.scan_acceleration if args.scan_acceleration is not None
+            else scaled_stroke_speed(args.step, DEFAULT_ACCELERATION)
+        ),
         'rotation_velocity': args.rotation_velocity,
         'rotation_acceleration': args.rotation_acceleration,
         'cartesian_step': args.cartesian_step,

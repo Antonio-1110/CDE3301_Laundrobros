@@ -245,9 +245,11 @@ def get_named_pose(name):
 #
 # `laundry plan bake retrieve` places one grab on the bucket floor at
 # every (depth, floor angle) below, in the bucket of OBSTACLES, and
-# for each finds - by IK, collision-checked - the LOWEST gripper
-# height in heights_m and then the most vertical tilt in tilts_deg
-# that the arm can reach. Each grab is stored as two joint states in
+# for each finds - by IK, collision-checked - the most vertical tilt
+# in tilts_deg, then the first gripper height in heights_m at that
+# tilt, that the arm can reach (tilt_first; False: the first height,
+# then the most vertical tilt there). Each grab is stored as two
+# joint states in
 # scan_plans/retrieve.yaml:
 #
 #   approach (named pose grab_NN): the gripper approach_m back along
@@ -265,7 +267,7 @@ def get_named_pose(name):
 #                      line, positive toward link_base +x. The claw
 #                      is ~6 cm wide; 20 deg is ~7 cm to the side.
 #   heights_m:         gripper contact point above the floor, tried
-#                      lowest first
+#                      in the order listed
 #   tilts_deg:         tool axis from vertical (straight down onto the
 #                      floor) toward the closed end, tried smallest
 #                      first; deep grabs need some to reach in
@@ -280,14 +282,20 @@ def get_named_pose(name):
 RETRIEVE_GRID = {
     'depths_m': [0.40, 0.30, 0.20, 0.10],
     'floor_angles_deg': [0.0, -20.0, 20.0],
-    # Half-centimetre steps near the floor, and 0.5 cm gripper
-    # clearance (was 1 cm, whole-cm heights): grabs came out ~3 cm
-    # above the floor, which the rig confirmed by ruler (2026-09-29).
-    # Fake controller: 12/12 solve, median 2.0 cm (1 cm clearance:
-    # median 2.5; none: 1.5, but no margin for model error).
-    'heights_m': [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06],
-    'tilts_deg': [0.0, 15.0, 30.0, 45.0, 60.0],
+    # The sweep runs on a drum expected ~2/3 full: the pile's top is
+    # ~25 cm above the floor (the drum is ~36-45 cm across). Grabs
+    # aimed at the floor (1-6 cm, lowest first, until 2026-10-01)
+    # drove the claw ~20 cm through the pile and leaned the deep ones
+    # 30-60 deg to get there. Now: highest first, never below 7 cm,
+    # and the least tilt wins over height. The ceiling bounds it: a
+    # vertical grab needs the 15 cm gripper plus approach_m above the
+    # contact point, so the highest heights only fit tilted or near
+    # the mouth.
+    'heights_m': [0.15, 0.13, 0.11, 0.09, 0.07],
+    'tilts_deg': [0.0, 15.0, 30.0, 45.0],
+    'tilt_first': True,
     'approach_m': 0.08,
+    # 0.5 cm (was 1 cm): the rig confirmed grabs by ruler (2026-09-29).
     'clearance_m': 0.005,
 }
 
@@ -299,7 +307,8 @@ RETRIEVE_GRID = {
 # solve everywhere from 0 to +/-90 deg at depths 3-48 cm. Items beyond
 # it fall back to the Cartesian reach (grasp/plan.py).
 #
-# The sensorless grid above stays on the floor, where laundry pools;
+# The sensorless grid above stays over the floor's lowest line,
+# where laundry pools;
 # add angles to floor_angles_deg (e.g. -45.0, 45.0) to also grab blind
 # on the lower walls, at ~15 s per extra grab.
 DETECTED_GRAB_MAX_ANGLE_DEG = 90.0
