@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 
 r"""
-Standalone node that owns the gripper's servo hardware (see servo.py).
+Standalone node that owns the gripper's servo hardware.
+
+The servo is on this Pi's GPIO (backend:=gpio, servo.py) or on the
+ESP32, commanded over MQTT (backend:=mqtt, mqtt_servo.py). The
+services behave the same either way - they return once the move has
+finished. Default: config.GRIPPER_BACKEND.
 
 Callers like the grasp stage never need direct GPIO access - the
 same split already used for the ToF sensor (tof_sensor.py) and the
@@ -28,6 +33,7 @@ that ever changes, rather than editing code:
 
 HARDWARE ONLY. Usage:
     ros2 run laundry_control gripper_node
+    ros2 run laundry_control gripper_node --ros-args -p backend:=mqtt
 """
 
 import os
@@ -38,7 +44,15 @@ from std_srvs.srv import Trigger
 
 from .gripper_client import CLOSE_SERVICE, OPEN_SERVICE
 from .servo import SETTLE_SEC
-from ..config import GRIPPER_CLOSE_ANGLE_DEG, GRIPPER_OPEN_ANGLE_DEG
+from ..config import (
+    GRIPPER_BACKEND,
+    GRIPPER_BACKENDS,
+    GRIPPER_CLOSE_ANGLE_DEG,
+    GRIPPER_OPEN_ANGLE_DEG,
+    MQTT_HOST,
+    MQTT_PORT,
+    MQTT_TOPIC_PREFIX,
+)
 
 
 def enter_realtime(priority):
@@ -57,6 +71,20 @@ def enter_realtime(priority):
     return None
 
 
+def make_mqtt_servo(host, port, prefix, client_id, log_info=print,
+                    log_warn=print):
+    """Return a started mqtt_servo.MqttServoDriver for the ESP32's servo."""
+    from . import esp32_protocol
+    from .mqtt_link import MqttLink
+    from .mqtt_servo import MqttServoDriver
+
+    link = MqttLink(host, port, client_id, log_info=log_info,
+                    log_warn=log_warn)
+    driver = MqttServoDriver(link, esp32_protocol.topics(prefix))
+    link.start()
+    return driver
+
+
 def leave_realtime():
     """Put the calling thread back on normal scheduling."""
     try:
@@ -70,6 +98,10 @@ class GripperNode(Node):
     def __init__(self):
         super().__init__('gripper_node')
 
+        self.declare_parameter('backend', GRIPPER_BACKEND)
+        self.declare_parameter('mqtt_host', MQTT_HOST)
+        self.declare_parameter('mqtt_port', MQTT_PORT)
+        self.declare_parameter('mqtt_prefix', MQTT_TOPIC_PREFIX)
         self.declare_parameter('open_angle_deg', GRIPPER_OPEN_ANGLE_DEG)
         self.declare_parameter('close_angle_deg', GRIPPER_CLOSE_ANGLE_DEG)
         # Off: on the rig, holding with the Pi's software-timed PWM
@@ -94,10 +126,29 @@ class GripperNode(Node):
         )
 
         # One driver for the node's lifetime, so a closed claw keeps
-        # its PWM between service calls. Created lazily: see _move_to.
+        # its PWM between service calls. The GPIO one is created
+        # lazily (see _move_to); the MQTT one now, so it is connected
+        # before the first call.
         self._driver = None
+        self.backend = self.get_parameter('backend').value
 
-        self.get_logger().info('gripper_node ready.')
+        if self.backend not in GRIPPER_BACKENDS:
+            raise ValueError(
+                f'backend must be one of {GRIPPER_BACKENDS}, not '
+                f'{self.backend!r}'
+            )
+
+        if self.backend == 'mqtt':
+            self._driver = make_mqtt_servo(
+                self.get_parameter('mqtt_host').value,
+                int(self.get_parameter('mqtt_port').value),
+                self.get_parameter('mqtt_prefix').value,
+                client_id='laundry_gripper_node',
+                log_info=self.get_logger().info,
+                log_warn=self.get_logger().warning,
+            )
+
+        self.get_logger().info(f'gripper_node ready ({self.backend} servo).')
 
     def _open_callback(self, request, response):
         return self._move_to(

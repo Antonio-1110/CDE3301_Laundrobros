@@ -241,63 +241,60 @@ def get_named_pose(name):
 
 
 # =============================================================
-# GENERATED GRAB POSES (sensorless first pass)
+# GRABS
 #
-# `laundry plan bake retrieve` places one grab on the bucket floor at
-# every (depth, floor angle) below, in the bucket of OBSTACLES, and
-# for each finds - by IK, collision-checked - the most vertical tilt
-# in tilts_deg, then the first gripper height in heights_m at that
-# tilt, that the arm can reach (tilt_first; False: the first height,
-# then the most vertical tilt there). Each grab is stored as two
-# joint states in
-# scan_plans/retrieve.yaml:
+# The sensorless sweep (`laundry preplanned`, the start of `laundry
+# clear`) visits the grabs placed by hand in scan_plans/grab_targets.
+# yaml, in order (grasp/grab_targets.py): each is a depth, floor
+# angle, height, tilt and approach distance relative to the bucket.
+# Edit them by dragging in RViz (`laundry plan edit-grabs`), then
+# `laundry plan bake retrieve` solves each EXACTLY as placed and
+# stores it as two joint states in scan_plans/retrieve.yaml:
 #
 #   approach (named pose grab_NN): the gripper approach_m back along
 #       its own axis - reached from INTER on a baked route;
 #   grab: straight down onto the laundry from there, with a straight,
 #       collision-checked joint move, then straight back up.
 #
-# `laundry preplanned` visits them in this order: depths as listed
-# (mouth first - what is nearest is easiest to pull out), and at each
-# depth the floor angles as listed.
+# The sweep runs on a drum expected ~2/3 full (the pile's top ~25 cm
+# above the floor), so its grabs sit well up in the pile; the old
+# grid's grabs, 1.5-4 cm off the floor, drove the claw ~20 cm through
+# it. A vertical grab needs the 15 cm gripper plus its approach
+# between the contact point and the drum's ceiling.
 #
-#   depths_m:          from the CLOSED end of the bucket (it is
-#                      ~0.53 m deep; the mouth faces the arm)
-#   floor_angles_deg:  around the bucket axis from the floor's lowest
-#                      line, positive toward link_base +x. The claw
-#                      is ~6 cm wide; 20 deg is ~7 cm to the side.
-#   heights_m:         gripper contact point above the floor, tried
-#                      in the order listed
-#   tilts_deg:         tool axis from vertical (straight down onto the
-#                      floor) toward the closed end, tried smallest
-#                      first; deep grabs need some to reach in
-#   clearance_m:       extra gripper padding the grabs are solved
-#                      with, on top of GRIPPER_PADDING_M - margin for
-#                      the bucket model and the arm's accuracy
+# RETRIEVE_GRID is the search for DETECTED items (grasp/
+# retrieve_grid.plan_floor_grab), which sinks into the sensed item:
 #
-# The side grabs are the ones most sensitive to where the bucket
-# really is (`laundry scene fit`): settle OBSTACLES first, then bake.
+#   max_depth_m:   deepest item it will try, from the CLOSED end of
+#                  the bucket (it is ~0.53 m deep)
+#   min_height_m:  never place the contact point lower than this
+#                  above the floor
+#   tilts_deg:     tool axis from straight at the wall toward the
+#                  closed end, tried smallest first
+#   approach_m:    the approach pose's distance back along the tool
+#   clearance_m:   extra gripper padding every grab - swept or
+#                  detected - is solved with, on top of
+#                  GRIPPER_PADDING_M: margin for the bucket model and
+#                  the arm's accuracy
+#
+# Side grabs are the ones most sensitive to where the bucket really
+# is (`laundry scene fit`): settle OBSTACLES first, then bake.
 # =============================================================
 
 RETRIEVE_GRID = {
-    'depths_m': [0.40, 0.30, 0.20, 0.10],
-    'floor_angles_deg': [0.0, -20.0, 20.0],
-    # The sweep runs on a drum expected ~2/3 full: the pile's top is
-    # ~25 cm above the floor (the drum is ~36-45 cm across). Grabs
-    # aimed at the floor (1-6 cm, lowest first, until 2026-10-01)
-    # drove the claw ~20 cm through the pile and leaned the deep ones
-    # 30-60 deg to get there. Now: highest first, never below 7 cm,
-    # and the least tilt wins over height. The ceiling bounds it: a
-    # vertical grab needs the 15 cm gripper plus approach_m above the
-    # contact point, so the highest heights only fit tilted or near
-    # the mouth.
-    'heights_m': [0.15, 0.13, 0.11, 0.09, 0.07],
-    'tilts_deg': [0.0, 15.0, 30.0, 45.0],
-    'tilt_first': True,
+    'max_depth_m': 0.55,
+    'min_height_m': 0.01,
+    'tilts_deg': [0.0, 15.0, 30.0, 45.0, 60.0],
     'approach_m': 0.08,
     # 0.5 cm (was 1 cm): the rig confirmed grabs by ruler (2026-09-29).
     'clearance_m': 0.005,
 }
+
+
+def grab_targets_path():
+    """Return <repo>/scan_plans/grab_targets.yaml (see grasp/grab_targets.py)."""
+    return os.path.join(repo_root(), 'scan_plans', 'grab_targets.yaml')
+
 
 # DETECTED items are grabbed the same way (IK over the item, straight
 # descent, reached from the nearest grab_NN - grasp/retrieve_grid.
@@ -306,11 +303,6 @@ RETRIEVE_GRID = {
 # project's scope. Measured on the fake controller (2026-09-26), grabs
 # solve everywhere from 0 to +/-90 deg at depths 3-48 cm. Items beyond
 # it fall back to the Cartesian reach (grasp/plan.py).
-#
-# The sensorless grid above stays over the floor's lowest line,
-# where laundry pools;
-# add angles to floor_angles_deg (e.g. -45.0, 45.0) to also grab blind
-# on the lower walls, at ~15 s per extra grab.
 DETECTED_GRAB_MAX_ANGLE_DEG = 90.0
 
 # =============================================================
@@ -411,6 +403,18 @@ def xarm_description_arguments():
         'geometry_mesh_origin_rpy': triple(GRIPPER_MESH_RPY),
     }
 
+
+# ros2_control update rate on the real arm, in Hz: how often the
+# trajectory controller sends the arm its next target. Stock xarm_ros2
+# runs 150 Hz (6.7 ms a tick), but every tick waits on the arm twice -
+# read() asks for the joint states, write() sends set_servo_angle_j and
+# waits for the reply - and the arm takes ~3-4 ms to answer each. So
+# while moving, ticks overran 6.7 ms all the time, even on the cable
+# (logs Sep 30 - Oct 6): late ticks are skipped and the next target
+# jumps, which shows up as jerks. 88% of those slow ticks fit in 10 ms.
+# laundry_bringup.launch.py applies it (control_rate_hz:= overrides,
+# e.g. 150 to compare); xarm_ros2 itself stays unmodified.
+ARM_CONTROL_RATE_HZ = 100
 
 # The ros2_control trajectory controller that actually drives the
 # joints - the same name on the real arm and the fake controller
@@ -685,6 +689,53 @@ SERVO_MIN_ANGLE_DEG = 0.0
 SERVO_MAX_ANGLE_DEG = 180.0
 SERVO_MIN_PULSE_WIDTH_S = 0.5 / 1000
 SERVO_MAX_PULSE_WIDTH_S = 2.5 / 1000
+
+# =============================================================
+# HARDWARE LINK: this Pi, or the ESP32 over MQTT
+#
+# Where the ToF readings come from and who drives the gripper servo.
+# These are the defaults; laundry_bringup.launch.py overrides them
+# per run (tof_source:=mqtt gripper_backend:=mqtt mqtt_host:=...),
+# and `laundry gripper ANGLE` follows GRIPPER_BACKEND.
+#
+#   TOF_SOURCE       'i2c'  - the VL53L0X on this Pi's I2C bus
+#                    'mqtt' - the ESP32 publishes the readings
+#   GRIPPER_BACKEND  'gpio' - the servo on this Pi's GPIO 18
+#                    'mqtt' - the ESP32 drives the servo
+#
+# The protocol, and how the ESP32's timestamps are synced to this
+# Pi's clock: hardware/esp32_protocol.py. The ESP32's firmware:
+# esp32/tof_gripper_bridge. The broker (mosquitto, on this Pi):
+# setup/mosquitto/README.md.
+# =============================================================
+
+TOF_SOURCES = ('i2c', 'mqtt')
+GRIPPER_BACKENDS = ('gpio', 'mqtt')
+
+TOF_SOURCE = 'i2c'
+GRIPPER_BACKEND = 'gpio'
+
+# The broker runs on this Pi, so the nodes reach it on localhost;
+# the ESP32 is given the Pi's LAN address in its own config.
+MQTT_HOST = 'localhost'
+MQTT_PORT = 1883
+MQTT_TOPIC_PREFIX = 'laundrobros'
+
+# Clock sync pings (esp32_protocol.ClockSync): every period, and the
+# best of the last WINDOW used - 10 s of pings at 2 Hz. After each
+# ESP32 boot they go every BURST period until the window is full.
+ESP32_CLOCK_SYNC_PERIOD_SEC = 0.5
+ESP32_CLOCK_SYNC_BURST_PERIOD_SEC = 0.05
+ESP32_CLOCK_SYNC_WINDOW = 20
+
+# Warn while the sync's error bound (half the best round trip) is
+# above this: about 0.2 mm of scan error at the bucket wall per ms.
+# Over a good WiFi link with power save off it is 1-3 ms.
+ESP32_CLOCK_SYNC_WARN_MS = 5.0
+
+# No reading from the ESP32 for this long warns (it is offline, or
+# its sensor stopped), like an I2C failure does on this Pi.
+ESP32_READING_TIMEOUT_SEC = 1.0
 
 # =============================================================
 # DATA LOCATIONS

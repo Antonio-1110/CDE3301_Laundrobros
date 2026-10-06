@@ -3,3 +3,4 @@ lgpio
 adafruit-blinka
 adafruit-circuitpython-vl53l0x
 scipy
+paho-mqtt

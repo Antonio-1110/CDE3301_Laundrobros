@@ -8,3 +8,6 @@ __pycache__/*
 scan_records/
 # macOS Finder metadata
 .DS_Store
+
+# ESP32 WiFi credentials (copy config.h.example)
+esp32/tof_gripper_bridge/config.h

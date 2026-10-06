@@ -35,6 +35,7 @@ laundry_control/
   arm/              controller.py (XArm7Controller: MoveIt joint/Cartesian/twist moves),
                     geometry.py (shared orientation math), flange_check.py
   hardware/         tof_sensor.py, servo.py, gripper_node.py, gripper_client.py,
+                    esp32_protocol.py / mqtt_link.py / mqtt_servo.py (the ESP32 link),
                     fake.py (stand-ins for --fake-hardware)
   scan/             pattern.py (the helical scan), recorder_node.py / recorder_client.py,
                     cloud_io.py (CSV + PointCloud2), replay.py, baselines.py, coverage.py
@@ -42,6 +43,7 @@ laundry_control/
                     report.py, evaluate.py, synthetic.py / synthetic_eval.py
   grasp/            plan.py (grasp target + reachability), execute.py, targets_io.py
 launch/laundry_bringup.launch.py
+esp32/              firmware for the ESP32 that can own the ToF sensor and servo
 baseline_scans/     empty-bucket scans the detector models the bucket from
 scan_records/       everything else you scan (git-ignored)
 ```
@@ -129,6 +131,10 @@ The real rig: arm driver + MoveIt, `tof_sensor`, `scan_recorder_node`, `gripper_
 ```bash
 ros2 launch laundry_control laundry_bringup.launch.py robot_ip:=192.168.1.207
 ```
+
+The arm's control loop (ros2_control) runs at 100 Hz, not the stock 150 Hz: each tick waits for the arm twice, and at 150 Hz the ticks kept overrunning. It's set by `config.ARM_CONTROL_RATE_HZ`, and `control_rate_hz:=150` brings back the stock rate for comparison. `xarm_ros2` itself is unmodified: the bring-up passes the rate into the manufacturer's launch.
+
+The ToF sensor and the servo can be on this Pi (I2C and GPIO, the default) or on an ESP32 that talks to it over MQTT. Pick with `tof_source:=i2c|mqtt` and `gripper_backend:=gpio|mqtt`, or change the defaults in `config.py` (`TOF_SOURCE`, `GRIPPER_BACKEND`). For the ESP32, set up the broker first ([setup/mosquitto/README.md](setup/mosquitto/README.md)) and flash the firmware ([esp32/README.md](esp32/README.md)).
 
 No hardware: the MoveIt fake controller only. Pair it with `--fake-hardware`.
 

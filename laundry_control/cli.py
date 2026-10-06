@@ -56,10 +56,13 @@ THE BUCKET, OBSTACLES AND BAKED MOTIONS
         apply: put the padded bucket and table into MoveIt.
         check: collision-check every named pose and baked route.
         fit:   measure where the bucket really is, from the baselines.
+    laundry plan edit-grabs [--fill 0.67]
+        Place the sweep's grabs by dragging them in RViz; CHECK
+        their reach, SAVE to scan_plans/grab_targets.yaml.
   * laundry plan bake [poses|retrieve|transfers|endcap|all]
         Solve and save the fixed motions in scan_plans/ (INTER/BOTTOM,
-        grab grid, routes from INTER, end scan). Run it through
-        ./rebake.sh, on the fake controller.
+        the sweep's grabs, routes from INTER, end scan). Run it
+        through ./rebake.sh, on the fake controller.
   * laundry plan replay [--speed 0.3]
         Run only the end scan, INTER to INTER.
 
@@ -102,13 +105,15 @@ WHAT EACH COMMAND NEEDS RUNNING
 -------------------------------
     detect, evaluate, scene fit,   nothing: plain files
     baseline promote|archive|list|restore
-    replay                         a ROS graph (RViz to look at it)
+    replay, plan edit-grabs        a ROS graph (RViz to look at it;
+                                   edit-grabs' CHECK: MoveIt too)
     move, check-flange,            MoveIt, real or fake
     scene apply|check, plan
     scan, grasp, run, clear,       the full bring-up: MoveIt plus the
     preplanned, baseline collect   ToF, recorder and gripper nodes
     gripper open|close             gripper_node
-    gripper ANGLE                  the servo on this machine's GPIO
+    gripper ANGLE                  the servo on this machine's GPIO,
+                                   or the ESP32's (GRIPPER_BACKEND)
 
     Without the hardware, --fake-hardware swaps the gripper and the
     ToF recorder for stand-ins (hardware/fake.py); the arm still goes
@@ -568,6 +573,37 @@ def cmd_grasp(args):
     return 0 if ok else 1
 
 
+def _gripper_angle_over_mqtt(angle):
+    """Move the ESP32's servo to `angle` (config.GRIPPER_BACKEND 'mqtt')."""
+    from . import config
+    from .hardware.gripper_node import make_mqtt_servo
+    from .hardware.mqtt_servo import GripperLinkError
+
+    driver = make_mqtt_servo(
+        config.MQTT_HOST,
+        config.MQTT_PORT,
+        config.MQTT_TOPIC_PREFIX,
+        client_id='laundry_gripper_cli',
+    )
+
+    try:
+        if not driver.wait_connected(5.0):
+            print('Could not reach the MQTT broker.', file=sys.stderr)
+            return 1
+
+        print(f'Moving the ESP32 servo to {angle:.1f} degrees')
+        driver.move(angle, hold=False)
+
+    except GripperLinkError as exc:
+        print(f'Gripper move failed: {exc}', file=sys.stderr)
+        return 1
+
+    finally:
+        driver.close()
+
+    return 0
+
+
 def cmd_gripper(args):
     """Run `laundry gripper open|close|ANGLE`."""
     action = args.action.strip().lower()
@@ -595,6 +631,11 @@ def cmd_gripper(args):
         # is no set-angle service, and this is for calibrating the
         # open/close angles in the first place. Don't run it while
         # the pipeline is actively using the gripper.
+        from . import config
+
+        if config.GRIPPER_BACKEND == 'mqtt':
+            return _gripper_angle_over_mqtt(angle)
+
         servo.set_servo_angle(angle)
         return 0
 
@@ -748,17 +789,41 @@ def cmd_plan(args):
                     return status
 
         if args.which in ('retrieve', 'all'):
-            print('Solving the grab grid (config.RETRIEVE_GRID)...')
-            grabs, misses = retrieve_grid.solve(arm, log=print)
-            retrieve_grid.save(grabs, baked_on=socket.gethostname())
-            print(f'Saved {retrieve_grid.plan_path()} ({len(grabs)} grabs)')
+            from .grasp import grab_targets
 
-            if misses:
+            placed = grab_targets.load()
+
+            if not placed:
                 print(
-                    f'{len(misses)} grid point(s) unreachable; see above.',
+                    f'No {grab_targets.path()}: place the grabs first '
+                    '(laundry plan edit-grabs, SAVE). Grabs not baked.',
                     file=sys.stderr,
                 )
                 status = 1
+
+                if args.which == 'retrieve':
+                    return status
+
+            else:
+                print(
+                    f'Solving the {len(placed)} grabs of '
+                    'scan_plans/grab_targets.yaml exactly as placed...'
+                )
+                grabs, misses = retrieve_grid.solve(arm, placed, log=print)
+                retrieve_grid.save(
+                    grabs, baked_on=socket.gethostname(), targets=placed
+                )
+                print(
+                    f'Saved {retrieve_grid.plan_path()} ({len(grabs)} grabs)'
+                )
+
+                if misses:
+                    print(
+                        f'{len(misses)} grab(s) unreachable and left out; '
+                        'see above. Move them: laundry plan edit-grabs.',
+                        file=sys.stderr,
+                    )
+                    status = 1
 
         if args.which in ('transfers', 'retrieve', 'all'):
             # `retrieve` re-bakes only the grab routes and keeps the
@@ -1128,6 +1193,21 @@ def cmd_scene(args):
     )
 
     return 1 if problems else 0
+
+
+def cmd_plan_edit_grabs(args):
+    """Run `laundry plan edit-grabs`: drag the sweep's grabs in RViz."""
+    from .grasp import grab_editor
+
+    argv = []
+
+    if args.fill is not None:
+        argv += ['--fill', str(args.fill)]
+
+    if args.file:
+        argv += ['--file', args.file]
+
+    return grab_editor.main(argv)
 
 
 def cmd_plan_replay(args):
@@ -1506,7 +1586,7 @@ def build_parser():
         'bake',
         help=(
             'Solve, collision-check and save INTER/BOTTOM from the bucket, '
-            'the grab grid, the transfers from INTER to every named pose '
+            "the sweep's grabs, the transfers from INTER to every named pose "
             'and the end-scan trajectory. The end scan MOVES THE ARM.'
         ),
     )
@@ -1518,7 +1598,8 @@ def build_parser():
             'What to bake (default: all, in the order poses, retrieve, '
             'transfers, endcap). poses: derive INTER and BOTTOM from the '
             'bucket (config.BUCKET_POSES); no motion. retrieve: solve the '
-            'grab grid (config.RETRIEVE_GRID) and bake routes to it.'
+            "sweep's grabs exactly as placed (scan_plans/grab_targets.yaml, "
+            '`laundry plan edit-grabs`) and bake routes to them.'
         ),
     )
     from .scan.pattern import DEFAULT_DEPTH_M
@@ -1555,6 +1636,25 @@ def build_parser():
     )
     _add_fake_arguments(replay_plan)
     replay_plan.set_defaults(func=cmd_plan_replay)
+
+    edit_grabs = plan_actions.add_parser(
+        'edit-grabs',
+        help=(
+            "Place the sweep's grabs by dragging them in RViz, CHECK "
+            'their reachability (needs MoveIt; nothing moves) and SAVE '
+            'them to scan_plans/grab_targets.yaml.'
+        ),
+    )
+    edit_grabs.add_argument(
+        '--fill', type=float, default=None,
+        help='How full the drum is shown, as a fraction of its height '
+             '(default: 2/3).',
+    )
+    edit_grabs.add_argument(
+        '--file', type=str, default=None,
+        help='Grab targets file (default: <repo>/scan_plans/grab_targets.yaml).',
+    )
+    edit_grabs.set_defaults(func=cmd_plan_edit_grabs)
 
     evaluate = subparsers.add_parser(
         'evaluate', help='Measure false positives / recall of the detector.'

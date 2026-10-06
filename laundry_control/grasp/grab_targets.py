@@ -52,10 +52,13 @@ _ROUNDING = {
 }
 
 # The starting layout for a ~2/3-full drum (pile top ~25 cm above the
-# floor): the old grid's 12 spots, 11 cm up rather than on the floor,
-# vertical near the mouth and leaning in further back, 5 cm approach.
-# A first guess to drag from, not a solved layout.
-_DEFAULT_TILT_BY_DEPTH = {0.40: 0.0, 0.30: 0.0, 0.20: 15.0, 0.10: 30.0}
+# floor): the old grid's 12 spots, 8 cm up rather than 1.5-4 cm, each
+# at the least tilt that reached it with a 5 cm approach (fake
+# controller, 2026-10-06). Higher costs tilt - the 15 cm gripper and
+# its approach meet the drum's ceiling: vertical grabs reach ~5-8 cm,
+# 11 cm needs 30-45 deg, 14 cm 45-60 deg. A first layout to drag
+# from.
+_DEFAULT_TILT_BY_DEPTH = {0.40: 15.0, 0.30: 30.0, 0.20: 30.0, 0.10: 45.0}
 
 
 def path():
@@ -87,7 +90,7 @@ def default_targets():
         clean({
             'depth_m': depth,
             'floor_angle_deg': angle,
-            'height_m': 0.11,
+            'height_m': 0.08,
             'tilt_deg': tilt,
             'approach_m': 0.05,
         })
@@ -223,27 +226,26 @@ def approach_from_handle(target, handle_point, cone=None):
     return back - config.GRIPPER_OFFSET_Z
 
 
-def fill_surface(fraction, cone=None, depth_step_m=0.02):
+def _fill_rows(fraction, cone, depth_step_m):
     """
-    Return the laundry's top surface as triangles (an (N, 3) array, 3 rows each).
+    Return, per depth, where the laundry's level top meets the walls.
 
-    A level surface filling fraction of the drum's height, measured at
-    mid-depth from the floor's lowest line: what the drum looks like
-    when the sweep starts, for display only.
+    A list of (left, right) points, None where the level misses that
+    cross-section. The level fills fraction of the drum's height,
+    measured at mid-depth from the floor's lowest line.
     """
-    cone = cone or seed_cone()
     axis = cone.axis_dir
     up, side = _axis_basis(axis)
 
-    depths = np.arange(0.0, cone.s_max + 1e-9, depth_step_m)
     mid = 0.5 * cone.s_max
     mid_centre = cone.axis_point + mid * axis
-    mid_radius = cone.radius_at(mid)
-    level_z = mid_centre[2] + (2.0 * fraction - 1.0) * mid_radius * up[2]
+    level_z = (
+        mid_centre[2] + (2.0 * fraction - 1.0) * cone.radius_at(mid) * up[2]
+    )
 
     rows = []
 
-    for depth in depths:
+    for depth in np.arange(0.0, cone.s_max + 1e-9, depth_step_m):
         centre = cone.axis_point + depth * axis
         radius = cone.radius_at(depth)
 
@@ -259,6 +261,17 @@ def fill_surface(fraction, cone=None, depth_step_m=0.02):
         middle = centre + h * up
         rows.append((middle - half * side, middle + half * side))
 
+    return rows
+
+
+def fill_surface(fraction, cone=None, depth_step_m=0.02):
+    """
+    Return the laundry's top surface as triangles ((N, 3), 3 rows each).
+
+    What the drum looks like when the sweep starts, for display only;
+    see _fill_rows.
+    """
+    rows = _fill_rows(fraction, cone or seed_cone(), depth_step_m)
     triangles = []
 
     for a, b in zip(rows, rows[1:]):
@@ -268,6 +281,67 @@ def fill_surface(fraction, cone=None, depth_step_m=0.02):
         triangles += [a[0], a[1], b[0], a[1], b[1], b[0]]
 
     return np.array(triangles).reshape(-1, 3)
+
+
+def fill_outline(fraction, cone=None, depth_step_m=0.02, cross_every=5):
+    """
+    Return the laundry's top as line segments ((N, 3), 2 rows each).
+
+    Its edges along both walls and a line across every cross_every
+    depth steps: the fill_surface() outline, which, unlike a solid
+    surface, does not catch the clicks meant for the grabs below it.
+    """
+    rows = _fill_rows(fraction, cone or seed_cone(), depth_step_m)
+    segments = []
+
+    for index, (a, b) in enumerate(zip(rows, rows[1:])):
+        if a is None or b is None:
+            continue
+
+        segments += [a[0], b[0], a[1], b[1]]
+
+        if index % cross_every == 0:
+            segments += [a[0], a[1]]
+
+    return np.array(segments).reshape(-1, 3)
+
+
+def bucket_wireframe(cone=None, ring_every_m=0.1, line_every_deg=30.0):
+    """
+    Return the bucket as line segments ((N, 3), 2 rows each).
+
+    Rings round the axis every ring_every_m from the closed end to the
+    mouth, lines along the wall every line_every_deg, and a cross on
+    the closed end: a see-through bucket that does not catch clicks
+    the way the solid planning-scene mesh does.
+    """
+    cone = cone or seed_cone()
+    axis = cone.axis_dir
+    up, side = _axis_basis(axis)
+
+    def at(depth, angle):
+        return (
+            cone.axis_point + depth * axis
+            + cone.radius_at(depth) * (np.cos(angle) * up + np.sin(angle) * side)
+        )
+
+    segments = []
+    ring = np.radians(np.arange(0.0, 360.0 + 1e-9, 5.0))
+    depths = sorted(set(
+        list(np.arange(0.0, cone.s_max, ring_every_m)) + [cone.s_max]
+    ))
+
+    for depth in depths:
+        for a, b in zip(ring, ring[1:]):
+            segments += [at(depth, a), at(depth, b)]
+
+    for angle in np.radians(np.arange(0.0, 360.0, line_every_deg)):
+        segments += [at(0.0, angle), at(cone.s_max, angle)]
+
+    for angle in (0.0, np.pi / 2):
+        segments += [at(0.0, angle), at(0.0, angle + np.pi)]
+
+    return np.array(segments).reshape(-1, 3)
 
 
 def describe(target):

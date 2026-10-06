@@ -48,6 +48,26 @@ Visualization Manager:
       Color Transformer: AxisColor
       Axis: Z
       Autocompute Intensity Bounds: true
+    - Class: rviz_default_plugins/InteractiveMarkers
+      Name: Grab editor (laundry plan edit-grabs)
+      Enabled: true
+      Interactive Markers Namespace: /grab_editor
+      Show Axes: false
+      Show Descriptions: true
+      Show Visual Aids: false
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Grab editor scene (bucket outline, fill level, status)
+      Enabled: true
+      Topic:
+        Value: /grab_editor/scene
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Namespaces:
+        bucket: true
+        fill: true
+        status: true
   Global Options:
     Fixed Frame: link_base
     Background Color: 48; 48; 48
