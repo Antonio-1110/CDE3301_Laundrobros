@@ -530,6 +530,18 @@ def report_coverage(surface, baseline_scans, extra_scans=()):
 def add_evaluate_arguments(parser):
     """Add `laundry evaluate` options to a parser."""
     parser.add_argument(
+        '--end-scan', choices=('precession', 'none', 'bottom'),
+        default='precession',
+        help=(
+            "The kind of scan to evaluate the detector for: 'none' for the "
+            "quick scan (the baselines' strokes alone), else the full scan."
+        ),
+    )
+
+    from ..scan.pattern import add_quick_full_flags
+
+    add_quick_full_flags(parser)
+    parser.add_argument(
         '--baseline',
         type=str,
         default=None,
@@ -696,9 +708,13 @@ def add_evaluate_arguments(parser):
 
 def run_evaluate(args):
     """Run `laundry evaluate`; returns a process exit code."""
+    from ..scan.segments import for_end_scan
+
     baseline = args.baseline or config.baseline_dir()
 
-    baseline_scans = load_baseline_scans(baseline)
+    baseline_scans = load_baseline_scans(
+        baseline, for_end_scan(getattr(args, 'end_scan', None))
+    )
 
     print(
         f'Loaded {len(baseline_scans)} baseline scan(s) from '

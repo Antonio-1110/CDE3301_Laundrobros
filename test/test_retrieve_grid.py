@@ -127,3 +127,144 @@ def test_a_changed_grid_is_reported(tmp_path, monkeypatch):
 
     monkeypatch.setitem(config.RETRIEVE_GRID, 'clearance_m', 0.02)
     assert 'clearance_m' in retrieve_grid.grid_mismatch(path)
+
+
+class _IkArm:
+    """IK flips J1 a full turn at the first height, and is fine after."""
+
+    def __init__(self):
+        self.heights = []
+
+    def compute_ik(self, pose, seed):
+        # The approach pose is solved seeded from the grab.
+        solution = np.array(config.get_named_pose('inter')) + 0.1
+
+        if len(self.heights) == 1:
+            solution[0] += np.radians(360.0)
+
+        return list(solution)
+
+    def first_invalid_state(self, waypoints):
+        return None
+
+
+def test_a_flipped_ik_solution_is_skipped_for_the_next_height(monkeypatch):
+    arm = _IkArm()
+    grid = dict(config.RETRIEVE_GRID, heights_m=[0.02, 0.03], tilts_deg=[0.0])
+
+    real_geometry = retrieve_grid.grab_geometry
+
+    def geometry(depth, angle, height, tilt, cone=None):
+        arm.heights.append(height)
+        return real_geometry(depth, angle, height, tilt, cone)
+
+    monkeypatch.setattr(retrieve_grid, 'grab_geometry', geometry)
+
+    grab = retrieve_grid.solve_one(arm, 0.30, 0.0, grid, seeds=[[0.0] * 7])
+
+    assert grab['height_m'] == pytest.approx(0.03)
+    assert not retrieve_grid.flipped(grab['grab'], config.get_named_pose('inter'))
+
+
+class _ReachArm:
+    """Reaches a grab only at the given (height, tilt) pairs."""
+
+    def __init__(self, reachable):
+        self.reachable = reachable
+        self.current = None
+        self.seen = []
+
+    def compute_ik(self, pose, seed):
+        if self.current not in self.reachable:
+            return None
+
+        return list(np.array(config.get_named_pose('inter')) + 0.1)
+
+    def first_invalid_state(self, waypoints):
+        return None
+
+
+def _recording_geometry(monkeypatch, arm):
+    real_geometry = retrieve_grid.grab_geometry
+
+    def geometry(depth, angle, height, tilt, cone=None):
+        arm.current = (round(height, 3), round(tilt, 1))
+        arm.seen.append(arm.current)
+        return real_geometry(depth, angle, height, tilt, cone)
+
+    monkeypatch.setattr(retrieve_grid, 'grab_geometry', geometry)
+
+
+def test_detected_grabs_search_heights_then_tilts(monkeypatch):
+    arm = _ReachArm({(0.03, 30.0)})
+    _recording_geometry(monkeypatch, arm)
+    grid = dict(config.RETRIEVE_GRID, heights_m=[0.02, 0.03], tilts_deg=[0.0, 30.0])
+
+    grab = retrieve_grid.solve_one(arm, 0.30, 0.0, grid, seeds=[[0.0] * 7])
+
+    assert (grab['height_m'], grab['tilt_deg']) == (0.03, 30.0)
+    assert arm.seen == [(0.02, 0.0), (0.02, 30.0), (0.03, 0.0), (0.03, 30.0)]
+
+
+def test_detected_grabs_may_go_down_to_the_floor():
+    # A flat item must not be grabbed above itself.
+    assert config.RETRIEVE_GRID['min_height_m'] <= 0.02
+
+
+def _target(**changes):
+    target = {
+        'depth_m': 0.30, 'floor_angle_deg': 0.0, 'height_m': 0.11,
+        'tilt_deg': 15.0, 'approach_m': 0.05,
+    }
+    target.update(changes)
+    return target
+
+
+def test_the_sweep_solves_each_target_exactly_as_placed(monkeypatch):
+    import contextlib
+
+    arm = _ReachArm({(0.11, 15.0)})
+    _recording_geometry(monkeypatch, arm)
+    monkeypatch.setattr(
+        retrieve_grid, 'gripper_padding',
+        lambda *a, **k: contextlib.nullcontext(),
+    )
+    targets = [_target(), _target(height_m=0.13)]
+
+    grabs, misses = retrieve_grid.solve(arm, targets, log=lambda *_: None)
+
+    # No search: one try each, at exactly the placed height and tilt.
+    assert arm.seen == [(0.11, 15.0), (0.13, 15.0)]
+    assert [g['name'] for g in grabs] == ['grab_01']
+    assert grabs[0]['approach_m'] == 0.05
+    assert [(index, reason) for index, _, reason in misses] == [
+        (2, retrieve_grid._FAILURES[0])
+    ]
+
+
+def test_an_unreachable_approach_is_named(monkeypatch):
+    class _NoApproach(_ReachArm):
+        def compute_ik(self, pose, seed):
+            self.calls = getattr(self, 'calls', 0) + 1
+            return super().compute_ik(pose, seed) if self.calls % 2 else None
+
+    arm = _NoApproach({(0.11, 15.0)})
+    _recording_geometry(monkeypatch, arm)
+
+    plan, reason = retrieve_grid.solve_target(arm, _target(), seeds=[[0.0] * 7])
+
+    assert plan is None and 'approach' in reason
+
+
+def test_changed_targets_are_reported(tmp_path):
+    path = str(tmp_path / 'retrieve.yaml')
+    grab = dict(_grab('grab_01', 0.5), tilt_deg=0.0, contact=[0.1, -0.4, 0.3])
+    retrieve_grid.save([grab], path=path, targets=[_target()])
+
+    assert retrieve_grid.grid_mismatch(path, targets=[_target()]) is None
+    assert 'grab_targets.yaml' in retrieve_grid.grid_mismatch(
+        path, targets=[_target(height_m=0.12)]
+    )
+    assert 'grab_targets.yaml' in retrieve_grid.grid_mismatch(
+        path, targets=[_target(), _target()]
+    )

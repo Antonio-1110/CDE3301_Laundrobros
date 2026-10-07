@@ -12,7 +12,10 @@ def stages(monkeypatch):
     state = {'detections': [], 'grasp_results': [], 'sweep_ok': True}
 
     monkeypatch.setattr(
-        pipeline, 'build_model', lambda baseline: log.append('model') or 'S'
+        pipeline, 'build_model',
+        lambda baseline, segments=None: log.append(
+            'model' if segments is None else 'strokes model'
+        ) or ('S' if segments is None else 'Q'),
     )
 
     def preplanned(arm, gripper, limit=None, time_scale=1.0):
@@ -23,10 +26,15 @@ def stages(monkeypatch):
         log.append('scan')
         return True
 
-    def detect(csv_path, baseline, params, surface=None):
-        assert surface == 'S'  # fitted once, reused
+    def detect(csv_path, baseline, params, surface=None, segments=None):
+        assert surface in ('S', 'Q')  # fitted once, reused
+        log.append(f'detect {surface}')
         clusters = state['detections'].pop(0)
         return clusters, surface
+
+    def end_only(arm, recorder, csv_path, scan_kwargs):
+        log.append('end scan')
+        return True
 
     def plan(arm, clusters, surface):
         return None if clusters == ['unreachable'] else 'PLAN'
@@ -38,6 +46,7 @@ def stages(monkeypatch):
 
     monkeypatch.setattr(pipeline, 'run_preplanned', preplanned)
     monkeypatch.setattr(pipeline, 'run_scan', scan)
+    monkeypatch.setattr(pipeline, 'run_end_scan_only', end_only)
     monkeypatch.setattr(pipeline, 'detect_scan', detect)
     monkeypatch.setattr(pipeline, 'plan_grasp', plan)
     monkeypatch.setattr(pipeline, 'execute_plan', execute)
@@ -46,6 +55,11 @@ def stages(monkeypatch):
     monkeypatch.setattr(pipeline, 'open_for_scan', lambda g, dry_run=False: True)
 
     return log, state
+
+
+def _moves(log):
+    """Drop the detections from the log, as the older tests expect."""
+    return [entry for entry in log if not entry.startswith('detect')]
 
 
 def _clear(**kwargs):
@@ -60,7 +74,7 @@ def test_sweeps_then_grasps_until_a_scan_finds_nothing(stages):
     state['detections'] = [['a', 'b'], ['b'], []]
 
     assert _clear()
-    assert log == [
+    assert _moves(log) == [
         'model', 'sweep', 'scan', 'grasp', 'scan', 'grasp', 'scan',
     ]
 
@@ -70,7 +84,7 @@ def test_no_grabs_starts_with_a_scan(stages):
     state['detections'] = [[]]
 
     assert _clear(sweep=False)
-    assert log == ['model', 'scan']
+    assert _moves(log) == ['model', 'scan']
 
 
 def test_a_failed_sweep_stops_before_scanning(stages):
@@ -78,7 +92,7 @@ def test_a_failed_sweep_stops_before_scanning(stages):
     state['sweep_ok'] = False
 
     assert not _clear()
-    assert log == ['model', 'sweep']
+    assert _moves(log) == ['model', 'sweep']
 
 
 def test_one_failed_grasp_is_retried_two_in_a_row_stop(stages):
@@ -96,7 +110,7 @@ def test_stops_at_once_when_nothing_detected_is_reachable(stages):
 
     assert not _clear(sweep=False)
     # One scan: rescanning an untouched pile cannot help.
-    assert log == ['model', 'scan']
+    assert _moves(log) == ['model', 'scan']
 
 
 def test_gives_up_after_max_rounds(stages):
@@ -133,3 +147,36 @@ def test_fake_recorder_plays_scans_in_order_then_repeats_the_last(tmp_path):
         saved.append(out.read_text())
 
     assert saved == ['laundry', 'empty', 'empty']
+
+
+def _quick_clear(**kwargs):
+    return pipeline.run_clear(
+        None, None, None, 'baselines', {'end_scan': 'none', 'end_plan': 'P'},
+        {}, scan_path=lambda i: f'clear_{i}.csv', **kwargs
+    )
+
+
+def test_quick_rounds_then_the_end_scan_alone_once_they_find_nothing(stages):
+    log, state = stages
+    # Quick scan: a -> grab. Quick scan: nothing -> end scan alone: c
+    # -> grab. Quick: nothing -> end scan alone: nothing -> clear.
+    state['detections'] = [['a'], [], ['c'], [], []]
+
+    assert _quick_clear(sweep=False)
+    assert log == [
+        'strokes model',
+        'scan', 'detect Q', 'grasp',
+        'scan', 'detect Q', 'end scan', 'model', 'detect S', 'grasp',
+        'scan', 'detect Q', 'end scan', 'detect S',
+    ]
+
+
+def test_without_a_baked_end_scan_a_quick_miss_is_final(stages):
+    log, state = stages
+    state['detections'] = [[]]
+
+    assert pipeline.run_clear(
+        None, None, None, 'baselines', {'end_scan': 'none', 'end_plan': None},
+        {}, sweep=False, scan_path=lambda i: f'clear_{i}.csv',
+    )
+    assert 'end scan' not in log

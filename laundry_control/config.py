@@ -36,15 +36,20 @@ HOME = [
     0.0,
 ]
 
-# The reference pose everything else is measured from: the scan
-# starts and ends here, and the ToF/gripper offsets below were
-# measured here. Forward kinematics at INTER (MoveIt fake
-# controller, same URDF as the real arm):
+# INTER, the reference pose everything else is measured from: the
+# scan starts and ends here, and the ToF/gripper offsets below were
+# measured here. These are the angles jogged by eye; once
+# `laundry plan bake poses` has run, INTER is instead derived from
+# the bucket (BUCKET_POSES below, scan_plans/bucket_poses.yaml), and
+# these only seed its IK - they pick the elbow posture. Always look
+# INTER up with get_named_pose('inter'), never from this list.
 #
-#   link7 local +Z = (0.01, -1.00, -0.01)  horizontal, along -Y:
-#                                           straight into the bucket
-#                                           along its axis
-#   link7 local +X = (-0.01, 0.01, -1.00)  straight DOWN - this is
+# Forward kinematics of these angles (same URDF as the real arm):
+#
+#   link7 local +Z = (0.00, -1.00, -0.00)  horizontal, along -Y:
+#                                           into the bucket, 7.8 deg
+#                                           off the modelled axis
+#   link7 local +X = (-0.01, 0.00, -1.00)  straight DOWN - this is
 #                                           the ToF boresight, so at
 #                                           INTER's J7 the sensor
 #                                           looks at the bucket floor
@@ -52,7 +57,7 @@ HOME = [
 # Older comments said "+Z points straight down at INTER"; it is the
 # sensor's +X that does. The scan's +/-75 deg J7 sweep is therefore
 # centred on the floor, which is why the ceiling is never seen.
-INTER = [
+INTER_RECORDED = [
     1.5105054378509521,
     1.5552058219909668,
     -2.4133317470550537,
@@ -62,12 +67,14 @@ INTER = [
     -2.70444223365,
 ]
 
-# Tilted-up pose used at maximum insertion depth so the wrist-
-# mounted sensor can see the closed end past the end effector (see
-# scan.pattern's BOTTOM detour). FK: local +Z tilts 42 deg up from
-# horizontal, and the boresight (+X) points down and toward the
+# BOTTOM: tilted-up pose used at maximum insertion depth so the
+# wrist-mounted sensor can see the closed end past the end effector
+# (see scan.pattern's BOTTOM detour). Jogged by eye; derived from the
+# bucket like INTER once baked, and then only an IK seed. FK: local
+# +Z tilts 42 deg up from horizontal (50.6 deg from the modelled
+# bucket axis), and the boresight (+X) points down and toward the
 # closed end, ~48 deg below horizontal.
-BOTTOM = [
+BOTTOM_RECORDED = [
     -0.6021117568016052,
     1.1247814893722534,
     -1.3280805349349976,
@@ -88,73 +95,79 @@ DROP = [
     -2.913362979888916,
 ]
 
-# Hand-recorded grab poses for the sensorless `laundry preplanned`
-# sweep. Superseded by the generated grab grid (RETRIEVE_GRID below,
-# `laundry plan bake retrieve`) once that is baked; kept for
-# `laundry preplanned --recorded`. FK in the configured bucket: all
-# four sit on the floor's centre line, 11-39 cm from the closed end,
-# and RETRIEVE_1/2 grab almost the same spot.
-RETRIEVE_0 = [
-    -0.16877898573875427,
-    0.3103211522102356,
-    -1.2240749597549438,
-    1.2551662921905518,
-    0.23523668944835663,
-    0.6844640374183655,
-    -3.019961357116699,
-]
-
-RETRIEVE_1 = [
-    1.0142279863357544,
-    0.7750195264816284,
-    -2.239295482635498,
-    0.6214537024497986,
-    0.6356657147407532,
-    0.6073369383811951,
-    -3.199042797088623,
-]
-
-RETRIEVE_2 = [
-    0.635716438293457,
-    0.1730310469865799,
-    -1.9444830417633057,
-    1.1769441366195679,
-    0.14949719607830048,
-    1.2463109493255615,
-    -2.922783851623535,
-]
-
-RETRIEVE_3 = [
-    1.0214934349060059,
-    0.7060800194740295,
-    -2.34552264213562,
-    0.7978871464729309,
-    0.47409510612487793,
-    1.36742103099823,
-    -3.12626576423645,
+# Starting points (IK seeds) for the grab-grid solver, grasp/
+# retrieve_grid.py - never moved to. They are the four grab poses
+# once jogged by hand (the old RETRIEVE_0..3), kept because they show
+# the solver which arm postures reach the bucket floor: from each, it
+# converges on a grab in that same posture. The generated grab grid
+# (RETRIEVE_GRID below) replaced them as poses.
+GRAB_IK_SEEDS = [
+    [
+        -0.16877898573875427,
+        0.3103211522102356,
+        -1.2240749597549438,
+        1.2551662921905518,
+        0.23523668944835663,
+        0.6844640374183655,
+        -3.019961357116699,
+    ],
+    [
+        1.0142279863357544,
+        0.7750195264816284,
+        -2.239295482635498,
+        0.6214537024497986,
+        0.6356657147407532,
+        0.6073369383811951,
+        -3.199042797088623,
+    ],
+    [
+        0.635716438293457,
+        0.1730310469865799,
+        -1.9444830417633057,
+        1.1769441366195679,
+        0.14949719607830048,
+        1.2463109493255615,
+        -2.922783851623535,
+    ],
+    [
+        1.0214934349060059,
+        0.7060800194740295,
+        -2.34552264213562,
+        0.7978871464729309,
+        0.47409510612487793,
+        1.36742103099823,
+        -3.12626576423645,
+    ],
 ]
 
 _POSE_NAMES = (
     'HOME',
-    'INTER',
-    'BOTTOM',
+    'INTER_RECORDED',
+    'BOTTOM_RECORDED',
     'DROP',
-    'RETRIEVE_0',
-    'RETRIEVE_1',
-    'RETRIEVE_2',
-    'RETRIEVE_3',
 )
+
+
+def recorded_poses():
+    """Return the hand-recorded poses above as {lower-case name: joints}."""
+    return {
+        name.lower().removesuffix('_recorded'): list(globals()[name])
+        for name in _POSE_NAMES
+    }
 
 
 def named_poses():
     """
     Return every named pose as {lower-case name: joint list}.
 
-    The recorded poses above, plus the generated grab_NN poses (the
+    The recorded poses above, with INTER and BOTTOM replaced by the
+    ones derived from the bucket (scan_plans/bucket_poses.yaml) if
+    they have been baked, plus the generated grab_NN poses (the
     approach pose above each grab point) from
     scan_plans/retrieve.yaml, if it has been baked.
     """
-    poses = {name.lower(): list(globals()[name]) for name in _POSE_NAMES}
+    poses = recorded_poses()
+    poses.update(derived_bucket_poses())
     poses.update(generated_grab_poses())
 
     return poses
@@ -183,6 +196,29 @@ def generated_grab_poses():
     }
 
 
+def bucket_poses_path():
+    """Return <repo>/scan_plans/bucket_poses.yaml (see arm/bucket_poses.py)."""
+    return os.path.join(repo_root(), 'scan_plans', 'bucket_poses.yaml')
+
+
+def derived_bucket_poses():
+    """Return {inter/bottom: joints} derived from the bucket, or {}."""
+    path = bucket_poses_path()
+
+    if not os.path.isfile(path):
+        return {}
+
+    import yaml
+
+    with open(path) as handle:
+        document = yaml.safe_load(handle) or {}
+
+    return {
+        name: list(pose['joints'])
+        for name, pose in document.get('poses', {}).items()
+    }
+
+
 def get_named_pose(name):
     """
     Look up a recorded pose by name, case-insensitively.
@@ -205,50 +241,60 @@ def get_named_pose(name):
 
 
 # =============================================================
-# GENERATED GRAB POSES (sensorless first pass)
+# GRABS
 #
-# `laundry plan bake retrieve` places one grab on the bucket floor at
-# every (depth, floor angle) below, in the bucket of OBSTACLES, and
-# for each finds - by IK, collision-checked - the LOWEST gripper
-# height in heights_m and then the most vertical tilt in tilts_deg
-# that the arm can reach. Each grab is stored as two joint states in
-# scan_plans/retrieve.yaml:
+# The sensorless sweep (`laundry preplanned`, the start of `laundry
+# clear`) visits the grabs placed by hand in scan_plans/grab_targets.
+# yaml, in order (grasp/grab_targets.py): each is a depth, floor
+# angle, height, tilt and approach distance relative to the bucket.
+# Edit them by dragging in RViz (`laundry plan edit-grabs`), then
+# `laundry plan bake retrieve` solves each EXACTLY as placed and
+# stores it as two joint states in scan_plans/retrieve.yaml:
 #
 #   approach (named pose grab_NN): the gripper approach_m back along
 #       its own axis - reached from INTER on a baked route;
 #   grab: straight down onto the laundry from there, with a straight,
 #       collision-checked joint move, then straight back up.
 #
-# `laundry preplanned` visits them in this order: depths as listed
-# (mouth first - what is nearest is easiest to pull out), and at each
-# depth the floor angles as listed.
+# The sweep runs on a drum expected ~2/3 full (the pile's top ~25 cm
+# above the floor), so its grabs sit well up in the pile; the old
+# grid's grabs, 1.5-4 cm off the floor, drove the claw ~20 cm through
+# it. A vertical grab needs the 15 cm gripper plus its approach
+# between the contact point and the drum's ceiling.
 #
-#   depths_m:          from the CLOSED end of the bucket (it is
-#                      ~0.53 m deep; the mouth faces the arm)
-#   floor_angles_deg:  around the bucket axis from the floor's lowest
-#                      line, positive toward link_base +x. The claw
-#                      is ~6 cm wide; 20 deg is ~7 cm to the side.
-#   heights_m:         gripper contact point above the floor, tried
-#                      lowest first
-#   tilts_deg:         tool axis from vertical (straight down onto the
-#                      floor) toward the closed end, tried smallest
-#                      first; deep grabs need some to reach in
-#   clearance_m:       extra gripper padding the grabs are solved
-#                      with, on top of GRIPPER_PADDING_M - margin for
-#                      the bucket model and the arm's accuracy
+# RETRIEVE_GRID is the search for DETECTED items (grasp/
+# retrieve_grid.plan_floor_grab), which sinks into the sensed item:
 #
-# The side grabs are the ones most sensitive to where the bucket
-# really is (`laundry scene fit`): settle OBSTACLES first, then bake.
+#   max_depth_m:   deepest item it will try, from the CLOSED end of
+#                  the bucket (it is ~0.53 m deep)
+#   min_height_m:  never place the contact point lower than this
+#                  above the floor
+#   tilts_deg:     tool axis from straight at the wall toward the
+#                  closed end, tried smallest first
+#   approach_m:    the approach pose's distance back along the tool
+#   clearance_m:   extra gripper padding every grab - swept or
+#                  detected - is solved with, on top of
+#                  GRIPPER_PADDING_M: margin for the bucket model and
+#                  the arm's accuracy
+#
+# Side grabs are the ones most sensitive to where the bucket really
+# is (`laundry scene fit`): settle OBSTACLES first, then bake.
 # =============================================================
 
 RETRIEVE_GRID = {
-    'depths_m': [0.40, 0.30, 0.20, 0.10],
-    'floor_angles_deg': [0.0, -20.0, 20.0],
-    'heights_m': [0.02, 0.03, 0.04, 0.05, 0.06],
+    'max_depth_m': 0.55,
+    'min_height_m': 0.01,
     'tilts_deg': [0.0, 15.0, 30.0, 45.0, 60.0],
     'approach_m': 0.08,
-    'clearance_m': 0.01,
+    # 0.5 cm (was 1 cm): the rig confirmed grabs by ruler (2026-09-29).
+    'clearance_m': 0.005,
 }
+
+
+def grab_targets_path():
+    """Return <repo>/scan_plans/grab_targets.yaml (see grasp/grab_targets.py)."""
+    return os.path.join(repo_root(), 'scan_plans', 'grab_targets.yaml')
+
 
 # DETECTED items are grabbed the same way (IK over the item, straight
 # descent, reached from the nearest grab_NN - grasp/retrieve_grid.
@@ -257,11 +303,51 @@ RETRIEVE_GRID = {
 # project's scope. Measured on the fake controller (2026-09-26), grabs
 # solve everywhere from 0 to +/-90 deg at depths 3-48 cm. Items beyond
 # it fall back to the Cartesian reach (grasp/plan.py).
-#
-# The sensorless grid above stays on the floor, where laundry pools;
-# add angles to floor_angles_deg (e.g. -45.0, 45.0) to also grab blind
-# on the lower walls, at ~15 s per extra grab.
 DETECTED_GRAB_MAX_ANGLE_DEG = 90.0
+
+# =============================================================
+# INTER AND BOTTOM, FROM THE BUCKET
+#
+# Where INTER and BOTTOM sit relative to the bucket of OBSTACLES, so
+# that moving the bucket moves them too. `laundry plan bake poses`
+# (the first step of `laundry plan bake`) solves their joint angles
+# by IK in the configured bucket - seeded from INTER_RECORDED /
+# BOTTOM_RECORDED, so the arm keeps the elbow posture those were
+# jogged in - and saves them to scan_plans/bucket_poses.yaml. Until
+# that file exists, the recorded angles are used as they are.
+#
+#   inter:
+#     The flange on the bucket axis, standoff_m outside the mouth
+#     plane; tool +Z straight down the axis into the bucket, the ToF
+#     boresight (+X) at the floor.
+#     standoff_m:  0.054 is where the recorded INTER's flange is.
+#
+#   bottom:
+#     The flange depth_m in from INTER along the axis - the deepest
+#     stroke of the scan (scan.pattern.DEFAULT_DEPTH_M) - with the
+#     tool tilted up by tilt_deg from the axis, the boresight
+#     leaning down toward the closed end (the end scan's
+#     alpha = tilt_deg, phi = 0 pose, scan/endcap.py).
+#     tilt_deg:    the recorded BOTTOM is 50.6 deg from the modelled
+#                  axis, but 2.3 cm above it; on the axis, 50 deg puts
+#                  link3 against the rim with 3 cm padding (fake
+#                  controller, 2026-09-28). 45 deg is the reachable
+#                  tilt closest to the recorded posture (at most 6.4
+#                  deg per joint); 30-40 deg also solve.
+#
+# Derived poses are only as good as OBSTACLES: settle the bucket pose
+# (`laundry scene fit`, a tape measure) before baking them.
+# =============================================================
+
+BUCKET_POSES = {
+    'inter': {
+        'standoff_m': 0.054,
+    },
+    'bottom': {
+        'depth_m': 0.42,
+        'tilt_deg': 45.0,
+    },
+}
 
 # =============================================================
 # FRAMES AND MOVEIT
@@ -318,6 +404,18 @@ def xarm_description_arguments():
     }
 
 
+# ros2_control update rate on the real arm, in Hz: how often the
+# trajectory controller sends the arm its next target. Stock xarm_ros2
+# runs 150 Hz (6.7 ms a tick), but every tick waits on the arm twice -
+# read() asks for the joint states, write() sends set_servo_angle_j and
+# waits for the reply - and the arm takes ~3-4 ms to answer each. So
+# while moving, ticks overran 6.7 ms all the time, even on the cable
+# (logs Sep 30 - Oct 6): late ticks are skipped and the next target
+# jumps, which shows up as jerks. 88% of those slow ticks fit in 10 ms.
+# laundry_bringup.launch.py applies it (control_rate_hz:= overrides,
+# e.g. 150 to compare); xarm_ros2 itself stays unmodified.
+ARM_CONTROL_RATE_HZ = 100
+
 # The ros2_control trajectory controller that actually drives the
 # joints - the same name on the real arm and the fake controller
 # (xarm_controller/config/xarm7_controllers.yaml). Ctrl+C in `laundry`
@@ -342,14 +440,19 @@ TRAJECTORY_CONTROLLER_ACTION = '/xarm7_traj_controller/follow_joint_trajectory'
 # AFTER MOVING THE BUCKET OR TABLE:
 #
 #   1. Edit its xyz/rpy below. `laundry scene check` shows the new
-#      scene against every recorded pose and baked route without
+#      scene against every named pose and baked route without
 #      moving the arm (run it with the fake controller up, too).
-#   2. Re-record any recorded pose (INTER, RETRIEVE_n, ...) that the
-#      physical move invalidated.
-#   3. `laundry plan bake` and commit scan_plans/. Baked routes
-#      record the scene they were baked against; replaying one baked
-#      against a different scene warns, and one that now collides is
-#      refused.
+#   2. `laundry plan bake` (fake controller) and commit scan_plans/.
+#      It derives INTER and BOTTOM from the new bucket pose
+#      (BUCKET_POSES), then bakes everything else from that INTER.
+#      Baked plans record the scene they were baked against;
+#      replaying one baked against a different scene warns, one that
+#      now collides is refused, and transfers baked from another
+#      INTER are not used.
+#   3. Re-record HOME or DROP only if the move put the bucket in
+#      their way.
+#   4. Collect new baselines (`laundry baseline collect --archive`):
+#      the scan runs from the new INTER.
 #
 # The mesh file is under meshes/. allowed_links lists robot links
 # allowed to touch the object (link_base rests on the table).
@@ -359,7 +462,11 @@ OBSTACLES = {
     'bucket': {
         'mesh': 'bucket.obj',
         'xyz': [0.14, -0.72, 0.42],
-        'rpy': [1.71, 3.14, -3.14],
+        # Roll 1.68 (was 1.71): the axis rises 6.3 deg toward the mouth,
+        # as `laundry scene fit` measures from the baselines (2026-09-28;
+        # check-flange at the derived INTER agreed, 1.9 deg off at 1.71).
+        # The fit's sideways shift (+3.1 cm x) is not applied: unverified.
+        'rpy': [1.68, 3.14, -3.14],
         'allowed_links': [],
     },
     'table': {
@@ -397,11 +504,19 @@ ENDCAP_PADDING_M = 0.01
 # mesh (3-6 s) - so it stays fixed at runtime.
 GRIPPER_PADDING_M = 0.0
 
-# Extra gripper clearance the routes that LEAVE the bucket (INTER <->
-# HOME/DROP) are baked with, so the gripper clears the bucket mouth by
-# at least this much on its way out, although the live check does not
-# require it.
-BAKE_GRIPPER_CLEARANCE_M = 0.01
+# Gripper padding each baked route (arm/transfers.py) is solved with,
+# in place of GRIPPER_PADDING_M. The routes that LEAVE the bucket
+# (INTER -> HOME/DROP) get extra, so the gripper clears the bucket
+# mouth by at least this much on its way out, although the live check
+# does not require it. Routes into the bucket (BOTTOM, grab_NN) end
+# with the gripper at the floor on purpose, so they are left out.
+# Re-bake after changing a value (`laundry plan bake transfers`).
+ROUTE_GRIPPER_CLEARANCE_M = {
+    'home': 0.01,
+    # Laundry hanging from the gripper swings out on the way to DROP;
+    # keep it well clear of the rim so it does not snag (2026-09-29).
+    'drop': 0.10,
+}
 
 # Baked routes (arm/transfers.py) that are solved and replayed with a
 # smaller arm-link padding than OBSTACLE_PADDING_M, like the end scan.
@@ -422,6 +537,23 @@ JOINT_NAMES = [
     'joint6',
     'joint7',
 ]
+
+# Joint position limits (radians), from xarm_description/urdf/xarm7/
+# xarm7.urdf.xacro. MoveIt's state-validity check does not reject
+# states outside them, so a baked route could leave them: on
+# 2026-09-29 an INTER -> DROP via had J2 at 125 deg (limit 120) and
+# the arm stopped with C23 "Joint Angle Exceed Limit". Every state
+# checked by XArm7Controller.state_is_valid must also be
+# JOINT_LIMIT_MARGIN_RAD inside these.
+JOINT_LOWER_LIMITS_RAD = [
+    -2.0 * math.pi, -2.059, -2.0 * math.pi, -0.19198,
+    -2.0 * math.pi, -1.69297, -2.0 * math.pi,
+]
+JOINT_UPPER_LIMITS_RAD = [
+    2.0 * math.pi, 2.0944, 2.0 * math.pi, 3.927,
+    2.0 * math.pi, math.pi, 2.0 * math.pi,
+]
+JOINT_LIMIT_MARGIN_RAD = math.radians(2.0)
 
 # Planning pipelines for joint-space moves.
 #
@@ -559,6 +691,53 @@ SERVO_MIN_PULSE_WIDTH_S = 0.5 / 1000
 SERVO_MAX_PULSE_WIDTH_S = 2.5 / 1000
 
 # =============================================================
+# HARDWARE LINK: this Pi, or the ESP32 over MQTT
+#
+# Where the ToF readings come from and who drives the gripper servo.
+# These are the defaults; laundry_bringup.launch.py overrides them
+# per run (tof_source:=mqtt gripper_backend:=mqtt mqtt_host:=...),
+# and `laundry gripper ANGLE` follows GRIPPER_BACKEND.
+#
+#   TOF_SOURCE       'i2c'  - the VL53L0X on this Pi's I2C bus
+#                    'mqtt' - the ESP32 publishes the readings
+#   GRIPPER_BACKEND  'gpio' - the servo on this Pi's GPIO 18
+#                    'mqtt' - the ESP32 drives the servo
+#
+# The protocol, and how the ESP32's timestamps are synced to this
+# Pi's clock: hardware/esp32_protocol.py. The ESP32's firmware:
+# esp32/tof_gripper_bridge. The broker (mosquitto, on this Pi):
+# setup/mosquitto/README.md.
+# =============================================================
+
+TOF_SOURCES = ('i2c', 'mqtt')
+GRIPPER_BACKENDS = ('gpio', 'mqtt')
+
+TOF_SOURCE = 'i2c'
+GRIPPER_BACKEND = 'gpio'
+
+# The broker runs on this Pi, so the nodes reach it on localhost;
+# the ESP32 is given the Pi's LAN address in its own config.
+MQTT_HOST = 'localhost'
+MQTT_PORT = 1883
+MQTT_TOPIC_PREFIX = 'laundrobros'
+
+# Clock sync pings (esp32_protocol.ClockSync): every period, and the
+# best of the last WINDOW used - 10 s of pings at 2 Hz. After each
+# ESP32 boot they go every BURST period until the window is full.
+ESP32_CLOCK_SYNC_PERIOD_SEC = 0.5
+ESP32_CLOCK_SYNC_BURST_PERIOD_SEC = 0.05
+ESP32_CLOCK_SYNC_WINDOW = 20
+
+# Warn while the sync's error bound (half the best round trip) is
+# above this: about 0.2 mm of scan error at the bucket wall per ms.
+# Over a good WiFi link with power save off it is 1-3 ms.
+ESP32_CLOCK_SYNC_WARN_MS = 5.0
+
+# No reading from the ESP32 for this long warns (it is offline, or
+# its sensor stopped), like an I2C failure does on this Pi.
+ESP32_READING_TIMEOUT_SEC = 1.0
+
+# =============================================================
 # DATA LOCATIONS
 #
 # Saved scans must live in the SOURCE tree, never under install/ or
@@ -597,7 +776,12 @@ def repo_root():
 
 
 def baseline_dir():
-    """Directory of empty-bucket baseline scans the detector models."""
+    """
+    Directory of the empty-bucket baseline scans the detector models.
+
+    Full scans, one set for both kinds of scan: a quick scan is modelled
+    from their strokes alone (scan/segments.py).
+    """
     return os.path.join(repo_root(), 'baseline_scans')
 
 

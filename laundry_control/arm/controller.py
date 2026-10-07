@@ -33,7 +33,7 @@ import tf2_ros
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .geometry import tool_z_from_quaternion
-from .joint_path import densify, time_path
+from .joint_path import densify, time_path, within_joint_limits
 from .. import config
 from ..config import (
     OMPL_PIPELINE_ID,
@@ -1401,10 +1401,20 @@ class XArm7Controller(Node):
 
     def state_is_valid(self, joints):
         """
-        Return True if MoveIt finds this joint state collision-free.
+        Return True if the state is within limits and collision-free.
 
-        A state MoveIt never answers for counts as invalid.
+        Limits are config.JOINT_*_LIMITS_RAD less JOINT_LIMIT_MARGIN_RAD,
+        checked here because MoveIt's validity service does not. A
+        state MoveIt never answers for counts as invalid.
         """
+        if not within_joint_limits(
+            joints,
+            config.JOINT_LOWER_LIMITS_RAD,
+            config.JOINT_UPPER_LIMITS_RAD,
+            config.JOINT_LIMIT_MARGIN_RAD,
+        ):
+            return False
+
         response = self._validity_response(joints)
 
         return bool(response is not None and response.valid)
@@ -1413,8 +1423,26 @@ class XArm7Controller(Node):
         """
         Return the colliding (body, body) pairs at a joint state.
 
-        [] if the state is valid; None if MoveIt never answered.
+        [] if the state is valid; None if MoveIt never answered. A
+        joint outside its limits (see state_is_valid) is reported as
+        (joint name, 'joint limit'), without asking MoveIt.
         """
+        beyond = [
+            (name, 'joint limit')
+            for name, q, lo, hi in zip(
+                self.JOINT_NAMES,
+                joints,
+                config.JOINT_LOWER_LIMITS_RAD,
+                config.JOINT_UPPER_LIMITS_RAD,
+            )
+            if not within_joint_limits(
+                [q], [lo], [hi], config.JOINT_LIMIT_MARGIN_RAD
+            )
+        ]
+
+        if beyond:
+            return beyond
+
         response = self._validity_response(joints)
 
         if response is None:

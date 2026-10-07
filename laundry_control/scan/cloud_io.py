@@ -91,7 +91,12 @@ def build_cloud_with_intensity(frame_id, stamp, xyz_points, intensities):
 # an extrinsic error tracks J7, while a bucket-pose error does not,
 # and that is the only thing distinguishing them (see
 # bucket_model.fit_report).
-EXTENDED_COLUMNS = ['raw_range', 'ox', 'oy', 'oz', 'j7']
+#
+# segment: which part of the scan the reading came from - 0 the
+# strokes, 1 the end scan (scan/segments.py). A quick scan is a full
+# scan's strokes alone, so one baseline set serves both. Older files
+# have no such column; segments.py labels them from the beam's tilt.
+EXTENDED_COLUMNS = ['raw_range', 'ox', 'oy', 'oz', 'j7', 'segment']
 
 BASE_COLUMNS = ['x', 'y', 'z', 'stamp_sec', 'stamp_nanosec']
 
@@ -108,15 +113,16 @@ def save_xyz_csv(path, points):
     points = list(points)
 
     # A base point is a 4-tuple (x, y, z, stamp); the stamp
-    # expands to two columns, so column count != tuple length.
-    extended = bool(points) and len(points[0]) == 4 + len(EXTENDED_COLUMNS)
+    # expands to two columns, so column count != tuple length. The
+    # extended columns are written as far as the tuple provides them
+    # (rays without the later 'segment' column still save).
+    extras = len(points[0]) - 4 if points else 0
+    extended = EXTENDED_COLUMNS[:extras] if extras >= 5 else []
 
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
 
-        writer.writerow(
-            BASE_COLUMNS + (EXTENDED_COLUMNS if extended else [])
-        )
+        writer.writerow(BASE_COLUMNS + extended)
 
         for point in points:
 

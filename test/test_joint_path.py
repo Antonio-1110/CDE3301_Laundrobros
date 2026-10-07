@@ -7,9 +7,34 @@ from laundry_control.arm.joint_path import (
     min_jerk,
     split_at_reversals,
     time_path,
+    within_joint_limits,
 )
 import numpy as np
 import pytest
+
+
+def test_within_joint_limits_keeps_the_margin():
+    lower, upper = [-1.0] * 7, [1.0] * 7
+    margin = math.radians(2.0)
+
+    assert within_joint_limits([0.0] * 7, lower, upper, margin)
+    assert within_joint_limits([1.0] * 7, lower, upper)
+    assert not within_joint_limits([1.0] + [0.0] * 6, lower, upper, margin)
+    assert not within_joint_limits([0.0] * 6 + [-1.01], lower, upper)
+
+
+def test_drop_via_that_tripped_c23_is_outside_the_limits():
+    from laundry_control import config
+
+    # INTER -> DROP via baked 2026-09-29: J2 at 125.3 deg, limit 120.
+    via = np.radians([17.5, 125.3, -193.4, 25.0, -1.0, 55.5, -167.4])
+
+    assert not within_joint_limits(
+        via,
+        config.JOINT_LOWER_LIMITS_RAD,
+        config.JOINT_UPPER_LIMITS_RAD,
+        config.JOINT_LIMIT_MARGIN_RAD,
+    )
 
 
 def test_min_jerk_starts_and_ends_at_rest():

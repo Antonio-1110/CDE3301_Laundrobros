@@ -11,19 +11,35 @@ that node's CSV.
 Run from the terminal as `laundry scan` (cli.py).
 """
 
+import argparse
 import math
 import os
 
 import rclpy
 
+from . import segments
+from .strokes import MAX_STEP_M, stroke_plan
+from .. import config
 from ..arm.transfers import go_to
-from ..config import BOTTOM
 
 # Defaults for every scan parameter, shared by scan() and the CLI so
-# the two can never drift apart. Baselines and detection scans MUST
-# use the same values: the detector's learned residual field is only
-# valid for the trajectory it was learned on.
+# the two can never drift apart. Baselines and detection scans must
+# see the wall the same way: same depth range, sweep and J7 speed.
+# The step may be coarser than the baselines' (the model is per wall
+# cell, and every stroke views the wall square-on), as long as the
+# stroke speed scales with it - see scaled_stroke_speed().
 DEFAULT_DEPTH_M = 0.42
+# How far the arm moves straight in from INTER, without recording or
+# turning J7, before the strokes start: at INTER the sensor is at the
+# bucket mouth, and readings taken there (and on the way out) caught
+# the lip and things past it - every out-of-bucket point in the
+# 2026-09-28 scans came from the first or last 5% of the scan. At 6 cm
+# the sensor starts ~4-5 cm inside. Changing it changes the scan path
+# (re-collect baselines), but needs no re-bake: the strokes are
+# planned live and the end scan pivots at `depth` regardless.
+DEFAULT_ENTRY_DEPTH_M = 0.06
+# The LARGEST spacing between strokes (scan/strokes.py spreads them
+# evenly over depth - entry depth); at most strokes.MAX_STEP_M.
 DEFAULT_STEP_M = 0.03
 DEFAULT_SWEEP_DEG = 150.0
 #
@@ -36,24 +52,51 @@ DEFAULT_SWEEP_DEG = 150.0
 # the denser scan cut the grasp point's median error ~1.0 -> 0.65cm;
 # 0.02 gained nothing more. The committed baselines were recorded at
 # 0.1: re-collect them at this speed (HARDWARE_TESTS.md D).
+#
+# These are the speeds for the DEFAULT step. A stroke's duration is set
+# by its tool-Z distance (the J7 twist rides on MoveIt's timing,
+# arm/controller._add_joint7_twist), so a coarser step at the same
+# scaling would just take longer per stroke and save no time. The CLI
+# therefore scales both with the step (scaled_stroke_speed): 12 cm at
+# 0.12 sweeps J7 as fast as 3 cm at 0.03, in a quarter of the strokes.
 DEFAULT_VELOCITY = 0.03
 DEFAULT_ACCELERATION = 0.03
+
+
+def scaled_stroke_speed(step, base=DEFAULT_VELOCITY):
+    """
+    Return the stroke velocity/acceleration scaling for this step.
+
+    base * step / DEFAULT_STEP_M, capped at 1: every stroke then takes
+    about as long as a default one, so J7 sweeps at the baselines' speed
+    and each sweep gets as many readings.
+    """
+    return min(1.0, base * step / DEFAULT_STEP_M)
+
+
 DEFAULT_ROTATION_VELOCITY = 0.5
 DEFAULT_ROTATION_ACCELERATION = 0.5
 DEFAULT_CARTESIAN_STEP_M = 0.005
 DEFAULT_PAUSE_SEC = 0.0
 DEFAULT_SAVE_INTERVAL_SEC = 5.0
 
-# How the closed end is covered: 'precession' (default, baked - see
-# scan/endcap.py) or 'bottom' (the old recorded-pose detour, only
-# when asked for).
-END_SCANS = ('precession', 'bottom')
-DEFAULT_END_SCAN = 'precession'
+# How the closed end is covered: 'precession' (the FULL scan, baked -
+# see scan/endcap.py), 'none' (the QUICK scan, the CLI default: no end
+# scan, only a J7 turnaround at the deepest stroke - the tilting end
+# scan swings the wrist and elbow low, rubbing laundry on the lower
+# walls, and the quick scan never does; it sees ~86% of the floor and
+# lower walls and none of the closed end, and is judged against the
+# baselines' strokes, scan/segments.py) or 'bottom' (the old
+# recorded-pose detour, only when asked for). Baselines are always
+# collected full (scan/baselines.run_one_scan asks for it).
+END_SCANS = ('precession', 'none', 'bottom')
+DEFAULT_END_SCAN = 'none'
 
 
 def scan(
     arm,
     depth=DEFAULT_DEPTH_M,
+    entry_depth=DEFAULT_ENTRY_DEPTH_M,
     step=DEFAULT_STEP_M,
     sweep_deg=DEFAULT_SWEEP_DEG,
     velocity=DEFAULT_VELOCITY,
@@ -82,8 +125,21 @@ def scan(
         Default:
             0.42 m
 
+    entry_depth:
+        Straight insertion from INTER before the strokes start (and
+        the retraction after they end), neither recorded nor
+        swinging J7, so every reading is taken inside the bucket.
+
+        Default:
+            0.06 m
+
     step:
-        Linear distance travelled during each scan stroke.
+        The LARGEST linear distance per scan stroke, at most
+        strokes.MAX_STEP_M (0.12 m). The strokes are spread evenly
+        from entry_depth to depth (scan/strokes.stroke_plan), so each
+        may be a little shorter. Over the default, pass velocity and
+        acceleration from scaled_stroke_speed(step), or the scan only
+        gets slower, not faster.
 
         Default:
             0.03 m
@@ -137,7 +193,8 @@ def scan(
     end_scan:
         How the closed end is covered at maximum depth: 'precession'
         (default) replays the baked coning sweep in end_plan (see
-        scan/endcap.py); 'bottom' runs the old recorded-pose BOTTOM
+        scan/endcap.py); 'none' (the quick scan) only turns J7 for
+        the way out; 'bottom' runs the old recorded-pose BOTTOM
         detour and is only used when asked for.
 
     end_plan:
@@ -157,11 +214,11 @@ def scan(
 
         sweep_deg = 150
 
-    Start:
+    Start (not recorded):
 
-        J7 = 0 deg
+        INTER, J7 = 0 deg; straight in by entry_depth.
 
-    Initial positioning:
+    Initial positioning (recording from here):
 
         0 -> -75 deg
 
@@ -200,6 +257,9 @@ def scan(
 
     No further stationary rotations occur on the way out.
 
+    Leaving (not recorded): back at entry_depth, J7 back to INTER's,
+    then straight out to INTER.
+
     """
     # =========================================================
     # Validate input
@@ -225,18 +285,6 @@ def scan(
 
     if not 0.0 < end_scan_time_scale <= 1.0:
         arm.get_logger().error('end_scan_time_scale must be in (0, 1].')
-        return False
-
-    if step <= 0.0:
-        arm.get_logger().error(
-            'step must be greater than zero.'
-        )
-        return False
-
-    if step > depth:
-        arm.get_logger().error(
-            'step cannot be greater than depth.'
-        )
         return False
 
     if sweep_deg <= 0.0:
@@ -273,31 +321,12 @@ def scan(
     # Determine number of strokes
     # =========================================================
 
-    step_count_float = depth / step
+    max_step = step
 
-    number_of_steps = round(
-        step_count_float
-    )
-
-    if not math.isclose(
-        step_count_float,
-        number_of_steps,
-        rel_tol=1e-6,
-        abs_tol=1e-6,
-    ):
-        arm.get_logger().error(
-            'depth must currently be an exact multiple '
-            'of step.'
-        )
-
-        arm.get_logger().error(
-            f'depth = {depth:.4f} m'
-        )
-
-        arm.get_logger().error(
-            f'step  = {step:.4f} m'
-        )
-
+    try:
+        number_of_steps, step = stroke_plan(depth, entry_depth, max_step)
+    except ValueError as exc:
+        arm.get_logger().error(str(exc))
         return False
 
     # =========================================================
@@ -308,6 +337,26 @@ def scan(
 
     # Used only for logging our nominal insertion depth.
     current_depth = 0.0
+
+    def mark_segment(segment):
+        """Label the readings from now on as this scan segment."""
+        if recorder is not None and not recorder.set_segment(segment):
+            arm.get_logger().error(
+                'Could not label the end-scan readings in the recorder; '
+                'this scan cannot be split into strokes and end scan.'
+            )
+
+    def set_recording(on):
+        """Start or pause scan_recorder_node's recording; False if it would not."""
+        if recorder is None or recorder.set_recording(on):
+            return True
+
+        arm.get_logger().error(
+            f"Could not {'start' if on else 'stop'} scan_recorder_node's "
+            'recording (a bring-up started before the recorder had '
+            "a 'recording' parameter? Restart it)."
+        )
+        return False
 
     # =========================================================
     # Scan configuration
@@ -326,7 +375,11 @@ def scan(
     )
 
     arm.get_logger().info(
-        f'Linear step      : {step:.3f} m'
+        f'Entry depth      : {entry_depth:.3f} m'
+    )
+
+    arm.get_logger().info(
+        f'Linear step      : {step:.4f} m (at most {max_step:.3f})'
     )
 
     arm.get_logger().info(
@@ -402,6 +455,10 @@ def scan(
         '========== MOVE TO INTER =========='
     )
 
+    # Nothing is recorded until the sensor is inside the bucket.
+    if not set_recording(False):
+        return False
+
     # Baked transfer from HOME/DROP, else a straight checked joint
     # move, else the planner (arm/transfers.go_to).
     success = go_to(arm, 'inter')
@@ -415,6 +472,48 @@ def scan(
         return False
 
     wait_between_movements()
+
+    # =========================================================
+    # 1b. ENTRY: straight in along tool Z, J7 unchanged
+    # =========================================================
+
+    if entry_depth > 0.0:
+
+        arm.get_logger().info(
+            f'========== ENTRY ({entry_depth:.3f} m) =========='
+        )
+
+        success = arm.move_tool_z(
+            entry_depth,
+            max_step=cartesian_step,
+            velocity=velocity,
+            acceleration=acceleration,
+        )
+
+        if not success:
+
+            arm.get_logger().error(
+                'Straight entry into the bucket failed.'
+            )
+
+            return False
+
+        current_depth = entry_depth
+
+        wait_between_movements()
+
+    # Recording starts here, with the sensor inside: drop whatever
+    # the recorder picked up before it was paused.
+    if recorder is not None and not recorder.clear_blocking():
+
+        arm.get_logger().error('Could not clear the recorder.')
+
+        return False
+
+    if not set_recording(True):
+        return False
+
+    last_save_time = arm.get_clock().now()
 
     # =========================================================
     # 2. INITIAL J7 OFFSET
@@ -644,6 +743,13 @@ def scan(
             rotation_acceleration,
             wait_between_movements,
         )
+    elif end_scan == 'none':
+        # The quick scan: no end scan, only the turnaround, as a J7
+        # turn on the spot (straight, collision-checked joint move),
+        # so the outward strokes still interleave with the inward.
+        turned = list(pre_bottom_joints)
+        turned[6] += math.radians(phase_twist)
+        success = arm.move_joints_linear(turned)
     else:
         success = _precession_end_scan(
             arm,
@@ -652,6 +758,9 @@ def scan(
             pre_bottom_joints,
             phase_twist,
             end_scan_time_scale,
+            on_replay=lambda active: mark_segment(
+                segments.END if active else segments.STROKES
+            ),
         )
 
     if not success:
@@ -750,12 +859,65 @@ def scan(
         maybe_checkpoint_save()
 
     # =========================================================
-    # 6. RETURN TO INTER
+    # 6. STOP RECORDING, SAVE
+    #
+    # Blocking is fine (and necessary) here: the arm is
+    # stationary, and this is the one save that must land.
+    # =========================================================
+
+    if not set_recording(False):
+        return False
+
+    if recorder is not None:
+
+        recorder.save_blocking()
+
+        arm.get_logger().info(
+            'Final scan checkpoint saved.'
+        )
+
+    # =========================================================
+    # 7. LEAVE: J7 back to INTER's (inside), straight out, INTER
     # =========================================================
 
     arm.get_logger().info(
         '========== RETURN TO INTER =========='
     )
+
+    if entry_depth > 0.0:
+
+        current = arm.get_current_joints()
+
+        if current is None:
+            return False
+
+        unwound = list(current)
+        unwound[6] = config.get_named_pose('inter')[6]
+
+        if not arm.move_joints_linear(unwound):
+
+            arm.get_logger().error(
+                'Could not turn J7 back before leaving the bucket.'
+            )
+
+            return False
+
+        success = arm.move_tool_z(
+            -entry_depth,
+            max_step=cartesian_step,
+            velocity=velocity,
+            acceleration=acceleration,
+        )
+
+        if not success:
+
+            arm.get_logger().error(
+                'Straight exit from the bucket failed.'
+            )
+
+            return False
+
+        current_depth -= entry_depth
 
     success = go_to(arm, 'inter')
 
@@ -770,7 +932,7 @@ def scan(
     wait_between_movements()
 
     # =========================================================
-    # 7. COMPLETE
+    # 8. COMPLETE
     # =========================================================
 
     if abs(current_depth) < 1e-9:
@@ -789,17 +951,6 @@ def scan(
         f'{current_depth:.4f} m'
     )
 
-    if recorder is not None:
-
-        # Blocking is fine (and necessary) here: the arm is already
-        # stationary, and this is the last chance to persist this
-        # scan's points before the caller shuts the node down.
-        recorder.save_blocking()
-
-        arm.get_logger().info(
-            'Final scan checkpoint saved.'
-        )
-
     arm.get_logger().info(
         '========================================'
     )
@@ -807,8 +958,99 @@ def scan(
     return True
 
 
+# Speed scaling for the end-scan-only pass's straight moves in and
+# out: nothing is recorded or twisted on them.
+END_ONLY_VELOCITY = 0.1
+
+
+def end_scan_only(
+    arm,
+    recorder=None,
+    depth=DEFAULT_DEPTH_M,
+    end_plan=None,
+    end_scan_time_scale=1.0,
+    cartesian_step=DEFAULT_CARTESIAN_STEP_M,
+    **_scan_options,
+):
+    """
+    Run the end scan on its own: straight in, the end scan, straight out.
+
+    For after a quick scan that found nothing: that scan's strokes plus
+    these end-scan readings are a full scan's readings (scan/
+    segments.py), without swinging through the bucket twice. The
+    recorder is NOT cleared - its quick-scan points stay - and only the
+    end scan's replay is recorded, labelled END; recording is off
+    afterwards. The caller pins the CSV and saves (pipeline).
+
+    MOVES THE ARM. Returns True on success.
+    """
+    from .endcap import run_plan
+
+    log = arm.get_logger()
+
+    if end_plan is None:
+        log.error('The end-scan pass needs a baked end scan (laundry plan bake).')
+        return False
+
+    def set_recording(on):
+        return recorder is None or recorder.set_recording(on)
+
+    def replay(active):
+        if recorder is None:
+            return
+
+        recorder.set_segment(segments.END if active else segments.STROKES)
+        recorder.set_recording(active)
+
+    if not set_recording(False):
+        log.error("Could not stop scan_recorder_node's recording.")
+        return False
+
+    log.info('========== END SCAN ONLY: STRAIGHT IN ==========')
+
+    if not go_to(arm, 'inter'):
+        log.error('Move to INTER failed.')
+        return False
+
+    if not arm.move_tool_z(
+        depth,
+        max_step=cartesian_step,
+        velocity=END_ONLY_VELOCITY,
+        acceleration=END_ONLY_VELOCITY,
+    ):
+        log.error(f'Straight insertion to {depth:.3f} m failed.')
+        return False
+
+    log.info('========== END SCAN ONLY: END SCAN ==========')
+
+    if not run_plan(
+        arm, end_plan, depth, time_scale=end_scan_time_scale,
+        on_replay=replay,
+    ):
+        log.error('End scan failed.')
+        return False
+
+    log.info('========== END SCAN ONLY: STRAIGHT OUT ==========')
+
+    if not arm.move_tool_z(
+        -depth,
+        max_step=cartesian_step,
+        velocity=END_ONLY_VELOCITY,
+        acceleration=END_ONLY_VELOCITY,
+    ):
+        log.error('Straight retraction from the end scan failed.')
+        return False
+
+    if not go_to(arm, 'inter'):
+        log.error('Return to INTER failed.')
+        return False
+
+    return True
+
+
 def _precession_end_scan(
-    arm, plan, depth, pre_end_joints, phase_twist, time_scale
+    arm, plan, depth, pre_end_joints, phase_twist, time_scale,
+    on_replay=None,
 ):
     """
     Replay the baked precession end scan, then turn J7 for the way out.
@@ -827,7 +1069,9 @@ def _precession_end_scan(
         + (f', replayed at {time_scale:g}x speed' if time_scale < 1.0 else '')
     )
 
-    if not run_plan(arm, plan, depth, time_scale=time_scale):
+    if not run_plan(
+        arm, plan, depth, time_scale=time_scale, on_replay=on_replay
+    ):
         arm.get_logger().error('Precession end scan failed.')
         return False
 
@@ -869,10 +1113,11 @@ def _bottom_detour(
     """
     # Entry: sweep to the side OPPOSITE nominal_end_angle,
     # relative to BOTTOM's own reference angle.
-    entry_joints = list(BOTTOM)
+    bottom = config.get_named_pose('bottom')
+    entry_joints = list(bottom)
 
     entry_joints[6] = (
-        BOTTOM[6]
+        bottom[6]
         + math.radians(-phase_sign * half_sweep)
     )
 
@@ -961,18 +1206,52 @@ def _bottom_detour(
 # accept (and forward) exactly the same scan options.
 # =============================================================
 
-def add_scan_arguments(parser):
-    """Add every scan() tuning option to an argparse parser."""
+def _stroke_spacing(text):
+    """Parse --step, rejecting anything over strokes.MAX_STEP_M."""
+    value = float(text)
+
+    if not 0.0 < value <= MAX_STEP_M + 1e-9:
+        raise argparse.ArgumentTypeError(
+            f'must be more than 0 and at most {MAX_STEP_M} m '
+            f'({MAX_STEP_M * 100:g} cm); got {text}'
+        )
+
+    return value
+
+
+def add_quick_full_flags(parser):
+    """Add --quick / --full: shorthands for --end-scan none / precession."""
+    parser.add_argument(
+        '--quick', dest='end_scan', action='store_const', const='none',
+        help='The quick scan: same as --end-scan none.',
+    )
+    parser.add_argument(
+        '--full', dest='end_scan', action='store_const', const='precession',
+        help='The full scan: same as --end-scan precession.',
+    )
+
+
+def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):
+    """
+    Add every scan() tuning option to an argparse parser.
+
+    end_scan_default: the command's own --end-scan default (`laundry
+    run` defaults to the quick scan, 'none').
+    """
     parser.add_argument(
         '--end-scan',
         choices=END_SCANS,
-        default=DEFAULT_END_SCAN,
+        default=end_scan_default,
         help=(
-            "How to cover the closed end: 'precession' (default, the "
-            "baked coning sweep) or 'bottom' (the old BOTTOM-pose "
-            'detour).'
+            "How to cover the closed end: 'precession' (the full scan: "
+            "the baked coning sweep), 'none' (the quick scan: no end "
+            "scan, no tilting; judged against the baselines' strokes) "
+            "or 'bottom' (the old BOTTOM-pose detour). Default: "
+            f"'{end_scan_default}'."
         ),
     )
+
+    add_quick_full_flags(parser)
 
     parser.add_argument(
         '--end-plan',
@@ -1003,12 +1282,26 @@ def add_scan_arguments(parser):
     )
 
     parser.add_argument(
-        '--step',
+        '--entry-depth',
         type=float,
+        default=DEFAULT_ENTRY_DEPTH_M,
+        help=(
+            'Straight insertion from INTER before the strokes start, '
+            f'not recorded, in metres (default: {DEFAULT_ENTRY_DEPTH_M}).'
+        ),
+    )
+
+    parser.add_argument(
+        '--step',
+        type=_stroke_spacing,
         default=DEFAULT_STEP_M,
         help=(
-            'Linear distance per scan stroke in metres '
-            f'(default: {DEFAULT_STEP_M}).'
+            'Largest distance between scan strokes in metres, at most '
+            f'{MAX_STEP_M} (default: {DEFAULT_STEP_M}); the strokes are '
+            'spread evenly from --entry-depth to --depth. Coarser is '
+            'faster but misses small items (12 cm: about half the '
+            'socks); the stroke speed scales with it unless --velocity '
+            'is given.'
         ),
     )
 
@@ -1026,10 +1319,11 @@ def add_scan_arguments(parser):
         '--velocity',
         dest='scan_velocity',
         type=float,
-        default=DEFAULT_VELOCITY,
+        default=None,
         help=(
-            'MoveIt velocity scaling for the scan strokes '
-            f'(default: {DEFAULT_VELOCITY}).'
+            'MoveIt velocity scaling for the scan strokes (default: '
+            f'{DEFAULT_VELOCITY} at the default --step, scaled with it: '
+            f'{scaled_stroke_speed(MAX_STEP_M):g} at {MAX_STEP_M:g}).'
         ),
     )
 
@@ -1037,10 +1331,11 @@ def add_scan_arguments(parser):
         '--acceleration',
         dest='scan_acceleration',
         type=float,
-        default=DEFAULT_ACCELERATION,
+        default=None,
         help=(
-            'MoveIt acceleration scaling for the scan strokes '
-            f'(default: {DEFAULT_ACCELERATION}).'
+            'MoveIt acceleration scaling for the scan strokes (default: '
+            f'{DEFAULT_ACCELERATION} at the default --step, scaled with '
+            'it like --velocity).'
         ),
     )
 
@@ -1106,6 +1401,16 @@ def scan_kwargs_from_args(args):
     """
     end_plan = None
 
+    if args.end_scan == 'none':
+        # The quick scan itself needs no plan; `run` and `clear` use it
+        # for their end-scan-only pass when a quick scan finds nothing.
+        from .endcap import default_plan_path, EndcapPlan
+
+        path = args.end_plan or default_plan_path()
+
+        if os.path.isfile(path):
+            end_plan = EndcapPlan.load(path)
+
     if args.end_scan == 'precession':
         from .endcap import default_plan_path, EndcapPlan
 
@@ -1132,10 +1437,18 @@ def scan_kwargs_from_args(args):
         'end_plan': end_plan,
         'end_scan_time_scale': args.end_scan_speed,
         'depth': args.depth,
+        'entry_depth': args.entry_depth,
         'step': args.step,
         'sweep_deg': args.sweep,
-        'velocity': args.scan_velocity,
-        'acceleration': args.scan_acceleration,
+        # Unless given, both scale with the step (scaled_stroke_speed).
+        'velocity': (
+            args.scan_velocity if args.scan_velocity is not None
+            else scaled_stroke_speed(args.step, DEFAULT_VELOCITY)
+        ),
+        'acceleration': (
+            args.scan_acceleration if args.scan_acceleration is not None
+            else scaled_stroke_speed(args.step, DEFAULT_ACCELERATION)
+        ),
         'rotation_velocity': args.rotation_velocity,
         'rotation_acceleration': args.rotation_acceleration,
         'cartesian_step': args.cartesian_step,

@@ -436,3 +436,35 @@ def test_compute_grasp_target_tilts_when_arm_offset_laterally(surface):
     assert resulting_z == pytest.approx(
         reach_vector / reach_length, abs=1e-6
     )
+
+
+def test_confident_clusters_go_front_first_then_the_rest_by_size():
+    import numpy as np
+
+    from laundry_control.grasp.execute import rank_clusters
+    from laundry_control.perception.bucket_model import seed_cone
+
+    cone = seed_cone()
+
+    class _Cluster:
+        def __init__(self, name, depth, volume, confident=True):
+            self.name = name
+            self.target_point = cone.axis_point + depth * cone.axis_dir
+            self.centroid = self.target_point
+            self.volume_m3 = volume
+            self.size = 10
+            self.confident = confident
+
+    clusters = [
+        _Cluster('deep, big', 0.10, 0.004),
+        _Cluster('front, small', 0.45, 0.0005),
+        _Cluster('middle', 0.30, 0.001),
+        _Cluster('weak, at the mouth', 0.50, 0.003, confident=False),
+        _Cluster('weak, small', 0.20, 0.0001, confident=False),
+    ]
+
+    assert [c.name for c in rank_clusters(clusters)] == [
+        'front, small', 'middle', 'deep, big',
+        'weak, at the mouth', 'weak, small',
+    ]
+    assert np.isfinite(clusters[0].target_point).all()

@@ -9,8 +9,11 @@ request.
 This runs as its OWN node/process, separate from xarm7_controller
 (arm/controller.py). All it needs is /tf, /tf_static (already published
 independently by robot_state_publisher, part of the MoveIt stack)
-and the ToF Range topic - no joint-state or MoveIt access required,
-since this is pure kinematics via TF.
+and the ToF Range topic - no MoveIt access required, since this is
+pure kinematics via TF. (/joint_states only fills the J7 column.)
+
+Each reading is placed with the transform at its own capture time,
+so it waits briefly for /tf to catch up (TF_WAIT_SEC).
 
 Because it is a separate process with its own executor, nothing
 that happens here (TF lookups, point-cloud building, CSV I/O) can
@@ -32,6 +35,15 @@ Services (std_srvs/Trigger):
     save_scan  - write accumulated points to the `csv_path` param.
     clear_scan - reset accumulated points (e.g. before a new scan).
 
+Parameter `recording` (default false): readings are only recorded
+while it is true, which a scan sets once the sensor is inside the
+bucket (scan.pattern) and clears afterwards - so the arm's other
+motions never pile points into the cloud. For a manual recording:
+`-p recording:=true`.
+
+The cloud (for RViz) is republished only when it changes; clear_scan
+publishes an empty one, so RViz drops the old scan too.
+
 If `csv_path` is left empty (the default), points are saved under
 `records_dir` (default: config.scan_records_dir(), the source tree's
 scan_records/), in a file named with the scan's start time (kept
@@ -42,10 +54,12 @@ Usage:
     ros2 run laundry_control scan_recorder_node --ros-args -p csv_path:=/tmp/scan.csv
 """
 
+from collections import deque
 from datetime import datetime
 import os
 
 from geometry_msgs.msg import PointStamped
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -67,6 +81,25 @@ from ..config import TOF_SENSOR_FRAME
 # fit alone cannot tell those apart (see bucket_model.fit_report).
 SWEEP_JOINT_NAME = 'joint7'
 
+# How long a reading may wait for /tf to reach its capture time
+# before it is placed with the latest transform instead. /tf trails
+# the ToF: robot_state_publisher computes it from /joint_states,
+# which the stock xArm launch's joint_state_publisher republishes at
+# only 10 Hz, so the newest transform is up to ~100 ms old when a
+# reading arrives. Looking it up at once (as this node used to) fell
+# back to "where the arm is now" for 99.5% of a real scan's readings
+# (2026-09-28) - up to 100 ms of J7 sweep, i.e. several degrees of
+# beam direction. Waiting until /tf has caught up lets the reading
+# use the transform interpolated at its own capture time.
+TF_WAIT_SEC = 0.3
+
+# How often queued readings are retried, since /tf arriving does not
+# itself trigger anything here.
+DRAIN_RATE_HZ = 25.0
+
+# Sweep-joint history kept for interpolating J7 at a reading's time.
+SWEEP_HISTORY_SEC = 2.0
+
 
 class ScanRecorderNode(Node):
 
@@ -81,6 +114,20 @@ class ScanRecorderNode(Node):
         self.declare_parameter('csv_path', '')
         self.declare_parameter('records_dir', '')
         self.declare_parameter('joint_state_topic', config.JOINT_STATE_TOPIC)
+        # Readings are ignored unless this is true: a scan turns it on
+        # only while the sensor is inside the bucket (scan.pattern,
+        # entry_depth), and pipeline.run_scan turns it off after.
+        # Left on between scans, every motion of the arm piled points
+        # into the RViz cloud until the next scan cleared it.
+        self.declare_parameter('recording', False)
+        # The scan segment readings are recorded as (scan/segments.py:
+        # 0 strokes, 1 end scan), set by the scan around its end scan
+        # and written to the CSV's segment column.
+        self.declare_parameter('segment', 0)
+
+        # Size of the cloud last published; -1 forces a publish (an
+        # empty cloud after a clear, so RViz drops the old one).
+        self._published_count = -1
 
         self.base_frame = self.get_parameter('base_frame').value
         self.flange_link = self.get_parameter('flange_link').value
@@ -99,11 +146,16 @@ class ScanRecorderNode(Node):
         # range-space residuals and extrinsic calibration both need.
         self.point_rays = []
 
-        # Latest sweep-joint angle, cached from /joint_states. NaN
+        # Recent sweep-joint angles from /joint_states, as (time,
+        # angle), interpolated at each reading's capture time. Empty
         # until the first message arrives, so a scan recorded
-        # without joint states is visibly missing the column rather
-        # than quietly full of zeros.
-        self._latest_sweep_angle = float('nan')
+        # without joint states is visibly missing the column (NaN)
+        # rather than quietly full of zeros.
+        self._sweep_history = deque()
+
+        # Readings waiting for /tf to reach their capture time (see
+        # TF_WAIT_SEC), oldest first.
+        self._pending = deque()
 
         # TF lookup outcomes for the current scan. The fallback path
         # below substitutes "wherever the arm is NOW" for "where the
@@ -141,6 +193,10 @@ class ScanRecorderNode(Node):
             10,
         )
 
+        self._drain_timer = self.create_timer(
+            1.0 / DRAIN_RATE_HZ, self._drain
+        )
+
         publish_rate_hz = self.get_parameter('publish_rate_hz').value
 
         self._publish_timer = self.create_timer(
@@ -160,110 +216,161 @@ class ScanRecorderNode(Node):
 
     def _joint_state_callback(self, msg):
         """
-        Cache the sweep joint's angle.
+        Remember the sweep joint's recent angles.
 
-        Latest-value caching is good enough here: this is only ever
-        used for offline calibration diagnostics, never for placing
-        a point (which goes through TF at the reading's own
-        timestamp). A few milliseconds of staleness shifts the
-        fitted phase of a J7 sinusoid slightly and changes nothing
-        about the scan geometry.
+        Only ever used for offline calibration diagnostics (the J7
+        column), never for placing a point, which goes through TF.
         """
         if SWEEP_JOINT_NAME not in msg.name:
             return
 
         index = msg.name.index(SWEEP_JOINT_NAME)
 
-        if index < len(msg.position):
-            self._latest_sweep_angle = float(msg.position[index])
+        if index >= len(msg.position):
+            return
+
+        stamp = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
+
+        if stamp <= 0.0:
+            stamp = self.get_clock().now().nanoseconds * 1e-9
+
+        self._sweep_history.append((stamp, float(msg.position[index])))
+
+        while stamp - self._sweep_history[0][0] > SWEEP_HISTORY_SEC:
+            self._sweep_history.popleft()
+
+    def _sweep_angle_at(self, stamp):
+        """Return the sweep joint's angle at `stamp` (s), interpolated; NaN if unknown."""
+        if not self._sweep_history:
+            return float('nan')
+
+        times, angles = zip(*self._sweep_history)
+
+        return float(np.interp(stamp, times, angles))
 
     def _range_callback(self, msg):
+
+        if not self.get_parameter('recording').value:
+            return
 
         if not (msg.min_range <= msg.range <= msg.max_range):
             return
 
-        sensor_frame = msg.header.frame_id or TOF_SENSOR_FRAME
+        # The segment in force when the reading ARRIVED: it is placed
+        # up to TF_WAIT_SEC later, when the scan may have moved on.
+        self._pending.append(
+            (msg, int(self.get_parameter('segment').value))
+        )
+        self._drain()
 
+    def _lookup(self, sensor_frame, when):
+        """Return (flange, base) transforms of sensor_frame at `when`; raises if unavailable."""
+        # Zero-timeout lookups only check what is already buffered,
+        # so they never block this node's executor.
+        return (
+            self.tf_buffer.lookup_transform(
+                self.flange_link, sensor_frame, when
+            ),
+            self.tf_buffer.lookup_transform(
+                self.base_frame, sensor_frame, when
+            ),
+        )
+
+    def _drain(self, force=False):
+        """
+        Place every queued reading whose capture time /tf has reached.
+
+        Readings go in capture order. The oldest one waits (and with
+        it the rest) until the transform at its own capture time is
+        available, or until it is TF_WAIT_SEC old: then it is placed
+        with the latest transform, and counted as a fallback. force
+        (on save) places everything queued now, exact where possible.
+        """
+        now_ns = self.get_clock().now().nanoseconds
+
+        while self._pending:
+            msg, segment = self._pending[0]
+            sensor_frame = msg.header.frame_id or TOF_SENSOR_FRAME
+            stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
+            waiting = not force and (now_ns - stamp_ns) * 1e-9 < TF_WAIT_SEC
+
+            try:
+                transforms = self._lookup(sensor_frame, msg.header.stamp)
+            except Exception as exact_exc:
+                if waiting:
+                    return
+
+                self._pending.popleft()
+                self._record_fallback(msg, sensor_frame, exact_exc, segment)
+                continue
+
+            # The J7 column is interpolated from /joint_states, which
+            # can arrive just after the /tf computed from it: wait for
+            # a sample past the reading too, or it gets the last one
+            # before it (up to 100 ms of sweep stale).
+            if (
+                waiting
+                and self._sweep_history
+                and self._sweep_history[-1][0] < stamp_ns * 1e-9
+            ):
+                return
+
+            self._pending.popleft()
+            self._tf_exact_count += 1
+            self._record(msg, sensor_frame, *transforms, segment=segment)
+
+    def _record_fallback(self, msg, sensor_frame, exact_exc, segment=0):
+        """Place a reading with the latest transform (the arm's pose NOW)."""
+        try:
+            transforms = self._lookup(sensor_frame, Time())
+
+        except Exception as exc:
+
+            self._tf_dropped_count += 1
+
+            self.get_logger().warning(
+                f'Could not transform ToF reading: {exc}',
+                throttle_duration_sec=2.0,
+            )
+
+            return
+
+        self._tf_fallback_count += 1
+
+        # Warn on the very first fallback regardless of the throttle,
+        # so a scan that silently degrades from the first reading
+        # onward (e.g. /tf not arriving at all) is obvious
+        # immediately rather than only in the end-of-scan tally.
+        if self._tf_fallback_count == 1:
+
+            self.get_logger().warning(
+                'ToF reading could not be transformed at its own '
+                f'capture time within {TF_WAIT_SEC:g} s ({exact_exc}); '
+                'falling back to the latest available transform. Points '
+                'captured this way are placed where the arm is NOW, not '
+                'where it was when the reading was taken - expect reduced '
+                'spatial accuracy while the arm is moving.'
+            )
+
+        else:
+
+            self.get_logger().warning(
+                'Still using latest-transform fallback '
+                f'({self._tf_fallback_count} readings so far).',
+                throttle_duration_sec=5.0,
+            )
+
+        self._record(msg, sensor_frame, *transforms, segment=segment)
+
+    def _record(
+        self, msg, sensor_frame, tcp_transform, base_transform, segment=0
+    ):
+        """Store one reading as a point (flange and base frames) plus its ray."""
         sensor_point = PointStamped()
         sensor_point.header.frame_id = sensor_frame
         sensor_point.point.x = float(msg.range)
         sensor_point.point.y = 0.0
         sensor_point.point.z = 0.0
-
-        # Prefer the transform AT the reading's own capture time, for
-        # spatial accuracy - fall back to the latest available one
-        # if that's not resolvable (e.g. clock skew between this PC
-        # and the ToF sensor's Raspberry Pi makes msg.header.stamp
-        # look like it's in the future relative to /tf, or the
-        # buffer just hasn't received that far yet). Zero-timeout
-        # lookups only check what's already buffered, so neither
-        # attempt can block this node's executor.
-        try:
-            tcp_transform = self.tf_buffer.lookup_transform(
-                self.flange_link,
-                sensor_frame,
-                msg.header.stamp,
-            )
-
-            base_transform = self.tf_buffer.lookup_transform(
-                self.base_frame,
-                sensor_frame,
-                msg.header.stamp,
-            )
-
-            self._tf_exact_count += 1
-
-        except Exception as exact_exc:
-
-            try:
-                tcp_transform = self.tf_buffer.lookup_transform(
-                    self.flange_link,
-                    sensor_frame,
-                    Time(),
-                )
-
-                base_transform = self.tf_buffer.lookup_transform(
-                    self.base_frame,
-                    sensor_frame,
-                    Time(),
-                )
-
-            except Exception as exc:
-
-                self._tf_dropped_count += 1
-
-                self.get_logger().warning(
-                    f'Could not transform ToF reading: {exc}',
-                    throttle_duration_sec=2.0,
-                )
-
-                return
-
-            self._tf_fallback_count += 1
-
-            # Warn on the very first fallback regardless of the
-            # throttle, so a scan that silently degrades from the
-            # first reading onward (e.g. a sensor whose clock never
-            # got synchronised to this machine's) is obvious
-            # immediately rather than only in the end-of-scan tally.
-            if self._tf_fallback_count == 1:
-
-                self.get_logger().warning(
-                    'ToF reading could not be transformed at its own '
-                    f'capture time ({exact_exc}); falling back to the '
-                    'latest available transform. Points captured this '
-                    'way are placed where the arm is NOW, not where it '
-                    'was when the reading was taken - expect reduced '
-                    'spatial accuracy while the arm is moving.'
-                )
-
-            else:
-
-                self.get_logger().warning(
-                    'Still using latest-transform fallback '
-                    f'({self._tf_fallback_count} readings so far).',
-                    throttle_duration_sec=5.0,
-                )
 
         tcp_point = tf2_geometry_msgs.do_transform_point(
             sensor_point, tcp_transform
@@ -275,7 +382,7 @@ class ScanRecorderNode(Node):
 
         # Keep the sensor's own capture time for bookkeeping,
         # regardless of which transform lookup (exact stamp or
-        # latest-available fallback) actually succeeded above.
+        # latest-available fallback) placed the point.
         tcp_point.header.stamp = msg.header.stamp
         base_point.header.stamp = msg.header.stamp
 
@@ -303,13 +410,16 @@ class ScanRecorderNode(Node):
                 base_origin.point.x,
                 base_origin.point.y,
                 base_origin.point.z,
-                self._latest_sweep_angle,
+                self._sweep_angle_at(
+                    Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
+                ),
+                int(segment),
             )
         )
 
     def _publish_point_cloud(self):
-
-        if not self.points_base_frame:
+        """Republish the cloud for RViz, only if it changed since last time."""
+        if len(self.points_base_frame) == self._published_count:
             return
 
         xyz = [
@@ -317,15 +427,22 @@ class ScanRecorderNode(Node):
             for p in self.points_base_frame
         ]
 
-        cloud = build_cloud(
-            frame_id=self.points_base_frame[-1].header.frame_id,
-            stamp=self.points_base_frame[-1].header.stamp,
-            xyz_points=xyz,
-        )
+        if self.points_base_frame:
+            frame_id = self.points_base_frame[-1].header.frame_id
+            stamp = self.points_base_frame[-1].header.stamp
+        else:
+            frame_id = self.base_frame
+            stamp = self.get_clock().now().to_msg()
+
+        cloud = build_cloud(frame_id=frame_id, stamp=stamp, xyz_points=xyz)
 
         self._point_cloud_pub.publish(cloud)
+        self._published_count = len(self.points_base_frame)
 
     def _save_scan_callback(self, request, response):
+
+        # Readings still waiting for /tf are part of this scan.
+        self._drain(force=True)
 
         if not self.points_base_frame:
             response.success = False
@@ -419,6 +536,10 @@ class ScanRecorderNode(Node):
         self.points_tcp_frame.clear()
         self.points_base_frame.clear()
         self.point_rays.clear()
+        self._pending.clear()
+
+        # The next publish sends an empty cloud, clearing RViz too.
+        self._published_count = -1
 
         # clear_scan marks a scan boundary, so the TF tally starts
         # over with it - otherwise the next scan's accuracy report

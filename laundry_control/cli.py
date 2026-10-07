@@ -3,50 +3,124 @@
 """
 `laundry`: one command for every stage of the pipeline.
 
-    laundry move home|inter|bottom|drop|retrieve_0..3
-    laundry move joints J1 .. J7 [--degrees]
-    laundry move joint6 DEG | joint7 DEG
-    laundry move linear M | twist M DEG
-    laundry scan [--save scan.csv]
-    laundry detect scan.csv [-o targets.json] [--publish]   # offline
-    laundry grasp targets.json [--drop] [--dry-run]
+HOW TO READ THE USAGE LINES
+---------------------------
+    [--opt]     optional
+    a|b|c       pick one of these
+    N, M, DEG   a number you supply (count, metres, degrees)
+    ...         more of the same
+
+Every command has `--help` with the full list of options; below are
+only the ones you normally need. Commands marked * MOVE THE ARM.
+
+THE MAIN JOBS
+-------------
+  * laundry clear [--no-grabs] [--max-rounds N]
+        Empty the bucket: blind grabs over the grab grid, then
+        scan -> grasp rounds until a scan finds nothing.
+  * laundry run [--dry-run]
+        One round: scan -> detect -> grasp the best item -> DROP.
+  * laundry preplanned [--limit N] [--speed 0.3]
+        Blind grabs only: every grab_NN in turn, no sensing.
+
+ONE STAGE AT A TIME
+-------------------
+Stages hand off through files (a scan CSV, then a targets JSON), so
+each can be run alone, rerun offline, or inspected in between.
+`run` and `clear` chain the same stages in memory.
+
+  * laundry scan [--save scan.csv] [--full]
+        Sweep the ToF sensor through the bucket into a CSV.
+    laundry detect scan.csv [-o targets.json] [--publish]
+        Find laundry in a scan by comparing it with the baselines.
+  * laundry grasp targets.json [--drop] [--dry-run]
+        Grasp the best reachable target from `detect -o`.
+    laundry replay scan.csv
+        Publish a saved scan to RViz.
+
+MOVING AND CHECKING THE ARM
+---------------------------
+  * laundry move home|inter|bottom|drop|grab_NN
+        Go to a named pose (baked route if there is one).
+  * laundry move joints J1 .. J7 [--degrees]
+  * laundry move joint6 DEG | joint7 DEG       turn one joint by DEG
+  * laundry move linear M | twist M DEG        along the tool axis by M
+                                               metres (twist: also J7)
     laundry gripper open|close|ANGLE
-    laundry baseline collect [--count N] [--archive] [-- <scan options>]
+    laundry check-flange
+        Is the tool axis at INTER lined up with the bucket axis?
+
+THE BUCKET, OBSTACLES AND BAKED MOTIONS
+---------------------------------------
+    laundry scene apply|check|fit
+        apply: put the padded bucket and table into MoveIt.
+        check: collision-check every named pose and baked route.
+        fit:   measure where the bucket really is, from the baselines.
+    laundry plan edit-grabs [--fill 0.67]
+        Place the sweep's grabs by dragging them in RViz; CHECK
+        their reach, SAVE to scan_plans/grab_targets.yaml.
+  * laundry plan bake [poses|retrieve|transfers|endcap|all]
+        Solve and save the fixed motions in scan_plans/ (INTER/BOTTOM,
+        the sweep's grabs, routes from INTER, end scan). Run it
+        through ./rebake.sh, on the fake controller.
+  * laundry plan replay [--speed 0.3]
+        Run only the end scan, INTER to INTER.
+
+BASELINES AND DETECTOR TUNING
+-----------------------------
+  * laundry baseline collect [--count N] [--archive]
+        Record N empty-bucket scans. --archive replaces the current
+        set (the old one moves to baseline_scans/archive/).
     laundry baseline promote scan.csv|dir ... [--move] [--archive]
     laundry baseline archive | list | restore LABEL
-    laundry replay scan.csv
-    laundry check-flange
-    laundry scene apply | check
-    laundry plan bake [endcap|transfers|retrieve|all] [--depth 0.42]
-    laundry plan replay [--speed 0.3]
     laundry evaluate [--sweep] [--synthetic] [--laundry scan.csv ...]
-    laundry run [--dry-run]                                 # one item
-    laundry clear [--no-grabs] [--max-rounds N]             # the bucket
-    laundry preplanned [--recorded] [--limit N] [--speed 0.3]
+        Measure the detector: false positives on the baselines, and
+        recall on scans with known laundry.
 
-Stages hand off through files - a scan CSV, then a targets JSON - so
-each one can run alone, be rerun offline, or be inspected in
-between. `laundry run` chains them in memory in one process.
+FULL AND QUICK SCANS (--full / --quick)
+---------------------------------------
+    quick  (--quick, --end-scan none)
+           Strokes in and out of the bucket only. Doesn't disturb the
+           laundry, but never sees the closed end.
+    full   (--full, --end-scan precession)
+           The strokes plus the end scan: the tool tilts in a cone at
+           the deepest point - the only view of the closed end, but it
+           swings the arm low near the walls.
 
-WHAT NEEDS WHAT
----------------
-    detect, evaluate, baseline promote   nothing: plain files, no ROS
-                                         graph, no arm
-    replay                               a ROS graph (for RViz)
-    move, check-flange, plan bake,       MoveIt (real or fake)
-    scene
-    scan, grasp, run, clear, preplanned  MoveIt + scan_recorder_node/
-                                         tof_sensor/gripper_node - or
-                                         --fake-hardware
-    gripper open|close                   gripper_node
-    gripper ANGLE                        the servo on this machine's GPIO
+    Which one each command does by default:
+        scan, run, clear     quick. run/clear add the end scan on its
+                             own when a quick scan finds nothing,
+                             before saying the bucket is empty.
+        baseline collect     always full.
+        evaluate             full.
+        detect               reads it from the CSV (were end-scan
+                             readings recorded?); --quick/--full
+                             override.
 
---fake-hardware swaps the gripper and the ToF recorder for stand-ins
-(hardware/fake.py) while every arm motion still goes through MoveIt,
-so the whole pipeline runs against the fake controller:
+    There is one baseline set, baseline_scans/, of full scans. A quick
+    scan is compared with their stroke readings alone
+    (scan/segments.py).
 
-    ros2 launch laundry_control laundry_bringup.launch.py fake:=true
-    laundry run --fake-hardware --scan-from baseline_scans/<one>.csv
+WHAT EACH COMMAND NEEDS RUNNING
+-------------------------------
+    detect, evaluate, scene fit,   nothing: plain files
+    baseline promote|archive|list|restore
+    replay, plan edit-grabs        a ROS graph (RViz to look at it;
+                                   edit-grabs' CHECK: MoveIt too)
+    move, check-flange,            MoveIt, real or fake
+    scene apply|check, plan
+    scan, grasp, run, clear,       the full bring-up: MoveIt plus the
+    preplanned, baseline collect   ToF, recorder and gripper nodes
+    gripper open|close             gripper_node
+    gripper ANGLE                  the servo on this machine's GPIO,
+                                   or the ESP32's (GRIPPER_BACKEND)
+
+    Without the hardware, --fake-hardware swaps the gripper and the
+    ToF recorder for stand-ins (hardware/fake.py); the arm still goes
+    through MoveIt, on the fake controller:
+
+        ros2 launch laundry_control laundry_bringup.launch.py fake:=true
+        laundry run --fake-hardware --scan-from baseline_scans/<one>.csv
 
 Heavy imports (rclpy, MoveIt messages) happen inside each command, so
 `laundry --help` and the offline commands stay fast.
@@ -54,6 +128,7 @@ Heavy imports (rclpy, MoveIt messages) happen inside each command, so
 
 import argparse
 import math
+import os
 import sys
 
 # =============================================================
@@ -156,9 +231,33 @@ def _detect_params(args):
 
 
 def _baseline_path(args):
+    """Return --baseline, else the baseline set for this kind of scan."""
     from . import config
 
     return args.baseline or config.baseline_dir()
+
+
+def _baselines_ready(args):
+    """
+    Return True if this scan's baseline set exists; say what to do if not.
+
+    Checked before the arm moves: a scan detection cannot use (e.g. a
+    quick scan with no quick baselines yet) only fails after scanning.
+    """
+    import glob
+
+    path = _baseline_path(args)
+
+    if os.path.isfile(path) or glob.glob(os.path.join(path, '*.csv')):
+        return True
+
+    print(
+        f'No baseline scans in {path}. Collect them first, bucket empty '
+        '(full scans; quick scans use their strokes):\n'
+        '    laundry baseline collect',
+        file=sys.stderr,
+    )
+    return False
 
 
 def _add_observed_state_argument(parser):
@@ -395,7 +494,24 @@ def cmd_detect(args):
     baseline = _baseline_path(args)
     params = _detect_params(args)
 
-    clusters, _surface = detect_scan(args.scan_csv, baseline, params)
+    from .scan.segments import end_scan_of, for_end_scan
+
+    end_scan = args.end_scan
+
+    if end_scan is None:
+        end_scan = end_scan_of(args.scan_csv)
+        if end_scan == 'none':
+            print(
+                'No end-scan readings: judging it as a QUICK scan, '
+                "against the baselines' strokes."
+            )
+        else:
+            print('Judging it as a FULL scan.')
+
+    clusters, _surface = detect_scan(
+        args.scan_csv, baseline, params,
+        segments=for_end_scan(end_scan),
+    )
 
     if args.output:
         from .grasp.targets_io import save_targets
@@ -457,6 +573,37 @@ def cmd_grasp(args):
     return 0 if ok else 1
 
 
+def _gripper_angle_over_mqtt(angle):
+    """Move the ESP32's servo to `angle` (config.GRIPPER_BACKEND 'mqtt')."""
+    from . import config
+    from .hardware.gripper_node import make_mqtt_servo
+    from .hardware.mqtt_servo import GripperLinkError
+
+    driver = make_mqtt_servo(
+        config.MQTT_HOST,
+        config.MQTT_PORT,
+        config.MQTT_TOPIC_PREFIX,
+        client_id='laundry_gripper_cli',
+    )
+
+    try:
+        if not driver.wait_connected(5.0):
+            print('Could not reach the MQTT broker.', file=sys.stderr)
+            return 1
+
+        print(f'Moving the ESP32 servo to {angle:.1f} degrees')
+        driver.move(angle, hold=False)
+
+    except GripperLinkError as exc:
+        print(f'Gripper move failed: {exc}', file=sys.stderr)
+        return 1
+
+    finally:
+        driver.close()
+
+    return 0
+
+
 def cmd_gripper(args):
     """Run `laundry gripper open|close|ANGLE`."""
     action = args.action.strip().lower()
@@ -484,6 +631,11 @@ def cmd_gripper(args):
         # is no set-angle service, and this is for calibrating the
         # open/close angles in the first place. Don't run it while
         # the pipeline is actively using the gripper.
+        from . import config
+
+        if config.GRIPPER_BACKEND == 'mqtt':
+            return _gripper_angle_over_mqtt(angle)
+
         servo.set_servo_angle(angle)
         return 0
 
@@ -587,11 +739,11 @@ def cmd_check_flange(args):
 
 
 def cmd_plan(args):
-    """Run `laundry plan bake [endcap|transfers|retrieve|all]`."""
+    """Run `laundry plan bake [poses|endcap|transfers|retrieve|all]`."""
     import socket
 
     from . import config
-    from .arm import transfers
+    from .arm import bucket_poses, transfers
     from .grasp import retrieve_grid
     from .scan import endcap
 
@@ -599,18 +751,79 @@ def cmd_plan(args):
     status = 0
 
     with _RosSession(args=args) as arm:
-        if args.which in ('retrieve', 'all'):
-            print('Solving the grab grid (config.RETRIEVE_GRID)...')
-            grabs, misses = retrieve_grid.solve(arm, log=print)
-            retrieve_grid.save(grabs, baked_on=socket.gethostname())
-            print(f'Saved {retrieve_grid.plan_path()} ({len(grabs)} grabs)')
+        if args.which in ('poses', 'all'):
+            # First: everything else is baked from INTER.
+            print(
+                'Deriving INTER and BOTTOM from the bucket '
+                '(config.BUCKET_POSES)...'
+            )
+            poses, failures = bucket_poses.solve(arm, log=print)
 
-            if misses:
+            if poses:
+                # Keep a previously derived pose that failed this time
+                # out, rather than falling back to the recorded one.
+                kept = {
+                    name: joints
+                    for name, joints in config.derived_bucket_poses().items()
+                    if name in failures
+                }
+                bucket_poses.save(
+                    dict(kept, **poses), baked_on=socket.gethostname()
+                )
+                print(f'Saved {bucket_poses.plan_path()}')
+
+            if failures:
                 print(
-                    f'{len(misses)} grid point(s) unreachable; see above.',
+                    'Not derived: ' + ', '.join(n.upper() for n in failures)
+                    + '. Check config.OBSTACLES and config.BUCKET_POSES.',
                     file=sys.stderr,
                 )
                 status = 1
+
+                if args.which == 'all' and 'inter' in failures:
+                    print(
+                        'Not baking the rest: it would be baked from an INTER '
+                        'that does not fit the bucket.',
+                        file=sys.stderr,
+                    )
+                    return status
+
+        if args.which in ('retrieve', 'all'):
+            from .grasp import grab_targets
+
+            placed = grab_targets.load()
+
+            if not placed:
+                print(
+                    f'No {grab_targets.path()}: place the grabs first '
+                    '(laundry plan edit-grabs, SAVE). Grabs not baked.',
+                    file=sys.stderr,
+                )
+                status = 1
+
+                if args.which == 'retrieve':
+                    return status
+
+            else:
+                print(
+                    f'Solving the {len(placed)} grabs of '
+                    'scan_plans/grab_targets.yaml exactly as placed...'
+                )
+                grabs, misses = retrieve_grid.solve(arm, placed, log=print)
+                retrieve_grid.save(
+                    grabs, baked_on=socket.gethostname(), targets=placed
+                )
+                print(
+                    f'Saved {retrieve_grid.plan_path()} ({len(grabs)} grabs)'
+                )
+
+                if misses:
+                    print(
+                        f'{len(misses)} grab(s) unreachable and left out; '
+                        'see above. Move them: laundry plan edit-grabs.',
+                        file=sys.stderr,
+                    )
+                    status = 1
 
         if args.which in ('transfers', 'retrieve', 'all'):
             # `retrieve` re-bakes only the grab routes and keeps the
@@ -813,7 +1026,30 @@ def cmd_scene(args):
 
         problems = 0
 
-        print('\nRecorded poses (arm link padding as live):')
+        from .arm import bucket_poses
+
+        print('\nINTER and BOTTOM:')
+
+        for name, where in bucket_poses.status().items():
+            print(f'  {name:<11} {where}')
+
+        if config.derived_bucket_poses():
+            stale = scene.stale_plan_message(
+                bucket_poses.baked_scene(), '  bucket_poses.yaml',
+                'laundry plan bake',
+            )
+
+            if stale:
+                problems += 1
+                print(stale)
+
+            changed = bucket_poses.spec_mismatch()
+
+            if changed:
+                problems += 1
+                print(f'  {changed}')
+
+        print('\nNamed poses (arm link padding as live):')
 
         for name, joints in config.named_poses().items():
             contacts = arm.state_contacts(joints)
@@ -836,8 +1072,18 @@ def cmd_scene(args):
         if stale:
             print(stale)
 
+        moved = transfers.from_other_inter(routes)
+
         for name in transfers.transfer_targets():
             route = routes.get(name)
+
+            if name in moved:
+                print(
+                    f'  {name:<11} BAKED FROM ANOTHER INTER: not used; '
+                    're-bake: laundry plan bake transfers'
+                )
+                problems += 1
+                continue
 
             if route is None:
                 print(
@@ -913,6 +1159,12 @@ def cmd_scene(args):
             if stale:
                 print(stale)
 
+            moved = endcap.inter_mismatch(arm, plan)
+
+            if moved:
+                problems += 1
+                print(f'  {moved}')
+
             if abs(plan.padding_m - config.ENDCAP_PADDING_M) > 1e-9:
                 problems += 1
                 print(
@@ -941,6 +1193,21 @@ def cmd_scene(args):
     )
 
     return 1 if problems else 0
+
+
+def cmd_plan_edit_grabs(args):
+    """Run `laundry plan edit-grabs`: drag the sweep's grabs in RViz."""
+    from .grasp import grab_editor
+
+    argv = []
+
+    if args.fill is not None:
+        argv += ['--fill', str(args.fill)]
+
+    if args.file:
+        argv += ['--file', args.file]
+
+    return grab_editor.main(argv)
 
 
 def cmd_plan_replay(args):
@@ -980,6 +1247,9 @@ def cmd_run(args):
 
     csv_path = args.save or timestamped_scan_path('run')
 
+    if not _baselines_ready(args):
+        return 2
+
     with _RosSession(args=args) as arm:
         recorder = _make_recorder(arm, args)
         gripper = _make_gripper(arm, args.fake_hardware)
@@ -1002,6 +1272,9 @@ def cmd_clear(args):
     """Run `laundry clear`: grab sweep, then scan -> grasp until empty."""
     from .pipeline import run_clear
     from .scan.pattern import scan_kwargs_from_args
+
+    if not _baselines_ready(args):
+        return 2
 
     with _RosSession(args=args) as arm:
         ok = run_clear(
@@ -1029,7 +1302,6 @@ def cmd_preplanned(args):
         ok = run_preplanned(
             arm,
             _make_gripper(arm, args.fake_hardware),
-            recorded=args.recorded,
             limit=args.limit,
             time_scale=args.speed,
         )
@@ -1165,6 +1437,18 @@ def build_parser():
         '--topic', type=str, default=DEFAULT_TOPIC,
         help=f'Topic for --publish (default: {DEFAULT_TOPIC}).',
     )
+    detect.add_argument(
+        '--end-scan', choices=('precession', 'none', 'bottom'),
+        default=None,
+        help=(
+            "The kind of scan the CSV is: 'none' for a quick scan (modelled "
+            "from the baselines' strokes alone), else a full scan. Default: "
+            'read from the CSV (full if it has end-scan readings).'
+        ),
+    )
+    from .scan.pattern import add_quick_full_flags
+
+    add_quick_full_flags(detect)
     _add_detector_arguments(detect)
     detect.set_defaults(func=cmd_detect)
 
@@ -1301,16 +1585,21 @@ def build_parser():
     bake = plan_actions.add_parser(
         'bake',
         help=(
-            'Solve, collision-check and save the end-scan trajectory and/or '
-            'the transfers from INTER to every named pose. MOVES THE ARM.'
+            'Solve, collision-check and save INTER/BOTTOM from the bucket, '
+            "the sweep's grabs, the transfers from INTER to every named pose "
+            'and the end-scan trajectory. The end scan MOVES THE ARM.'
         ),
     )
     bake.add_argument(
-        'which', nargs='?', choices=('endcap', 'transfers', 'retrieve', 'all'),
+        'which', nargs='?',
+        choices=('poses', 'endcap', 'transfers', 'retrieve', 'all'),
         default='all',
         help=(
-            'What to bake (default: all). retrieve: solve the grab grid '
-            '(config.RETRIEVE_GRID) and bake routes to it.'
+            'What to bake (default: all, in the order poses, retrieve, '
+            'transfers, endcap). poses: derive INTER and BOTTOM from the '
+            'bucket (config.BUCKET_POSES); no motion. retrieve: solve the '
+            "sweep's grabs exactly as placed (scan_plans/grab_targets.yaml, "
+            '`laundry plan edit-grabs`) and bake routes to them.'
         ),
     )
     from .scan.pattern import DEFAULT_DEPTH_M
@@ -1348,6 +1637,25 @@ def build_parser():
     _add_fake_arguments(replay_plan)
     replay_plan.set_defaults(func=cmd_plan_replay)
 
+    edit_grabs = plan_actions.add_parser(
+        'edit-grabs',
+        help=(
+            "Place the sweep's grabs by dragging them in RViz, CHECK "
+            'their reachability (needs MoveIt; nothing moves) and SAVE '
+            'them to scan_plans/grab_targets.yaml.'
+        ),
+    )
+    edit_grabs.add_argument(
+        '--fill', type=float, default=None,
+        help='How full the drum is shown, as a fraction of its height '
+             '(default: 2/3).',
+    )
+    edit_grabs.add_argument(
+        '--file', type=str, default=None,
+        help='Grab targets file (default: <repo>/scan_plans/grab_targets.yaml).',
+    )
+    edit_grabs.set_defaults(func=cmd_plan_edit_grabs)
+
     evaluate = subparsers.add_parser(
         'evaluate', help='Measure false positives / recall of the detector.'
     )
@@ -1355,7 +1663,12 @@ def build_parser():
     evaluate.set_defaults(func=cmd_evaluate)
 
     run = subparsers.add_parser(
-        'run', help='Full pipeline: scan -> detect -> grasp -> drop.'
+        'run',
+        help=(
+            'Full pipeline: scan -> detect -> grasp -> drop. Quick scan by '
+            'default, and if it finds nothing the end scan alone; --full '
+            'for a full scan.'
+        ),
     )
     run.add_argument(
         '--save', type=str, default=None,
@@ -1365,7 +1678,9 @@ def build_parser():
         '--dry-run', action='store_true',
         help='Stop after printing the grasp target.',
     )
-    add_scan_arguments(run)
+    # The quick scan: it leaves the laundry where it lies (the full
+    # scan's tilting end scan swings the arm low - scan.pattern).
+    add_scan_arguments(run, end_scan_default='none')
     _add_detector_arguments(run)
     _add_fake_arguments(run, with_scan_from=True)
     run.set_defaults(func=cmd_run)
@@ -1376,7 +1691,9 @@ def build_parser():
         'clear',
         help=(
             'Empty the bucket: the grab-grid sweep, then scan -> detect -> '
-            'grasp -> drop until a scan finds nothing.'
+            'grasp -> drop until a scan finds nothing. Quick scans by '
+            'default, then the end scan alone once they find nothing; '
+            '--full for full scans throughout.'
         ),
     )
     clear.add_argument(
@@ -1405,7 +1722,9 @@ def build_parser():
         '--speed', type=float, default=1.0,
         help='Fraction of the baked speed for the grabs, (0, 1] (default: 1).',
     )
-    add_scan_arguments(clear)
+    # Quick scans, then the end scan alone once they find nothing
+    # (pipeline.run_clear).
+    add_scan_arguments(clear, end_scan_default='none')
     _add_detector_arguments(clear)
     _add_fake_arguments(clear, with_scan_from=True)
     clear.set_defaults(func=cmd_clear)
@@ -1413,13 +1732,9 @@ def build_parser():
     preplanned = subparsers.add_parser(
         'preplanned',
         help=(
-            'Sensorless sweep: grab at each generated grab pose (else the '
-            'recorded RETRIEVE poses) and drop.'
+            'Sensorless sweep: grab at each generated grab pose '
+            '(scan_plans/retrieve.yaml) and drop.'
         ),
-    )
-    preplanned.add_argument(
-        '--recorded', action='store_true',
-        help='Use the hand-recorded RETRIEVE_3..0 instead of the grab grid.',
     )
     preplanned.add_argument(
         '--limit', type=int, default=None,

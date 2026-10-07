@@ -1,0 +1,27 @@
+// Copy to config.h (git-ignored) and fill in. See ../README.md.
+#pragma once
+
+// --- WiFi and broker -------------------------------------------------
+#define WIFI_SSID     "your-ssid"
+#define WIFI_PASSWORD "your-password"
+
+// The Pi's LAN address: mosquitto runs on it (setup/mosquitto).
+#define MQTT_HOST     "192.168.1.100"
+#define MQTT_PORT     1883
+#define MQTT_CLIENT   "laundrobros_esp32"
+
+// Must match config.MQTT_TOPIC_PREFIX on the Pi.
+#define TOPIC_PREFIX  "laundrobros"
+
+// --- ToF (VL53L0X) ---------------------------------------------------
+// Each measurement takes this long; readings are stamped at its middle.
+// 33 ms is the sensor's default (~30 readings/s back to back).
+#define TOF_TIMING_BUDGET_US 33000
+
+// --- Servo -----------------------------------------------------------
+// The same 0-180 deg -> 0.5-2.5 ms mapping as the Pi's servo.py
+// (config.SERVO_*), so config.GRIPPER_OPEN/CLOSE_ANGLE_DEG carry over.
+#define SERVO_MIN_DEG   0.0f
+#define SERVO_MAX_DEG   180.0f
+#define SERVO_MIN_US    500
+#define SERVO_MAX_US    2500

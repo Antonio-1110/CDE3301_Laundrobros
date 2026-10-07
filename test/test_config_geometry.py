@@ -23,10 +23,7 @@ def _quat(rotation):
 def test_named_poses_cover_every_recorded_pose():
     poses = config.named_poses()
 
-    recorded = {
-        'home', 'inter', 'bottom', 'drop',
-        'retrieve_0', 'retrieve_1', 'retrieve_2', 'retrieve_3',
-    }
+    recorded = {'home', 'inter', 'bottom', 'drop'}
     # Plus the generated grab_NN poses, once scan_plans/retrieve.yaml
     # is baked.
     assert set(poses) == recorded | set(config.generated_grab_poses())
@@ -40,11 +37,11 @@ def test_named_poses_cover_every_recorded_pose():
 def test_get_named_pose_is_case_insensitive_and_copies():
     pose = config.get_named_pose('  InTeR ')
 
-    assert pose == config.INTER
+    assert pose == config.get_named_pose('inter')
 
     pose[0] = 99.0
 
-    assert config.INTER[0] != 99.0
+    assert config.get_named_pose('inter')[0] != 99.0
 
 
 def test_get_named_pose_lists_alternatives_on_typo():

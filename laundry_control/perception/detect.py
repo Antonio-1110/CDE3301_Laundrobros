@@ -199,9 +199,14 @@ def load_points_xyz(csv_path: str) -> np.ndarray:
 
 def load_baseline_scans(
     baseline: Union[str, Sequence[str]],
+    segments=None,
 ) -> List[np.ndarray]:
     """
     Load one or more empty-bucket baseline scans.
+
+    segments: keep only readings of these scan segments (scan/
+    segments.py) - (STROKES,) models a quick scan from full-scan
+    baselines; None keeps everything.
 
     `baseline` may be a single CSV path, a DIRECTORY of CSVs, or an
     explicit sequence of paths. The directory form is the intended
@@ -234,7 +239,12 @@ def load_baseline_scans(
         if not paths:
             raise ValueError('Empty baseline path sequence.')
 
-    return [load_points_xyz(path) for path in paths]
+    if segments is None:
+        return [load_points_xyz(path) for path in paths]
+
+    from ..scan.segments import load_points
+
+    return [load_points(path, segments) for path in paths]
 
 
 def load_baseline_xyz(

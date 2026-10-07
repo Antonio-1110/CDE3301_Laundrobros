@@ -60,17 +60,13 @@ from .. import config
 PLAN_VERSION = 1
 
 # Targets reached from INTER through a baked transfer. INTER is the
-# hub: a move between two of these (RETRIEVE_n -> DROP, say) replays
+# hub: a move between two of these (grab_NN -> DROP, say) replays
 # one route back to INTER and the other out from it - through the
 # bucket mouth, never across the rim.
 TRANSFER_TARGETS = (
     'home',
     'drop',
     'bottom',
-    'retrieve_0',
-    'retrieve_1',
-    'retrieve_2',
-    'retrieve_3',
 )
 
 
@@ -78,13 +74,6 @@ def transfer_targets():
     """Return TRANSFER_TARGETS plus the generated grab_NN approach poses."""
     return TRANSFER_TARGETS + tuple(config.generated_grab_poses())
 
-
-# Targets outside the bucket. Their routes are baked with extra gripper
-# clearance (config.BAKE_GRIPPER_CLEARANCE_M) on top of the live
-# padding, since nothing on the way there needs the gripper close to
-# the bucket. Routes into it (BOTTOM, RETRIEVE_n) end with the gripper
-# at the floor on purpose, so they are baked at the live padding.
-OUTSIDE_TARGETS = ('home', 'drop')
 
 # Joint-travel weights for choosing a route: J1 and J4-J7 twist the
 # cables running down the arm, so their travel costs more.
@@ -136,7 +125,8 @@ def _retreat(arm, distance_m):
     (Reading the live flange made HOME's route differ between bakes:
     the arm stops within MoveIt's tolerance of INTER, not exactly on it.)
     """
-    fk = arm.compute_fk(config.INTER)
+    inter = config.get_named_pose('inter')
+    fk = arm.compute_fk(inter)
 
     if fk is None:
         return None
@@ -151,7 +141,7 @@ def _retreat(arm, distance_m):
     pose.orientation.x, pose.orientation.y = map(float, quaternion[:2])
     pose.orientation.z, pose.orientation.w = map(float, quaternion[2:])
 
-    solution = arm.compute_ik(pose, config.INTER)
+    solution = arm.compute_ik(pose, inter)
 
     return None if solution is None else np.array(solution)
 
@@ -225,7 +215,7 @@ def bake_transfer(arm, target_name, log=print):
     is checked against the planning scene as it is now, so the caller
     sets the padding the route must keep.
     """
-    inter = np.array(config.INTER)
+    inter = np.array(config.get_named_pose('inter'))
     target = np.array(config.get_named_pose(target_name))
 
     if not arm.state_is_valid(target):
@@ -297,8 +287,7 @@ def bake(arm, targets=None, log=print):
 
     Returns ({target: [joint waypoints]}, {target: gripper clearance
     used, metres}, {target: reason it failed}). Routes to
-    OUTSIDE_TARGETS are found with the gripper padded by
-    config.BAKE_GRIPPER_CLEARANCE_M; the rest at the live padding.
+    Gripper padding is expected_gripper_clearance(target).
     Arm links get route_arm_padding(target).
     """
     from . import scene
@@ -339,7 +328,8 @@ def routes_to_keep(path, replacing):
     Return the raw entries of routes a partial bake should carry over.
 
     Only from a file baked against the current scene, and only routes
-    to poses that still exist and are not being re-baked (`replacing`).
+    to poses that still exist, are not being re-baked (`replacing`)
+    and start at the current INTER.
     """
     from . import scene
 
@@ -349,10 +339,14 @@ def routes_to_keep(path, replacing):
         return {}
 
     valid = set(transfer_targets()) - set(replacing)
+    moved = set(from_other_inter({
+        name: np.array(route['waypoints'])
+        for name, route in document['routes'].items()
+    }))
 
     return {
         name: route for name, route in document['routes'].items()
-        if name in valid
+        if name in valid and name not in moved
     }
 
 
@@ -460,8 +454,7 @@ def baked_scene(path=None):
 def expected_gripper_clearance(name):
     """Return the gripper padding a route to `name` should be baked with."""
     return float(
-        config.BAKE_GRIPPER_CLEARANCE_M if name in OUTSIDE_TARGETS
-        else config.GRIPPER_PADDING_M
+        config.ROUTE_GRIPPER_CLEARANCE_M.get(name, config.GRIPPER_PADDING_M)
     )
 
 
@@ -508,13 +501,33 @@ def _at(joints, pose):
     return bool(np.abs(np.asarray(joints) - np.asarray(pose)).max() <= AT_POSE_TOLERANCE_RAD)
 
 
+def from_other_inter(routes):
+    """
+    Return the routes that do not start at the current INTER, sorted.
+
+    Every route is baked from INTER, so its first waypoint IS the
+    INTER it was baked from. Once INTER changes (derived from a moved
+    bucket, or re-recorded), replaying such a route would first swing
+    the arm from the new INTER to the old one.
+    """
+    inter = config.get_named_pose('inter')
+
+    return sorted(
+        name for name, route in routes.items()
+        if len(route) and not _at(route[0], inter)
+    )
+
+
 def _where(current, routes):
     """Return 'inter', the baked target the arm is at, or None."""
-    if _at(current, config.INTER):
+    poses = config.named_poses()
+
+    if _at(current, poses['inter']):
         return 'inter'
 
+    # A file baked before a pose was retired can still hold its route.
     for name in routes:
-        if _at(current, config.get_named_pose(name)):
+        if name in poses and _at(current, poses[name]):
             return name
 
     return None
@@ -571,7 +584,8 @@ def go_to(
        current planning scene, then replayed exactly - under the
        arm-link padding config sets for it now (route_arm_padding;
        the smaller one when two routes are chained through INTER).
-       Routes baked with other padding are warned about.
+       Routes baked with other padding are warned about; routes baked
+       from another INTER (see from_other_inter) are not used.
     2. Otherwise a straight, collision-checked joint move.
     3. Only if that would collide: the planner (move_joints), with a
        warning, since its route is not repeatable.
@@ -584,6 +598,20 @@ def go_to(
         max_velocity_rad_s = max_velocity_rad_s or baked_velocity
         stamp = baked_scene()
         mismatches = padding_mismatches()
+
+    moved = from_other_inter(routes)
+
+    if moved:
+        arm.get_logger().warning(
+            'Baked transfers to ' + ', '.join(n.upper() for n in moved)
+            + ' start from another INTER than the current one (INTER was '
+            're-derived or re-recorded); they are not used. Re-bake: '
+            'laundry plan bake transfers',
+            throttle_duration_sec=60.0,
+        )
+        routes = {
+            name: route for name, route in routes.items() if name not in moved
+        }
 
     max_velocity_rad_s = (
         max_velocity_rad_s or config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S

@@ -1,8 +1,35 @@
 #!/usr/bin/env python3
 
-"""
+r"""
 Drive the gripper's hobby servo from Raspberry Pi GPIO.
 
+HARDWARE PWM (preferred)
+------------------------
+When the Pi 5's RP1 PWM channel on GPIO 18 has been set up (see
+setup/servo-pwm/README.md: a config.txt overlay plus a boot service
+that exports the channel to this user), the pulses come from the PWM
+hardware - exact whatever the CPU load. HardwarePwmServo drives it
+through the kernel's sysfs PWM interface. Otherwise the lgpio
+software PWM below is used, which on a loaded Pi makes the servo
+jitter and miss moves (2026-09-29).
+
+REAL-TIME PRIORITY
+------------------
+Software pulses are only as even as lgpio's pulse thread is prompt,
+and on the busy Pi other processes delay it. gripper_node therefore
+puts itself on real-time (SCHED_FIFO) scheduling just before the
+first move, when lgpio starts that thread, which inherits it; the node's
+own thread then goes back to normal (param rt_priority, 0 = off).
+Linux only allows this to users with a real-time allowance; without
+one gripper_node warns and runs as before. To allow it (once, then
+log out and back in; `ulimit -r` should then print 99):
+
+    sudo groupadd -f realtime && sudo usermod -aG realtime $USER
+    printf '@realtime - rtprio 99\n@realtime - memlock unlimited\n' \
+        | sudo tee /etc/security/limits.d/99-realtime.conf
+
+SOFTWARE PWM (fallback)
+-----------------------
 Uses the lgpio pin factory instead of gpiozero's default
 (RPi.GPIO/software) factory: the default factory times PWM pulses
 from a Python thread, which is subject to OS scheduling jitter -
@@ -31,13 +58,16 @@ instead of a crashed node.
 
 HOLDING
 -------
-A hobby servo only holds its position while it receives pulses: with
-PWM stopped it goes limp, and a claw closed on laundry springs open
-under the load on the way to DROP. ServoDriver therefore keeps
-driving the servo after a move with hold=True (gripper_node does this
-for close), and stops only after hold=False moves (open - holding an
-unloaded servo just makes it jitter and warm up). The driver stays
-alive in gripper_node, so the hold lasts until the next command.
+ServoDriver can keep driving the servo after a move (hold=True) until
+the next move or release(), or stop the pulses (hold=False). Some
+hobby servos go limp without pulses; the rig's does not - it held the
+claw closed with the pulses stopped. Holding, on the other hand, made
+it shake and grip worse (2026-09-29): lgpio's PWM is software timed
+too (tx_pwm, from a C thread), so on the loaded Pi pulses come out
+slightly off and the servo keeps chasing them. gripper_node therefore
+stops the pulses after close as well, by default; its `hold_closed`
+parameter turns holding back on (worth it with hardware-timed
+pulses).
 
 HARDWARE ONLY. From the terminal: `laundry gripper <ANGLE>` (a
 one-shot process, so it never holds).
@@ -53,8 +83,11 @@ from ..config import (
     SERVO_PIN,
 )
 
-# Give the servo enough time to reach the target before PWM stops.
-SETTLE_SEC = 0.7
+# How long a move keeps sending pulses (50 a second) before they stop,
+# so the servo has time to reach the target - against a load too.
+# 1.5 s, up from 0.7: at 0.7 the claw did not reliably finish its
+# moves on the rig (2026-09-29). gripper_node's settle_sec overrides.
+SETTLE_SEC = 1.5
 
 _pin_factory_ready = False
 
@@ -83,7 +116,100 @@ def validate_angle(angle):
         )
 
 
+# The RP1 PWM block whose channel 2 is GPIO 18 on the Pi 5, as its
+# device path ends; and the servo's pulse period (50 Hz).
+RP1_PWM_DEVICE = '1f00098000.pwm'
+SERVO_PWM_CHANNEL = 2
+SERVO_PERIOD_NS = 20_000_000
+PWM_CLASS_DIR = '/sys/class/pwm'
+
+
+def hardware_pwm_channel(pwm_class_dir=PWM_CLASS_DIR):
+    """
+    Return the sysfs directory of the servo's hardware PWM channel, or None.
+
+    Only a channel that is exported and writable counts (the boot
+    service in setup/servo-pwm does both), so without that setup the
+    servo falls back to software PWM instead of failing.
+    """
+    import glob
+    import os
+
+    for chip in sorted(glob.glob(os.path.join(pwm_class_dir, 'pwmchip*'))):
+        device = os.path.realpath(os.path.join(chip, 'device'))
+
+        if not device.endswith(RP1_PWM_DEVICE):
+            continue
+
+        channel = os.path.join(chip, f'pwm{SERVO_PWM_CHANNEL}')
+
+        if all(
+            os.access(os.path.join(channel, name), os.W_OK)
+            for name in ('period', 'duty_cycle', 'enable')
+        ):
+            return channel
+
+    return None
+
+
+class HardwarePwmServo:
+    """
+    The gpiozero AngularServo surface ServoDriver uses, on hardware PWM.
+
+    angle = ... sets the pulse width and turns the output on; value is
+    None while it is off (no pulses), as with gpiozero; detach() turns
+    it off.
+    """
+
+    def __init__(self, channel_dir):
+        self._dir = channel_dir
+        self.value = None
+        self._angle = None
+
+        self._write('enable', 0)
+        self._write('period', SERVO_PERIOD_NS)
+
+    def _write(self, name, value):
+        import os
+
+        with open(os.path.join(self._dir, name), 'w') as handle:
+            handle.write(str(int(value)))
+
+    @property
+    def angle(self):
+        """Return the last commanded position in degrees, or None."""
+        return self._angle
+
+    @angle.setter
+    def angle(self, angle):
+        span = SERVO_MAX_ANGLE_DEG - SERVO_MIN_ANGLE_DEG
+        fraction = (angle - SERVO_MIN_ANGLE_DEG) / span
+        pulse_s = SERVO_MIN_PULSE_WIDTH_S + fraction * (
+            SERVO_MAX_PULSE_WIDTH_S - SERVO_MIN_PULSE_WIDTH_S
+        )
+
+        self._write('duty_cycle', round(pulse_s * 1e9))
+        self._write('enable', 1)
+
+        self._angle = angle
+        self.value = 2.0 * fraction - 1.0
+
+    def detach(self):
+        """Stop the pulses."""
+        self._write('enable', 0)
+        self.value = None
+
+    def close(self):
+        """Stop the pulses (the channel stays exported for next time)."""
+        self.detach()
+
+
 def _make_servo():
+    channel = hardware_pwm_channel()
+
+    if channel is not None:
+        return HardwarePwmServo(channel)
+
     _ensure_pin_factory()
 
     from gpiozero import AngularServo
@@ -114,12 +240,13 @@ class ServoDriver:
         """Return True while PWM is being sent."""
         return self._servo is not None and self._servo.value is not None
 
-    def move(self, angle, hold=False):
+    def move(self, angle, hold=False, settle_sec=None):
         """
         Move to `angle` degrees and wait for it to get there.
 
-        hold=True keeps driving it afterwards (until the next move or
-        release()); hold=False stops the pulses.
+        Pulses go out for settle_sec (default: the driver's). hold=True
+        keeps driving it afterwards (until the next move or release());
+        hold=False stops the pulses then.
         """
         validate_angle(angle)
 
@@ -128,7 +255,7 @@ class ServoDriver:
 
         try:
             self._servo.angle = angle
-            time.sleep(self._settle_sec)
+            time.sleep(self._settle_sec if settle_sec is None else settle_sec)
 
         except BaseException:
             self._servo.detach()

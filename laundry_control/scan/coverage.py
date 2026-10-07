@@ -33,6 +33,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
+from .strokes import stroke_plan
 from ..config import (
     TOF_FIELD_OF_VIEW_RAD,
     TOF_MAX_RANGE_M,
@@ -96,6 +97,11 @@ class ScanPath:
     """A scan.pattern-style path, as geometry (no timing beyond sampling)."""
 
     depth_m: float = 0.42
+    # Straight insertion before the strokes (scan.pattern's
+    # entry_depth; not recorded). 0 is the scan before 2026-09-28.
+    entry_m: float = 0.0
+    # The LARGEST stroke spacing; strokes.stroke_plan spreads them
+    # evenly from entry_m to depth_m, exactly as the scan does.
     step_m: float = 0.03
     sweep_deg: float = 150.0
     # Offset of the outward strokes' axial positions, as a fraction of
@@ -121,7 +127,7 @@ def _stroke_beams(path):
     half = np.deg2rad(path.sweep_deg) / 2.0
     centre = np.deg2rad(path.sweep_centre_deg)
 
-    strokes = int(round(path.depth_m / path.step_m))
+    strokes, step = stroke_plan(path.depth_m, path.entry_m, path.step_m)
     progress = (
         (np.arange(path.samples_per_stroke) + path.sample_phase)
         / path.samples_per_stroke
@@ -133,19 +139,21 @@ def _stroke_beams(path):
     for leg in ('in', 'out'):
         for index in range(strokes):
             if leg == 'in':
-                start = index * path.step_m
-                end = start + path.step_m
+                start = path.entry_m + index * step
+                end = start + step
             else:
-                start = path.depth_m - index * path.step_m
-                end = start - path.step_m
-                start -= path.outward_phase * path.step_m
-                end -= path.outward_phase * path.step_m
+                start = path.depth_m - index * step
+                end = start - step
+                start -= path.outward_phase * step
+                end -= path.outward_phase * step
 
             sign = 1.0 if index % 2 == 0 else -1.0
             if leg == 'out':
                 sign = -sign
 
-            depth = np.clip(start + (end - start) * progress, 0.0, path.depth_m)
+            depth = np.clip(
+                start + (end - start) * progress, path.entry_m, path.depth_m
+            )
             angle = centre + sign * (-half + 2.0 * half * progress)
 
             direction = _rotate(INTER_BORESIGHT, tool_z, angle)
@@ -248,7 +256,7 @@ def path_for_velocity(velocity, rate_hz=20.0, **kwargs):
 
 def estimated_duration_s(path, rate_hz=20.0):
     """Return a rough scan duration from the path's sampling."""
-    strokes = 2 * int(round(path.depth_m / path.step_m))
+    strokes = 2 * stroke_plan(path.depth_m, path.entry_m, path.step_m)[0]
     per_stroke = path.samples_per_stroke / rate_hz + STROKE_OVERHEAD_S
     if path.end_plan is not None and not path.bottom_detour:
         end = path.end_plan.duration_s
@@ -295,6 +303,9 @@ def candidate_paths(end_plan=None):
     if end_plan is not None:
         paths['0.03 + precession end scan'] = path_for_velocity(
             0.03, bottom_detour=False, end_plan=end_plan
+        )
+        paths['0.03 + precession, 6 cm entry'] = path_for_velocity(
+            0.03, bottom_detour=False, end_plan=end_plan, entry_m=0.06
         )
 
     return paths

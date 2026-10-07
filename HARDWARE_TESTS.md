@@ -71,7 +71,7 @@ laundry scene check
 ```
 
 - **Paste back:** the whole output.
-- **Expect:** every pose `ok` except `retrieve_3`, which collides with the modelled bucket even though it was recorded on the real arm. Every route `ok` except `retrieve_3`, which has none.
+- **Expect:** every pose and route `ok`. (The old hand-recorded RETRIEVE_0–3 are no longer poses; RETRIEVE_3 used to collide with the modelled bucket here.)
 
 **2c. Where is the bucket really?** The modelled bucket may be ~3 cm off. `laundry scene fit` measures the bucket from the baseline scans. It puts the bucket axis **3.1 cm further along +x** (away from the arm's centre line, sideways) and 0.5 cm lower at the closed end than `config.OBSTACLES`. At that pose, every recorded pose, RETRIEVE_3 included, is collision-free. The fit depends on the ToF mounting offsets, so a tape measure has the final say:
 
@@ -79,6 +79,16 @@ laundry scene check
   - **x of the bucket axis:** the sideways distance from the base's centre to the bucket's centre line. Config says 14.0 cm; the scans say 17.1 cm.
   - **Height of the bucket axis above the table at the closed end.** Config says 42.0 cm; the scans say 41.5 cm.
 - **Paste back:** the two numbers, and which side of the base centre (+x) the bucket axis is on.
+
+**2d. INTER and BOTTOM from the bucket** (after 2c, with `config.OBSTACLES` settled). Until this is done, INTER and BOTTOM are the angles jogged by eye. Derive them on an isolated **fake controller**, so the end-scan bake can't move the real arm. `rebake.sh` starts one, runs `laundry plan bake` and `laundry scene check`, then stops it (about 10 minutes):
+
+```bash
+./rebake.sh
+```
+
+- **Paste back:** the "Deriving INTER and BOTTOM" lines, and the scene check.
+- **Expected** with the current `config.OBSTACLES` (fake controller, 2026-09-28): INTER moves 3.1 cm and 7.8° from the jogged one (flagged LARGE, because the modelled axis tilts 8° and the jogged tool is level), and BOTTOM moves by at most 6.4° per joint. If 2c changed `config.OBSTACLES`, the numbers differ. A LARGE flag after 2c means the model and the rig still disagree.
+- **Then on the rig, slowly:** `laundry move inter --speed 0.3` and check by eye that the gripper points down the middle of the bucket. After that, collect new baselines (test 13): the scan now starts from the derived INTER.
 
 
 ## B. Motion and devices
@@ -127,15 +137,16 @@ laundry gripper close && laundry gripper open && laundry gripper 80
   - open/close go through `gripper_node`'s services.
   - `ANGLE` drives the servo directly. The GPIO library is now loaded on first use rather than at import, so this is the first real check of that change.
 
-**6b. The claw holds when closed.** `gripper_node` now keeps driving the servo after `close`. Close the claw on a rolled towel, then try to pull the towel out by hand:
+**6b. The claw holds when closed.** `gripper_node` stops the servo's pulses 0.7 s after `close`, as it did originally. On 2026-09-29 the rig showed that driving it continuously (with `hold_closed:=true`) made the closed claw shake and grip worse, because the Pi's PWM is software-timed. Close the claw on a rolled towel, then try to pull the towel out by hand:
 
 ```bash
 laundry gripper close
 ```
 
-Wait 30 s, then feel whether the servo is warm, and run `laundry gripper open`.
+Wait 30 s, then run `laundry gripper open`.
 
-- **Paste back:** whether the claw resisted the pull (before this change it went limp 0.7 s after closing), whether the servo buzzes or gets hot while holding, and whether it opens afterwards.
+- **Paste back:** whether the claw resisted the pull, and whether it opens afterwards.
+- **If it gives way:** the servo needs pulses to hold. Relaunch the bring-up with `gripper_node` set to `hold_closed:=true`, preferably after moving the servo to hardware-timed pulses, such as the Pi 5's PWM hardware or a PCA9685 board.
 
 ## C. End scan and scanning
 
@@ -273,7 +284,7 @@ laundry scene check && laundry preplanned --limit 3 --speed 0.3
 
 - **Watch:** the claw's height above the floor at each grab (the target is 2–3 cm), and the side grabs against the walls. Those two depend most on where the bucket really is (tests 2c and 13).
 - **Paste back:** the `scene check` output, and the claw-to-floor gap at each of the 3 grabs (a rough ruler estimate is fine).
-- **Then:** the full sweep, `laundry preplanned --speed 0.5`, with some laundry in the bucket. Say how many items came out, and which grabs came up empty. `laundry preplanned --recorded` runs the old four poses, for comparison.
+- **Then:** the full sweep, `laundry preplanned --speed 0.5`, with some laundry in the bucket. Say how many items came out, and which grabs came up empty.
 - **If the bucket pose changes** (`config.OBSTACLES`): run `laundry plan bake retrieve` and commit `scan_plans/`.
 
 **17c. `laundry clear`, slowly.** Hand on the e-stop. Put 2–3 items in the bucket. The command runs 3 grid grabs, then scans and grasps until a scan finds nothing:
@@ -292,7 +303,7 @@ Everything detection-related is currently tuned on synthetic items injected into
 **How to take each one:**
 
 1. Place the item and take a photo into the bucket from behind the arm.
-2. Run `laundry scan --save validation_scans/<name>.csv`, using the file names below.
+2. Run `laundry scan --full --save validation_scans/<name>.csv`, using the file names below. `--full` adds the end scan: several placements are at the closed end, which only the end scan sees.
 3. Add one line to `validation_scans/notes.csv`:
 
    ```text

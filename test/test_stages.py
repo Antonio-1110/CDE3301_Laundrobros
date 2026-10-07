@@ -102,6 +102,7 @@ class _StubRecorder:
     def __init__(self):
         self.paths = []
         self.cleared = False
+        self.recording = []
 
     def set_csv_path(self, path):
         self.paths.append(path)
@@ -111,8 +112,12 @@ class _StubRecorder:
         self.cleared = True
         return True
 
+    def set_recording(self, on):
+        self.recording.append(on)
+        return True
 
-def test_run_scan_restores_auto_naming_even_when_scan_fails(
+
+def test_run_scan_restores_auto_naming_and_recording_when_scan_fails(
     monkeypatch, tmp_path
 ):
     import laundry_control.pipeline as pipeline
@@ -130,6 +135,8 @@ def test_run_scan_restores_auto_naming_even_when_scan_fails(
 
     assert recorder.cleared
     assert recorder.paths == [str(target), '']
+    # A scan that died while recording must not leave it on.
+    assert recorder.recording == [False]
 
 
 # ------------------------------------------------------------ grasp
@@ -192,7 +199,7 @@ def _named_moves_through_stub(monkeypatch):
 
 
 def _sequence(arm):
-    names = {tuple(config.INTER): 'INTER', tuple(config.DROP): 'DROP'}
+    names = {tuple(config.get_named_pose('inter')): 'INTER', tuple(config.DROP): 'DROP'}
     return [
         names.get(value, 'POSE') if kind == 'joints'
         else ('POSE' if kind == 'pose' else value)
@@ -248,22 +255,16 @@ def test_execute_grasp_retracts_but_never_drops_if_not_closed():
     assert _sequence(arm) == ['open', 'POSE', 'close', 'INTER']
 
 
-def test_preplanned_stops_when_the_gripper_fails(monkeypatch):
+def test_preplanned_without_a_grab_grid_does_not_move(monkeypatch):
     from laundry_control import pipeline
+    from laundry_control.grasp import retrieve_grid
 
-    def fake_go_to(arm, name, **_kwargs):
-        return arm.move_joints(config.get_named_pose(name))
-
-    monkeypatch.setattr(pipeline, 'go_to', fake_go_to)
+    monkeypatch.setattr(retrieve_grid, 'load', lambda path=None: ([], ''))
 
     arm = _StubArm()
 
-    assert not pipeline.run_preplanned(
-        arm, _StubGripper(arm, fail_close=True), recorded=True
-    )
-    # Open, INTER, the first RETRIEVE pose, close (fails), back to INTER
-    # - no DROP.
-    assert _sequence(arm) == ['open', 'INTER', 'POSE', 'close', 'INTER']
+    assert not pipeline.run_preplanned(arm, _StubGripper(arm))
+    assert arm.calls == []
 
 
 def test_grasp_best_dry_run_never_approaches(monkeypatch):
@@ -370,3 +371,34 @@ def test_cli_gripper_rejects_out_of_range_angle():
 def test_cli_gripper_fake_angle_does_not_touch_gpio(capsys):
     assert cli.cmd_gripper(_parse(['gripper', '90', '--fake-hardware'])) == 0
     assert 'fake gripper' in capsys.readouterr().out
+
+
+def test_scan_run_and_clear_scan_quick_by_default():
+    from laundry_control.cli import _baseline_path
+
+    assert _parse(['run']).end_scan == 'none'
+    assert _parse(['clear']).end_scan == 'none'
+    assert _parse(['scan']).end_scan == 'none'
+    assert _parse(['run', '--full']).end_scan == 'precession'
+    assert _parse(['scan', '--full']).end_scan == 'precession'
+    # detect reads the kind from the CSV unless told.
+    assert _parse(['detect', 'x.csv']).end_scan is None
+    assert _parse(['detect', 'x.csv', '--quick']).end_scan == 'none'
+    # One baseline set for both kinds of scan.
+    assert _baseline_path(_parse(['run'])).endswith('baseline_scans')
+    assert _baseline_path(_parse(['run', '--full'])).endswith('baseline_scans')
+    assert _baseline_path(
+        _parse(['run', '--baseline', '/tmp/b'])
+    ) == '/tmp/b'
+
+
+def test_run_refuses_before_moving_without_baselines(tmp_path, capsys):
+    from laundry_control.cli import _baselines_ready
+
+    args = _parse(['run', '--baseline', str(tmp_path)])
+
+    assert not _baselines_ready(args)
+    assert 'laundry baseline collect' in capsys.readouterr().err
+
+    (tmp_path / 'baseline_x_01.csv').write_text('x,y,z\n')
+    assert _baselines_ready(args)
