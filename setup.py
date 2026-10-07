@@ -30,7 +30,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            # The one user-facing command (see laundry_control/cli.py).
+            # The one user-facing command (see laundry_control/cli/).
             'laundry = laundry_control.cli:main',
             # Long-running nodes, started by laundry_bringup.launch.py.
             'tof_sensor = laundry_control.hardware.tof_sensor:main',

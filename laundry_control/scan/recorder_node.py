@@ -20,7 +20,7 @@ that happens here (TF lookups, point-cloud building, CSV I/O) can
 ever stall the arm-control node's spin loop, regardless of scan
 length or transform-lookup timing.
 
-Frame chain (see config.py):
+Frame chain (see config/robot.py and config/hardware.py):
 
     base_frame ("link_base")
         -> flange_link ("link7", == TCP frame)

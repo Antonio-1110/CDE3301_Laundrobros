@@ -81,7 +81,7 @@ from ..config import (
     TOF_SOURCES,
 )
 
-# The mounting offset and range limits live in config.py (they are
+# The mounting offset and range limits live in config/hardware.py (they are
 # measured numbers, and scan_recorder_node needs the frame name
 # without pulling in Pi-only libraries). The hardware imports
 # (board/busio/adafruit_vl53l0x) are deferred into ToFSensor.__init__

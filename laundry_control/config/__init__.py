@@ -128,7 +128,7 @@ def derived_bucket_poses():
 # clean rebuild, which would silently delete every scan.
 #
 # The source tree is found from this file's own real path. With
-# `colcon build --symlink-install` (what the README prescribes)
+# `colcon build --symlink-install` (what docs/setup.md prescribes)
 # the installed module resolves back to the source checkout, so this
 # works on any machine and any workspace name. Set LAUNDRY_DATA_DIR
 # to override it (e.g. for a non-symlink install).

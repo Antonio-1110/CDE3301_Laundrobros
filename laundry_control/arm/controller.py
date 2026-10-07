@@ -403,7 +403,7 @@ class XArm7Controller(MoveItQueries, Node):
     # regularly and a Ctrl+C arrives as KeyboardInterrupt at once.
     # (The `laundry` CLI starts rclpy WITHOUT its own SIGINT handler,
     # which would shut the ROS context down before we could cancel
-    # anything - see cli._RosSession.)
+    # anything - see cli/common.RosSession.)
     #
     # A MoveIt goal outlives the process that sent it, so exiting on
     # Ctrl+C is not enough: _run_goal stops the arm first (see

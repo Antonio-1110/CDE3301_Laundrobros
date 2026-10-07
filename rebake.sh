@@ -21,7 +21,7 @@
 # recorded pose - not before every run: replaying baked motions is
 # instant, and nothing here changes unless one of those does.
 #
-# What it cannot do, and you then must (README, "After moving the
+# What it cannot do, and you then must (docs/operating.md, "After moving the
 # bucket"): check the new INTER on the real arm by eye
 # (`laundry move inter --speed 0.3`), collect new baselines, commit.
 
@@ -122,7 +122,7 @@ Next, on the real rig (normal bring-up, default ROS domain):
   1. laundry move inter --speed 0.3   (hand on the e-stop; check the
      gripper points down the middle of the bucket), laundry check-flange
   2. laundry baseline collect --archive   (empty bucket)
-  3. commit config.py, scan_plans/ and baseline_scans/ together
+  3. commit config/, scan_plans/ and baseline_scans/ together
 EOF
 
 exit "$bake_status"

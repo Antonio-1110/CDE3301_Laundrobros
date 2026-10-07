@@ -8,7 +8,11 @@ separate scan_recorder_node (scan/recorder_node.py) through TF while
 this runs; `recorder` is only used to checkpoint and finally save
 that node's CSV.
 
-Run from the terminal as `laundry scan` (cli.py).
+Run from the terminal as `laundry scan` (cli/stages.py).
+
+scan() reads as the sequence of steps; each step is a method of
+_ScanRun, which carries the options and the arm's progress between
+them.
 """
 
 import argparse
@@ -55,7 +59,7 @@ DEFAULT_SWEEP_DEG = 150.0
 #
 # These are the speeds for the DEFAULT step. A stroke's duration is set
 # by its tool-Z distance (the J7 twist rides on MoveIt's timing,
-# arm/controller._add_joint7_twist), so a coarser step at the same
+# arm/trajectory.add_joint7_twist), so a coarser step at the same
 # scaling would just take longer per stroke and save no time. The CLI
 # therefore scales both with the step (scaled_stroke_speed): 12 cm at
 # 0.12 sweeps J7 as fast as 3 cm at 0.03, in a quarter of the strokes.
@@ -261,148 +265,167 @@ def scan(
     then straight out to INTER.
 
     """
-    # =========================================================
-    # Validate input
-    # =========================================================
+    error = _invalid_option(
+        depth, end_scan, end_plan, end_scan_time_scale, sweep_deg,
+        velocity, acceleration, rotation_velocity, rotation_acceleration,
+    )
 
-    if depth <= 0.0:
-        arm.get_logger().error(
-            'depth must be greater than zero.'
-        )
+    if error:
+        arm.get_logger().error(error)
         return False
-
-    if end_scan not in END_SCANS:
-        arm.get_logger().error(
-            f'end_scan must be one of {END_SCANS}; got {end_scan!r}.'
-        )
-        return False
-
-    if end_scan == 'precession' and end_plan is None:
-        arm.get_logger().error(
-            "end_scan='precession' needs a baked plan (laundry plan bake)."
-        )
-        return False
-
-    if not 0.0 < end_scan_time_scale <= 1.0:
-        arm.get_logger().error('end_scan_time_scale must be in (0, 1].')
-        return False
-
-    if sweep_deg <= 0.0:
-        arm.get_logger().error(
-            'sweep_deg must be greater than zero.'
-        )
-        return False
-
-    if not 0.0 < velocity <= 1.0:
-        arm.get_logger().error(
-            'velocity must be in the range (0, 1].'
-        )
-        return False
-
-    if not 0.0 < acceleration <= 1.0:
-        arm.get_logger().error(
-            'acceleration must be in the range (0, 1].'
-        )
-        return False
-
-    if not 0.0 < rotation_velocity <= 1.0:
-        arm.get_logger().error(
-            'rotation_velocity must be in the range (0, 1].'
-        )
-        return False
-
-    if not 0.0 < rotation_acceleration <= 1.0:
-        arm.get_logger().error(
-            'rotation_acceleration must be in the range (0, 1].'
-        )
-        return False
-
-    # =========================================================
-    # Determine number of strokes
-    # =========================================================
-
-    max_step = step
 
     try:
-        number_of_steps, step = stroke_plan(depth, entry_depth, max_step)
+        number_of_steps, step_used = stroke_plan(depth, entry_depth, step)
     except ValueError as exc:
         arm.get_logger().error(str(exc))
         return False
 
-    # =========================================================
-    # Derived values
-    # =========================================================
+    run = _ScanRun(
+        arm,
+        recorder,
+        number_of_steps=number_of_steps,
+        step=step_used,
+        sweep_deg=sweep_deg,
+        entry_depth=entry_depth,
+        velocity=velocity,
+        acceleration=acceleration,
+        rotation_velocity=rotation_velocity,
+        rotation_acceleration=rotation_acceleration,
+        cartesian_step=cartesian_step,
+        pause=pause,
+        save_interval=save_interval,
+    )
 
-    half_sweep = sweep_deg / 2.0
+    run.log_configuration(depth, max_step=step)
 
-    # Used only for logging our nominal insertion depth.
-    current_depth = 0.0
+    # The sequence (see Notes above); each step logs its own failure.
+    if not (
+        run.enter()                                     # 1, 1b
+        and run.initial_offset()                        # 2
+        and run.strokes(inward=True)                    # 3
+    ):
+        return False
 
-    def mark_segment(segment):
+    phase_twist = run.end_scan(
+        end_scan, end_plan, depth, end_scan_time_scale
+    )                                                   # 4
+
+    return (
+        phase_twist is not None
+        and run.strokes(inward=False, after_phase_twist=phase_twist)  # 5
+        and run.stop_and_save()                         # 6
+        and run.leave()                                 # 7
+        and run.report()                                # 8
+    )
+
+
+def _invalid_option(
+    depth, end_scan, end_plan, end_scan_time_scale, sweep_deg,
+    velocity, acceleration, rotation_velocity, rotation_acceleration,
+):
+    """Return why scan()'s options are unusable, or None if they are fine."""
+    if depth <= 0.0:
+        return 'depth must be greater than zero.'
+
+    if end_scan not in END_SCANS:
+        return f'end_scan must be one of {END_SCANS}; got {end_scan!r}.'
+
+    if end_scan == 'precession' and end_plan is None:
+        return "end_scan='precession' needs a baked plan (laundry plan bake)."
+
+    if not 0.0 < end_scan_time_scale <= 1.0:
+        return 'end_scan_time_scale must be in (0, 1].'
+
+    if sweep_deg <= 0.0:
+        return 'sweep_deg must be greater than zero.'
+
+    for name, value in (
+        ('velocity', velocity),
+        ('acceleration', acceleration),
+        ('rotation_velocity', rotation_velocity),
+        ('rotation_acceleration', rotation_acceleration),
+    ):
+        if not 0.0 < value <= 1.0:
+            return f'{name} must be in the range (0, 1].'
+
+    return None
+
+
+class _ScanRun:
+    """
+    One scan() in progress: its options, and where the arm has got to.
+
+    Each step method moves the arm through one part of the sequence
+    and returns True, or logs why it failed and returns False.
+    """
+
+    def __init__(
+        self, arm, recorder, number_of_steps, step, sweep_deg, entry_depth,
+        velocity, acceleration, rotation_velocity, rotation_acceleration,
+        cartesian_step, pause, save_interval,
+    ):
+        self.arm = arm
+        self.log = arm.get_logger()
+        self.recorder = recorder
+
+        self.number_of_steps = number_of_steps
+        self.step = step
+        self.sweep_deg = sweep_deg
+        self.half_sweep = sweep_deg / 2.0
+        self.entry_depth = entry_depth
+
+        self.velocity = velocity
+        self.acceleration = acceleration
+        self.rotation_velocity = rotation_velocity
+        self.rotation_acceleration = rotation_acceleration
+        self.cartesian_step = cartesian_step
+        self.pause = pause
+        self.save_interval = save_interval
+
+        # Nominal insertion depth, for the log only.
+        self.current_depth = 0.0
+        self.last_save_time = arm.get_clock().now()
+
+    # ---------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------
+
+    def log_configuration(self, depth, max_step):
+        """Log the scan's parameters before anything moves."""
+        for line in (
+            '========================================',
+            'XARM7 SCAN SEQUENCE',
+            f'Depth            : {depth:.3f} m',
+            f'Entry depth      : {self.entry_depth:.3f} m',
+            f'Linear step      : {self.step:.4f} m (at most {max_step:.3f})',
+            f'Number of strokes: {self.number_of_steps}',
+            f'Wrist sweep      : {self.sweep_deg:.1f} deg',
+            f'Initial offset   : {-self.half_sweep:+.1f} deg',
+            '========================================',
+        ):
+            self.log.info(line)
+
+    def mark_segment(self, segment):
         """Label the readings from now on as this scan segment."""
-        if recorder is not None and not recorder.set_segment(segment):
-            arm.get_logger().error(
+        if self.recorder is not None and not self.recorder.set_segment(segment):
+            self.log.error(
                 'Could not label the end-scan readings in the recorder; '
                 'this scan cannot be split into strokes and end scan.'
             )
 
-    def set_recording(on):
+    def set_recording(self, on):
         """Start or pause scan_recorder_node's recording; False if it would not."""
-        if recorder is None or recorder.set_recording(on):
+        if self.recorder is None or self.recorder.set_recording(on):
             return True
 
-        arm.get_logger().error(
+        self.log.error(
             f"Could not {'start' if on else 'stop'} scan_recorder_node's "
             'recording (a bring-up started before the recorder had '
             "a 'recording' parameter? Restart it)."
         )
         return False
 
-    # =========================================================
-    # Scan configuration
-    # =========================================================
-
-    arm.get_logger().info(
-        '========================================'
-    )
-
-    arm.get_logger().info(
-        'XARM7 SCAN SEQUENCE'
-    )
-
-    arm.get_logger().info(
-        f'Depth            : {depth:.3f} m'
-    )
-
-    arm.get_logger().info(
-        f'Entry depth      : {entry_depth:.3f} m'
-    )
-
-    arm.get_logger().info(
-        f'Linear step      : {step:.4f} m (at most {max_step:.3f})'
-    )
-
-    arm.get_logger().info(
-        f'Number of strokes: {number_of_steps}'
-    )
-
-    arm.get_logger().info(
-        f'Wrist sweep      : {sweep_deg:.1f} deg'
-    )
-
-    arm.get_logger().info(
-        f'Initial offset   : {-half_sweep:+.1f} deg'
-    )
-
-    arm.get_logger().info(
-        '========================================'
-    )
-
-    # =========================================================
-    # Helper
-    # =========================================================
-
-    def wait_between_movements():
+    def wait(self):
         """
         Pause between motions.
 
@@ -412,19 +435,17 @@ def scan(
         long pause. ToF capture itself runs in scan_recorder_node,
         a separate process, so it needs no help from this spin.
         """
-        if pause <= 0.0:
+        if self.pause <= 0.0:
             return
 
-        deadline = arm.get_clock().now() + rclpy.duration.Duration(
-            seconds=pause
+        deadline = self.arm.get_clock().now() + rclpy.duration.Duration(
+            seconds=self.pause
         )
 
-        while arm.get_clock().now() < deadline:
-            rclpy.spin_once(arm, timeout_sec=0.05)
+        while self.arm.get_clock().now() < deadline:
+            rclpy.spin_once(self.arm, timeout_sec=0.05)
 
-    last_save_time = arm.get_clock().now()
-
-    def maybe_checkpoint_save():
+    def checkpoint(self):
         """
         Checkpoint the recorder's CSV every save_interval seconds.
 
@@ -432,243 +453,166 @@ def scan(
         at a much slower cadence than point capture/publishing, via
         a fire-and-forget service call (see ScanRecorderClient).
         """
-        nonlocal last_save_time
-
-        if recorder is None or save_interval <= 0.0:
+        if self.recorder is None or self.save_interval <= 0.0:
             return
 
-        now = arm.get_clock().now()
+        now = self.arm.get_clock().now()
 
-        if (now - last_save_time).nanoseconds * 1e-9 >= save_interval:
-            recorder.save_async()
-            last_save_time = now
+        if (now - self.last_save_time).nanoseconds * 1e-9 >= self.save_interval:
+            self.recorder.save_async()
+            self.last_save_time = now
 
-    # =========================================================
-    # 1. MOVE TO INTER
+    def _tool_z(self, distance):
+        """Move straight along tool Z at the stroke speed, without twist."""
+        return self.arm.move_tool_z(
+            distance,
+            max_step=self.cartesian_step,
+            velocity=self.velocity,
+            acceleration=self.acceleration,
+        )
+
+    # ---------------------------------------------------------
+    # 1. INTER, then straight in; recording starts inside
     #
-    # Establishes the known starting pose (and its nominal J7
+    # INTER establishes the known starting pose (and its nominal J7
     # orientation of 0 degrees) that the rest of the sequence,
-    # starting with the initial offset below, assumes.
-    # =========================================================
+    # starting with the initial offset, assumes. Nothing is
+    # recorded until the sensor is inside the bucket.
+    # ---------------------------------------------------------
 
-    arm.get_logger().info(
-        '========== MOVE TO INTER =========='
-    )
+    def enter(self):
+        """Go to INTER, move straight in by entry_depth, start recording."""
+        self.log.info('========== MOVE TO INTER ==========')
 
-    # Nothing is recorded until the sensor is inside the bucket.
-    if not set_recording(False):
-        return False
-
-    # Baked transfer from HOME/DROP, else a straight checked joint
-    # move, else the planner (arm/transfers.go_to).
-    success = go_to(arm, 'inter')
-
-    if not success:
-
-        arm.get_logger().error(
-            'Move to INTER failed.'
-        )
-
-        return False
-
-    wait_between_movements()
-
-    # =========================================================
-    # 1b. ENTRY: straight in along tool Z, J7 unchanged
-    # =========================================================
-
-    if entry_depth > 0.0:
-
-        arm.get_logger().info(
-            f'========== ENTRY ({entry_depth:.3f} m) =========='
-        )
-
-        success = arm.move_tool_z(
-            entry_depth,
-            max_step=cartesian_step,
-            velocity=velocity,
-            acceleration=acceleration,
-        )
-
-        if not success:
-
-            arm.get_logger().error(
-                'Straight entry into the bucket failed.'
-            )
-
+        if not self.set_recording(False):
             return False
 
-        current_depth = entry_depth
+        # Baked transfer from HOME/DROP, else a straight checked joint
+        # move, else the planner (arm/transfers.go_to).
+        if not go_to(self.arm, 'inter'):
+            self.log.error('Move to INTER failed.')
+            return False
 
-        wait_between_movements()
+        self.wait()
 
-    # Recording starts here, with the sensor inside: drop whatever
-    # the recorder picked up before it was paused.
-    if recorder is not None and not recorder.clear_blocking():
+        # 1b. Straight in along tool Z, J7 unchanged.
+        if self.entry_depth > 0.0:
+            self.log.info(
+                f'========== ENTRY ({self.entry_depth:.3f} m) =========='
+            )
 
-        arm.get_logger().error('Could not clear the recorder.')
+            if not self._tool_z(self.entry_depth):
+                self.log.error('Straight entry into the bucket failed.')
+                return False
 
-        return False
+            self.current_depth = self.entry_depth
+            self.wait()
 
-    if not set_recording(True):
-        return False
+        # Recording starts here, with the sensor inside: drop whatever
+        # the recorder picked up before it was paused.
+        if self.recorder is not None and not self.recorder.clear_blocking():
+            self.log.error('Could not clear the recorder.')
+            return False
 
-    last_save_time = arm.get_clock().now()
+        if not self.set_recording(True):
+            return False
 
-    # =========================================================
+        self.last_save_time = self.arm.get_clock().now()
+
+        return True
+
+    # ---------------------------------------------------------
     # 2. INITIAL J7 OFFSET
     #
-    # INTER position is assumed to have the desired nominal
-    # wrist orientation of 0 degrees.
-    #
-    # Move:
-    #
-    #        0 -> -75
-    #
-    # for the default 150-degree sweep.
-    #
-    # rotate_joint7() gets the CURRENT J1-J7 state and keeps
-    # J1-J6 at their current positions.
-    # =========================================================
+    # INTER is assumed to have the nominal wrist orientation of
+    # 0 degrees. Move 0 -> -75 for the default 150-degree sweep.
+    # rotate_joint7() keeps J1-J6 where they are.
+    # ---------------------------------------------------------
 
-    arm.get_logger().info(
-        '========== INITIAL OFFSET =========='
-    )
+    def initial_offset(self):
+        """Turn J7 to -half the sweep, on the spot."""
+        self.log.info('========== INITIAL OFFSET ==========')
+        self.log.info(f'Stationary J7 rotation: {-self.half_sweep:+.1f} deg')
 
-    arm.get_logger().info(
-        f'Stationary J7 rotation: '
-        f'{-half_sweep:+.1f} deg'
-    )
-
-    success = arm.rotate_joint7(
-        delta_deg=-half_sweep,
-        velocity=rotation_velocity,
-        acceleration=rotation_acceleration,
-    )
-
-    if not success:
-
-        arm.get_logger().error(
-            'Initial J7 positioning failed.'
-        )
-
-        return False
-
-    wait_between_movements()
-
-    # =========================================================
-    # 3. INWARD SCAN
-    #
-    # Starting orientation:
-    #
-    #        -75 deg
-    #
-    # Therefore first movement is:
-    #
-    #        -75 -> +75
-    #
-    #        +150 deg
-    #
-    # Then alternate:
-    #
-    #        +150
-    #        -150
-    #        +150
-    #        -150
-    #        ...
-    # =========================================================
-
-    arm.get_logger().info(
-        '========== INWARD SCAN =========='
-    )
-
-    inward_direction = +1.0
-
-    for i in range(number_of_steps):
-
-        twist = (
-            inward_direction
-            * sweep_deg
-        )
-
-        next_depth = (
-            current_depth
-            + step
-        )
-
-        arm.get_logger().info(
-            f'[IN {i + 1}/{number_of_steps}] '
-            f'{current_depth:.3f} -> '
-            f'{next_depth:.3f} m | '
-            f'J7 {twist:+.1f} deg'
-        )
-
-        success = arm.move_tool_z_with_twist(
-            distance=step,
-            twist_deg=twist,
-            max_step=cartesian_step,
-            velocity=velocity,
-            acceleration=acceleration,
-        )
-
-        if not success:
-
-            arm.get_logger().error(
-                f'Inward stroke {i + 1} failed.'
-            )
-
+        if not self.arm.rotate_joint7(
+            delta_deg=-self.half_sweep,
+            velocity=self.rotation_velocity,
+            acceleration=self.rotation_acceleration,
+        ):
+            self.log.error('Initial J7 positioning failed.')
             return False
 
-        current_depth = next_depth
+        self.wait()
 
-        # Alternate:
-        #
-        # +150 -> -150 -> +150 ...
-        inward_direction *= -1.0
+        return True
 
-        wait_between_movements()
-        maybe_checkpoint_save()
-
-    # =========================================================
-    # Inward endpoint
-    # =========================================================
-
-    arm.get_logger().info(
-        f'Maximum scan depth reached: '
-        f'{current_depth:.3f} m'
-    )
-
-    # Because we started at -half_sweep:
+    # ---------------------------------------------------------
+    # 3 and 5. THE STROKES
     #
-    # Odd number of strokes:
+    # Inward, from -75 deg: -75 -> +75 (+150) while inserting one
+    # step, then +75 -> -75 (-150), alternating.
     #
-    #     -75 -> +75
-    #     ...
-    #     final = +75
-    #
-    # Even number:
-    #
-    #     final = -75
+    # Outward, after the end scan's phase shift (9 strokes: inward
+    # ends at +75, the phase shift turns +75 -> -75), start the
+    # other way: -75 -> +75 (+150), then +75 -> -75, ... There are
+    # NO stationary resets between strokes.
+    # ---------------------------------------------------------
 
-    if number_of_steps % 2 == 1:
+    def strokes(self, inward, after_phase_twist=0.0):
+        """Run the inward strokes, or the outward ones after the end scan."""
+        if inward:
+            label, name, sign = 'IN', 'Inward', 1.0
+            self.log.info('========== INWARD SCAN ==========')
+            direction = 1.0
+        else:
+            label, name, sign = 'OUT', 'Outward', -1.0
+            self.log.info('========== OUTWARD SCAN ==========')
+            direction = 1.0 if after_phase_twist < 0.0 else -1.0
 
-        nominal_end_angle = +half_sweep
+        for i in range(self.number_of_steps):
+            twist = direction * self.sweep_deg
+            next_depth = self.current_depth + sign * self.step
 
-    else:
+            # Avoid ugly floating-point logging near zero.
+            if abs(next_depth) < 1e-9:
+                next_depth = 0.0
 
-        nominal_end_angle = -half_sweep
+            self.log.info(
+                f'[{label} {i + 1}/{self.number_of_steps}] '
+                f'{self.current_depth:.3f} -> {next_depth:.3f} m | '
+                f'J7 {twist:+.1f} deg'
+            )
 
-    arm.get_logger().info(
-        f'Nominal wrist orientation: '
-        f'{nominal_end_angle:+.1f} deg'
-    )
+            if not self.arm.move_tool_z_with_twist(
+                distance=sign * self.step,
+                twist_deg=twist,
+                max_step=self.cartesian_step,
+                velocity=self.velocity,
+                acceleration=self.acceleration,
+            ):
+                self.log.error(f'{name} stroke {i + 1} failed.')
+                return False
 
-    # =========================================================
+            self.current_depth = next_depth
+            direction *= -1.0
+
+            self.wait()
+            self.checkpoint()
+
+        if inward:
+            self.log.info(
+                f'Maximum scan depth reached: {self.current_depth:.3f} m'
+            )
+
+        return True
+
+    # ---------------------------------------------------------
     # 4. END SCAN (also performs the turnaround phase shift)
     #
     # Default: the baked precession sweep (scan/endcap.py,
-    # _precession_end_scan). With end_scan='bottom', the old detour
-    # below (_bottom_detour):
+    # _precession_end_scan). The quick scan ('none') only turns J7
+    # around on the spot. With end_scan='bottom', the old detour
+    # (_bottom_detour):
     #
     # The sensor is mounted at the wrist, and the end effector
     # keeps the arm from inserting far enough for the sensor to
@@ -676,7 +620,7 @@ def scan(
     # raise the TCP angle by moving J1-J6 to the recorded BOTTOM
     # configuration (at BOTTOM's own J7 the boresight points down
     # and toward the closed end, ~48 deg below horizontal - see
-    # config.BOTTOM), and sweep J7 throughout:
+    # config.BOTTOM_RECORDED), and sweep J7 throughout:
     #
     #   Entry  : tilt up to BOTTOM while sweeping J7 to the side
     #            OPPOSITE where the inward scan ended (relative
@@ -696,266 +640,152 @@ def scan(
     # phase shift for free as part of the tilt-down motion, so no
     # separate stationary turnaround rotation is needed afterward:
     # the outward scan can begin immediately.
-    # =========================================================
+    # ---------------------------------------------------------
 
-    arm.get_logger().info(
-        f'========== END SCAN ({end_scan}) =========='
-    )
+    def end_scan(self, end_scan, end_plan, depth, time_scale):
+        """Cover the closed end and turn around; the phase twist, or None."""
+        # Started at -half_sweep: an odd number of strokes ends at
+        # +half_sweep, an even number at -half_sweep.
+        if self.number_of_steps % 2 == 1:
+            nominal_end_angle = +self.half_sweep
+        else:
+            nominal_end_angle = -self.half_sweep
 
-    pre_bottom_joints = arm.get_current_joints()
+        self.log.info(f'Nominal wrist orientation: {nominal_end_angle:+.1f} deg')
 
-    if pre_bottom_joints is None:
+        self.log.info(f'========== END SCAN ({end_scan}) ==========')
 
-        arm.get_logger().error(
-            'Could not read joint state before the end scan.'
+        pre_end_joints = self.arm.get_current_joints()
+
+        if pre_end_joints is None:
+            self.log.error('Could not read joint state before the end scan.')
+            return None
+
+        phase_sign = 1.0 if nominal_end_angle > 0.0 else -1.0
+
+        # Turnaround target: opposite side from where the inward scan
+        # ended, relative to INTER's reference. Computed here (rather
+        # than executed as its own stationary move) because the end
+        # scan's exit move performs it directly.
+        phase_twist = -self.sweep_deg if nominal_end_angle > 0.0 else +self.sweep_deg
+
+        self.log.info(
+            f'Turnaround phase shift (folded into end-scan exit): '
+            f'{phase_twist:+.1f} deg'
         )
 
-        return False
-
-    phase_sign = 1.0 if nominal_end_angle > 0.0 else -1.0
-
-    # Turnaround target: opposite side from where the inward scan
-    # ended, relative to INTER's reference. Computed here (rather
-    # than executed as its own stationary move) because the
-    # detour's exit move performs it directly.
-    if nominal_end_angle > 0.0:
-
-        phase_twist = -sweep_deg
-
-    else:
-
-        phase_twist = +sweep_deg
-
-    arm.get_logger().info(
-        f'Turnaround phase shift (folded into end-scan exit): '
-        f'{phase_twist:+.1f} deg'
-    )
-
-    if end_scan == 'bottom':
-        success = _bottom_detour(
-            arm,
-            pre_bottom_joints,
-            phase_sign,
-            phase_twist,
-            half_sweep,
-            sweep_deg,
-            rotation_velocity,
-            rotation_acceleration,
-            wait_between_movements,
-        )
-    elif end_scan == 'none':
-        # The quick scan: no end scan, only the turnaround, as a J7
-        # turn on the spot (straight, collision-checked joint move),
-        # so the outward strokes still interleave with the inward.
-        turned = list(pre_bottom_joints)
-        turned[6] += math.radians(phase_twist)
-        success = arm.move_joints_linear(turned)
-    else:
-        success = _precession_end_scan(
-            arm,
-            end_plan,
-            depth,
-            pre_bottom_joints,
-            phase_twist,
-            end_scan_time_scale,
-            on_replay=lambda active: mark_segment(
-                segments.END if active else segments.STROKES
-            ),
-        )
-
-    if not success:
-        return False
-
-    wait_between_movements()
-
-    # =========================================================
-    # 5. OUTWARD SCAN
-    #
-    # After the phase shift, start by rotating in the
-    # OPPOSITE direction.
-    #
-    # Example for 9 strokes:
-    #
-    # inward ends:
-    #
-    #       +75
-    #
-    # phase:
-    #
-    #       +75 -> -75      (-150)
-    #
-    # first outward:
-    #
-    #       -75 -> +75      (+150)
-    #
-    # second outward:
-    #
-    #       +75 -> -75      (-150)
-    #
-    # etc.
-    #
-    # There are NO additional stationary resets.
-    # =========================================================
-
-    arm.get_logger().info(
-        '========== OUTWARD SCAN =========='
-    )
-
-    if phase_twist < 0.0:
-
-        outward_direction = +1.0
-
-    else:
-
-        outward_direction = -1.0
-
-    for i in range(number_of_steps):
-
-        twist = (
-            outward_direction
-            * sweep_deg
-        )
-
-        next_depth = (
-            current_depth
-            - step
-        )
-
-        # Avoid ugly floating-point logging near zero.
-        if abs(next_depth) < 1e-9:
-            next_depth = 0.0
-
-        arm.get_logger().info(
-            f'[OUT {i + 1}/{number_of_steps}] '
-            f'{current_depth:.3f} -> '
-            f'{next_depth:.3f} m | '
-            f'J7 {twist:+.1f} deg'
-        )
-
-        success = arm.move_tool_z_with_twist(
-            distance=-step,
-            twist_deg=twist,
-            max_step=cartesian_step,
-            velocity=velocity,
-            acceleration=acceleration,
-        )
-
-        if not success:
-
-            arm.get_logger().error(
-                f'Outward stroke {i + 1} failed.'
+        if end_scan == 'bottom':
+            success = _bottom_detour(
+                self.arm,
+                pre_end_joints,
+                phase_sign,
+                phase_twist,
+                self.half_sweep,
+                self.sweep_deg,
+                self.rotation_velocity,
+                self.rotation_acceleration,
+                self.wait,
+            )
+        elif end_scan == 'none':
+            # The quick scan: no end scan, only the turnaround, as a J7
+            # turn on the spot (straight, collision-checked joint move),
+            # so the outward strokes still interleave with the inward.
+            turned = list(pre_end_joints)
+            turned[6] += math.radians(phase_twist)
+            success = self.arm.move_joints_linear(turned)
+        else:
+            success = _precession_end_scan(
+                self.arm,
+                end_plan,
+                depth,
+                pre_end_joints,
+                phase_twist,
+                time_scale,
+                on_replay=lambda active: self.mark_segment(
+                    segments.END if active else segments.STROKES
+                ),
             )
 
-            return False
+        if not success:
+            return None
 
-        current_depth = next_depth
+        self.wait()
 
-        # Alternate:
-        #
-        # +150 -> -150 -> +150 ...
-        outward_direction *= -1.0
+        return phase_twist
 
-        wait_between_movements()
-        maybe_checkpoint_save()
-
-    # =========================================================
+    # ---------------------------------------------------------
     # 6. STOP RECORDING, SAVE
     #
-    # Blocking is fine (and necessary) here: the arm is
-    # stationary, and this is the one save that must land.
-    # =========================================================
+    # Blocking is fine (and necessary) here: the arm is stationary,
+    # and this is the one save that must land.
+    # ---------------------------------------------------------
 
-    if not set_recording(False):
-        return False
+    def stop_and_save(self):
+        """Stop recording and save the recorder's CSV."""
+        if not self.set_recording(False):
+            return False
 
-    if recorder is not None:
+        if self.recorder is not None:
+            self.recorder.save_blocking()
+            self.log.info('Final scan checkpoint saved.')
 
-        recorder.save_blocking()
+        return True
 
-        arm.get_logger().info(
-            'Final scan checkpoint saved.'
-        )
-
-    # =========================================================
+    # ---------------------------------------------------------
     # 7. LEAVE: J7 back to INTER's (inside), straight out, INTER
-    # =========================================================
+    # ---------------------------------------------------------
 
-    arm.get_logger().info(
-        '========== RETURN TO INTER =========='
-    )
+    def leave(self):
+        """Turn J7 back, move straight out of the bucket, go to INTER."""
+        self.log.info('========== RETURN TO INTER ==========')
 
-    if entry_depth > 0.0:
+        if self.entry_depth > 0.0:
+            current = self.arm.get_current_joints()
 
-        current = arm.get_current_joints()
+            if current is None:
+                return False
 
-        if current is None:
+            unwound = list(current)
+            unwound[6] = config.get_named_pose('inter')[6]
+
+            if not self.arm.move_joints_linear(unwound):
+                self.log.error(
+                    'Could not turn J7 back before leaving the bucket.'
+                )
+                return False
+
+            if not self._tool_z(-self.entry_depth):
+                self.log.error('Straight exit from the bucket failed.')
+                return False
+
+            self.current_depth -= self.entry_depth
+
+        if not go_to(self.arm, 'inter'):
+            self.log.error('Return to INTER failed.')
             return False
 
-        unwound = list(current)
-        unwound[6] = config.get_named_pose('inter')[6]
+        self.wait()
 
-        if not arm.move_joints_linear(unwound):
+        return True
 
-            arm.get_logger().error(
-                'Could not turn J7 back before leaving the bucket.'
-            )
-
-            return False
-
-        success = arm.move_tool_z(
-            -entry_depth,
-            max_step=cartesian_step,
-            velocity=velocity,
-            acceleration=acceleration,
-        )
-
-        if not success:
-
-            arm.get_logger().error(
-                'Straight exit from the bucket failed.'
-            )
-
-            return False
-
-        current_depth -= entry_depth
-
-    success = go_to(arm, 'inter')
-
-    if not success:
-
-        arm.get_logger().error(
-            'Return to INTER failed.'
-        )
-
-        return False
-
-    wait_between_movements()
-
-    # =========================================================
+    # ---------------------------------------------------------
     # 8. COMPLETE
-    # =========================================================
+    # ---------------------------------------------------------
 
-    if abs(current_depth) < 1e-9:
-        current_depth = 0.0
+    def report(self):
+        """Log the end of the scan."""
+        if abs(self.current_depth) < 1e-9:
+            self.current_depth = 0.0
 
-    arm.get_logger().info(
-        '========================================'
-    )
+        for line in (
+            '========================================',
+            'SCAN COMPLETE',
+            f'Final nominal depth: {self.current_depth:.4f} m',
+            '========================================',
+        ):
+            self.log.info(line)
 
-    arm.get_logger().info(
-        'SCAN COMPLETE'
-    )
-
-    arm.get_logger().info(
-        f'Final nominal depth: '
-        f'{current_depth:.4f} m'
-    )
-
-    arm.get_logger().info(
-        '========================================'
-    )
-
-    return True
+        return True
 
 
 # Speed scaling for the end-scan-only pass's straight moves in and

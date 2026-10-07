@@ -4,7 +4,7 @@
 Locate laundry inside the bucket by comparing a scan against the empty-bucket model.
 
 The model is bucket_model.BaselineSurface; run from the terminal as
-`laundry detect` (cli.py).
+`laundry detect` (cli/stages.py).
 
 HOW THIS WORKS, AND WHY IT CHANGED
 ----------------------------------

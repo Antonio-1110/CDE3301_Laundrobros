@@ -146,7 +146,7 @@ OMPL_PLANNER_ID = 'RRTConnect'
 # time-parameterised it, so MoveIt never enforces these on it: at
 # scan velocity 0.1 (the default until 2026-09) a 150 deg twist over
 # a 0.95s stroke averaged ~157 deg/s; the 0.03 default averages ~56
-# deg/s. XArm7Controller._add_joint7_twist checks the twisted
+# deg/s. arm/trajectory.add_joint7_twist checks the twisted
 # stroke's peak J7 speed and acceleration against these and slows
 # the whole stroke down when either would be exceeded.
 JOINT7_MAX_VELOCITY_RAD_S = 2.14

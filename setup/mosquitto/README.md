@@ -42,7 +42,7 @@ ros2 launch laundry_control laundry_bringup.launch.py \
 ```
 
 Or set `TOF_SOURCE = 'mqtt'` / `GRIPPER_BACKEND = 'mqtt'` in
-`laundry_control/config.py` to make it the default. That setting also
+`laundry_control/config/hardware.py` to make it the default. That setting also
 switches `laundry gripper ANGLE`.
 
 `tof_sensor` logs `Clock synced with ESP32 boot ...: +/- N ms` about a
