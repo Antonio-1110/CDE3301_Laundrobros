@@ -516,6 +516,11 @@ ROUTE_GRIPPER_CLEARANCE_M = {
     # Laundry hanging from the gripper swings out on the way to DROP;
     # keep it well clear of the rim so it does not snag (2026-09-29).
     'drop': 0.10,
+    # The way back from DROP once the gripper has let go (go_to's
+    # gripper_empty): nothing hangs from it, so 1 cm, like HOME. On
+    # the fake controller (2026-10-01) that cut the return from 7.2 s
+    # to 5.1 s, ~2 s off every grab (issue #11).
+    'drop_return': 0.01,
 }
 
 # Baked routes (arm/transfers.py) that are solved and replayed with a

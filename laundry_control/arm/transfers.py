@@ -66,8 +66,27 @@ PLAN_VERSION = 1
 TRANSFER_TARGETS = (
     'home',
     'drop',
+    'drop_return',
     'bottom',
 )
+
+# Routes that end at another route's pose, baked with other padding:
+# {route: the named pose it reaches}. drop_return is INTER <-> DROP
+# at the empty gripper's clearance; go_to takes it, reversed, to leave
+# DROP once the caller says the gripper let go (gripper_empty).
+ROUTE_POSES = {
+    'drop_return': 'drop',
+}
+
+# {pose: the route to leave it by when the gripper is empty}.
+EMPTY_GRIPPER_RETURNS = {
+    'drop': 'drop_return',
+}
+
+
+def route_pose(name):
+    """Return the named pose the route `name` ends at."""
+    return ROUTE_POSES.get(name, name)
 
 
 def transfer_targets():
@@ -216,7 +235,7 @@ def bake_transfer(arm, target_name, log=print):
     sets the padding the route must keep.
     """
     inter = np.array(config.get_named_pose('inter'))
-    target = np.array(config.get_named_pose(target_name))
+    target = np.array(config.get_named_pose(route_pose(target_name)))
 
     if not arm.state_is_valid(target):
         raise BakeError(
@@ -533,7 +552,17 @@ def _where(current, routes):
     return None
 
 
-def route_for(current, target_name, routes):
+def _leaving_by(here, routes, gripper_empty):
+    """Return the route to leave the baked pose `here` by, back to INTER."""
+    empty_route = EMPTY_GRIPPER_RETURNS.get(here)
+
+    if gripper_empty and empty_route in routes:
+        return empty_route
+
+    return here
+
+
+def route_for(current, target_name, routes, gripper_empty=False):
     """
     Return the baked waypoints from `current` to target_name, or None.
 
@@ -544,6 +573,11 @@ def route_for(current, target_name, routes):
       - at one baked target, heading for another: back to INTER along
         the first route, then out along the second (the arm stops at
         INTER in between).
+
+    gripper_empty: the gripper holds nothing, so a pose with an
+    empty-gripper return (EMPTY_GRIPPER_RETURNS) is left by that
+    tighter, faster route instead of its own. Off by default: only
+    say so when the gripper is known to have let go.
 
     The first waypoint is the pose itself; callers bridge the small
     gap from `current` with a straight move.
@@ -558,7 +592,7 @@ def route_for(current, target_name, routes):
     if here == 'inter':
         return routes.get(target_name)
 
-    back = routes[here][::-1]
+    back = routes[_leaving_by(here, routes, gripper_empty)][::-1]
 
     if target_name == 'inter':
         return back
@@ -576,9 +610,13 @@ def go_to(
     max_velocity_rad_s=None,
     time_scale=1.0,
     arm_paddings=None,
+    gripper_empty=False,
 ):
     """
     Move to a named pose along the most repeatable route available.
+
+    gripper_empty: the gripper is known to hold nothing (it just let go
+    at DROP), so DROP is left by drop_return (see route_for).
 
     1. A baked transfer (see route_for), re-checked against the
        current planning scene, then replayed exactly - under the
@@ -623,11 +661,16 @@ def go_to(
     if current is None:
         return False
 
-    route = route_for(current, target_name, routes)
+    route = route_for(current, target_name, routes, gripper_empty)
 
     if route is not None:
+        here = _where(current, routes)
+        leaving = (
+            None if here in (None, 'inter')
+            else _leaving_by(here, routes, gripper_empty)
+        )
         used = [
-            name for name in (_where(current, routes), target_name.lower())
+            name for name in (leaving, target_name.lower())
             if name in routes
         ]
 
@@ -654,6 +697,10 @@ def go_to(
         return _replay(
             arm, target_name, current, route, max_velocity_rad_s,
             time_scale, stamp, padding,
+            note=(
+                f', leaving {here.upper()} by {leaving}'
+                if leaving not in (None, here) else ''
+            ),
         )
 
     if arm.first_invalid_state([current, target]) is None:
@@ -673,7 +720,7 @@ def go_to(
 
 def _replay(
     arm, target_name, current, route, max_velocity_rad_s, time_scale, stamp,
-    padding,
+    padding, note='',
 ):
     """Re-check and replay a baked route under its arm-link padding."""
     changed = padding != config.OBSTACLE_PADDING_M
@@ -684,7 +731,7 @@ def _replay(
     try:
         return _replay_checked(
             arm, target_name, current, route, max_velocity_rad_s,
-            time_scale, stamp,
+            time_scale, stamp, note,
         )
     finally:
         if changed:
@@ -693,6 +740,7 @@ def _replay(
 
 def _replay_checked(
     arm, target_name, current, route, max_velocity_rad_s, time_scale, stamp,
+    note='',
 ):
     """Re-check a baked route against the live scene, then replay it."""
     if stamp is not None:
@@ -708,7 +756,7 @@ def _replay_checked(
 
     arm.get_logger().info(
         f'Baked transfer to {target_name.upper()} '
-        f'({len(route) - 2} via(s), stopping at each).'
+        f'({len(route) - 2} via(s), stopping at each{note}).'
     )
 
     path = [current] + [list(q) for q in route]
