@@ -39,7 +39,9 @@ scan_plans/transfers.yaml:
 Randomness exists only while baking; the saved path is replayed as
 is. Going back to INTER replays the same states in reverse. The arm
 stops briefly at each via (arm/joint_path.time_stop_at_each), so it
-follows exactly the checked straight segments.
+follows exactly the checked straight segments; each segment is a
+jerk-limited S-curve that cruises at the top speed
+(config.TRANSFER_MAX_ACCELERATION_RAD_S2 / _JERK_RAD_S3).
 
 go_to() is the single way to reach a named pose: a baked transfer
 when one applies, else a collision-checked straight joint move, and
@@ -779,7 +781,10 @@ def _replay_checked(
         return False
 
     waypoints, times, velocities = time_stop_at_each(
-        path, max_velocity_rad_s
+        path,
+        max_velocity_rad_s,
+        max_acceleration=config.TRANSFER_MAX_ACCELERATION_RAD_S2,
+        max_jerk=config.TRANSFER_MAX_JERK_RAD_S3,
     )
 
     return arm.execute_joint_path(

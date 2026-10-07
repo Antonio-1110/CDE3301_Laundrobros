@@ -287,6 +287,7 @@ The bucket and table are MoveIt **world objects**, not robot links. `arm/scene.p
 - **Gripper: 0 cm** (`config.GRIPPER_PADDING_M`), because it works inside the bucket on purpose: the grabs put it within 2–3 cm of the floor.
 - **Routes that leave the bucket** (to HOME and DROP) are baked with extra gripper padding set per route (`config.ROUTE_GRIPPER_CLEARANCE_M`: 1 cm for HOME, 10 cm for DROP), so it clears the bucket mouth on the way out.
 - **The way back from DROP** has its own route, `drop_return`, baked at 1 cm: the 10 cm is for laundry hanging from the gripper, and after DROP nothing does. It is only used once the gripper has confirmed it opened; otherwise the arm goes back the 10 cm way. This saves about 2 s per grab (7.2 → 5.1 s).
+- **Timing:** each leg of a baked route is a jerk-limited S-curve that cruises at the 45 °/s top speed (`config.TRANSFER_MAX_ACCELERATION_RAD_S2`, `TRANSFER_MAX_JERK_RAD_S3`), stopping at each via so the arm stays on the checked straight lines. The limits are the firmest the old min-jerk timing already used on its shortest leg; the long legs just reach them too. INTER → DROP is 5.4 s instead of 7.2 s, and INTER ↔ grab_NN 2.2 s instead of 3.1 s each way.
 
 ## Frames and offsets
 

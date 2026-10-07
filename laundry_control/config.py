@@ -601,6 +601,18 @@ OMPL_PLANNER_ID = 'RRTConnect'
 JOINT7_MAX_VELOCITY_RAD_S = 2.14
 JOINT7_MAX_ACCELERATION_RAD_S2 = 10.0
 
+# Acceleration and jerk limits for replaying baked transfers
+# (arm/transfers.py; joint_path.s_curve). Each leg used to be timed
+# min-jerk, which only averages 53% of its 45 deg/s peak; an S-curve
+# under these limits cruises at the peak instead - INTER -> DROP 7.2
+# -> 5.4 s, INTER <-> grab_NN 3.1 -> 2.2 s each way (issue #11). The
+# values are the firmest the min-jerk transfers already used: their
+# shortest segment (29 deg) peaked at 2.0 rad/s^2 and 17 rad/s^3. So
+# no transfer accelerates harder than one already did; the long legs
+# just do it as often. MoveIt's xArm7 limit is 10 rad/s^2.
+TRANSFER_MAX_ACCELERATION_RAD_S2 = 2.0
+TRANSFER_MAX_JERK_RAD_S3 = 17.0
+
 # Peak joint speed for the planner-free straight joint moves
 # (XArm7Controller.move_joints_linear) and the baked end scan: 45
 # deg/s, well inside every xArm7 joint's limit.
