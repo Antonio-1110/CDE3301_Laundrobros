@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from laundry_control.bucket import axis_basis, seed_cone
 from laundry_control.config import GRIPPER_OFFSET_Z
 from laundry_control.grasp.plan import (
     compute_grasp_target,
@@ -7,18 +8,14 @@ from laundry_control.grasp.plan import (
     estimate_surface_depth_below,
     look_at_quaternion,
 )
-from laundry_control.perception.bucket_model import (
-    _axis_basis,
-    build_baseline_surface,
-    seed_cone,
-)
+from laundry_control.perception.bucket_model import build_baseline_surface
 from laundry_control.perception.detect import ClusterSummary
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
 CONE = seed_cone()
-E1, E2 = _axis_basis(CONE.axis_dir)
+E1, E2 = axis_basis(CONE.axis_dir)
 
 
 def _sample_bucket(n=5000, seed=0, noise_m=0.002, cap_fraction=0.1):
@@ -442,7 +439,7 @@ def test_confident_clusters_go_front_first_then_the_rest_by_size():
     import numpy as np
 
     from laundry_control.grasp.execute import rank_clusters
-    from laundry_control.perception.bucket_model import seed_cone
+    from laundry_control.bucket import seed_cone
 
     cone = seed_cone()
 

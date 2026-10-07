@@ -19,7 +19,7 @@ scan_plans/grab_targets.yaml (grasp/grab_targets.py; edit them by
 dragging in RViz with `laundry plan edit-grabs`). solve() takes each
 one EXACTLY as placed - depth, floor angle, height, tilt and approach
 distance - in the configured bucket (config.OBSTACLES, via
-perception.bucket_model.seed_cone), and checks by IK that it is
+bucket.seed_cone), and checks by IK that it is
 collision-free with the gripper padded by RETRIEVE_GRID's
 clearance_m, that its approach pose (approach_m back along the tool
 axis) is too, and that the straight joint-space descent between the
@@ -57,7 +57,7 @@ import yaml
 from . import grab_targets
 from .. import config
 from ..arm.geometry import look_at_quaternion
-from ..perception.bucket_model import _axis_basis, seed_cone, to_cylindrical
+from ..bucket import axis_basis, seed_cone, to_cylindrical
 
 PLAN_VERSION = 1
 
@@ -99,7 +99,7 @@ def grab_geometry(depth_m, floor_angle_deg, height_m, tilt_deg, cone=None):
     """
     cone = cone or seed_cone()
     axis = cone.axis_dir
-    up, side = _axis_basis(axis)
+    up, side = axis_basis(axis)
 
     if side[0] < 0.0:
         side = -side

@@ -2,7 +2,8 @@
 
 import argparse
 
-from laundry_control.scan import coverage, pattern
+from laundry_control.perception import coverage
+from laundry_control.scan import pattern
 from laundry_control.scan.strokes import MAX_STEP_M, stroke_plan
 import numpy as np
 import pytest

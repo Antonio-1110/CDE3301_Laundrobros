@@ -29,7 +29,7 @@ import numpy as np
 import yaml
 
 from .. import config
-from ..perception.bucket_model import _axis_basis, seed_cone
+from ..bucket import axis_basis, seed_cone
 
 TARGETS_VERSION = 1
 
@@ -142,7 +142,7 @@ def save(targets, file_path=None):
 def _frame(floor_angle_deg, cone):
     """Return (axis, outward) at a floor angle, as retrieve_grid uses them."""
     axis = cone.axis_dir
-    up, side = _axis_basis(axis)
+    up, side = axis_basis(axis)
 
     if side[0] < 0.0:
         side = -side
@@ -184,7 +184,7 @@ def stack(target, cone=None):
 
 def wall_margin(point, cone=None):
     """Return how far a point is inside the wall (m; < 0 = outside)."""
-    from ..perception.bucket_model import to_cylindrical
+    from ..bucket import to_cylindrical
 
     cone = cone or seed_cone()
     s, _, r = to_cylindrical(np.asarray(point, dtype=float)[None], cone)
@@ -235,7 +235,7 @@ def _fill_rows(fraction, cone, depth_step_m):
     measured at mid-depth from the floor's lowest line.
     """
     axis = cone.axis_dir
-    up, side = _axis_basis(axis)
+    up, side = axis_basis(axis)
 
     mid = 0.5 * cone.s_max
     mid_centre = cone.axis_point + mid * axis
@@ -317,7 +317,7 @@ def bucket_wireframe(cone=None, ring_every_m=0.1, line_every_deg=30.0):
     """
     cone = cone or seed_cone()
     axis = cone.axis_dir
-    up, side = _axis_basis(axis)
+    up, side = axis_basis(axis)
 
     def at(depth, angle):
         return (

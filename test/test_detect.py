@@ -1,5 +1,5 @@
 """
-Unit tests for laundry_detect.py.
+Unit tests for perception/detect.py.
 
 Synthetic points are generated on a known bucket - lateral wall
 PLUS the flat closed end - and then pushed INWARD over a patch to
@@ -8,12 +8,8 @@ ToF reading: it intercepts the beam before it reaches the wall.
 """
 
 from builtin_interfaces.msg import Time
-from laundry_control.perception.bucket_model import (
-    _axis_basis,
-    build_baseline_surface,
-    seed_cone,
-    to_cylindrical,
-)
+from laundry_control.bucket import axis_basis, seed_cone, to_cylindrical
+from laundry_control.perception.bucket_model import build_baseline_surface
 from laundry_control.perception.detect import (
     cluster_points,
     cluster_volume_m3,
@@ -27,7 +23,7 @@ import numpy as np
 import pytest
 
 CONE = seed_cone()
-E1, E2 = _axis_basis(CONE.axis_dir)
+E1, E2 = axis_basis(CONE.axis_dir)
 S_CAP = 0.02
 
 

@@ -59,7 +59,7 @@ def rank_clusters(clusters):
     """
     import numpy as np
 
-    from ..perception.bucket_model import seed_cone
+    from ..bucket import seed_cone
 
     cone = seed_cone()
 

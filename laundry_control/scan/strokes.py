@@ -14,7 +14,7 @@ few as keep them at most max_step apart:
 so any entry depth works, and max_step sets the scan's density: the
 largest axial distance between consecutive sweeps.
 
-Pure arithmetic, no ROS: scan.pattern (the arm) and scan.coverage
+Pure arithmetic, no ROS: scan.pattern (the arm) and perception.coverage
 (the simulator) share it, so they can never disagree on the path.
 """
 

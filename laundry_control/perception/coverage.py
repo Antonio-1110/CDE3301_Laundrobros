@@ -33,7 +33,14 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .strokes import stroke_plan
+from .synthetic import (
+    BOTTOM_FLANGE_POSITION,
+    BOTTOM_TOOL_Z,
+    INTER_FLANGE_POSITION,
+    INTER_TOOL_Z,
+    Rays,
+)
+from ..bucket import axis_basis, to_cylindrical
 from ..config import (
     TOF_FIELD_OF_VIEW_RAD,
     TOF_MAX_RANGE_M,
@@ -41,14 +48,7 @@ from ..config import (
     TOF_SENSOR_OFFSET_X,
     TOF_SENSOR_OFFSET_Z,
 )
-from ..perception.bucket_model import _axis_basis, to_cylindrical
-from ..perception.synthetic import (
-    BOTTOM_FLANGE_POSITION,
-    BOTTOM_TOOL_Z,
-    INTER_FLANGE_POSITION,
-    INTER_TOOL_Z,
-    Rays,
-)
+from ..scan.strokes import stroke_plan
 
 # Boresight (link7 +X) at the recorded poses' own J7 angle, from the
 # same forward kinematics as the flange positions.
@@ -282,7 +282,8 @@ FOCUS_REGIONS = ('floor', 'lower_wall', 'closed_end_lower')
 
 def plan_beams(plan, rate_hz=20.0):
     """Return (origins, directions) of a baked end scan, sampled at rate_hz."""
-    from .endcap import reference_axes, sample_beams
+    from ..arm.geometry import reference_axes
+    from ..scan.endcap import sample_beams
 
     sample_times = np.arange(0.0, plan.duration_s, 1.0 / rate_hz)
 
@@ -368,7 +369,7 @@ def surface_samples(profile, pitch_m=SURFACE_PITCH_M):
     area per sample; the closed end (if modelled) on a square grid.
     """
     cone = profile.cone
-    e1, e2 = _axis_basis(cone.axis_dir)
+    e1, e2 = axis_basis(cone.axis_dir)
 
     s_values = np.arange(cone.s_min, cone.s_max, pitch_m)
 
@@ -451,7 +452,7 @@ def coverage_by_region(profile, rays):
         # Split at the axis: laundry settles on the lower half, and the
         # scan (by design) never looks at the upper half, so a single
         # closed-end figure would understate what matters.
-        e1, _e2 = _axis_basis(profile.cone.axis_dir)
+        e1, _e2 = axis_basis(profile.cone.axis_dir)
         above_axis = (points - profile.cone.axis_point) @ e1 >= 0.0
 
         result['closed_end_lower'] = float(seen[on_cap & ~above_axis].mean())
@@ -471,8 +472,8 @@ def rays_from_csv(path):
     precession end scan included. Older scans do not, and fall back
     to the stroke/BOTTOM-detour geometry reconstruction.
     """
-    from ..perception.synthetic import reconstruct_rays
-    from .cloud_io import load_scan_csv
+    from .synthetic import reconstruct_rays
+    from ..scan.cloud_io import load_scan_csv
 
     columns = load_scan_csv(path)
     points = np.stack([columns['x'], columns['y'], columns['z']], axis=1)
@@ -487,7 +488,7 @@ def measured_coverage(profile, scans):
     Each scan is a CSV path (preferred: uses recorded ray columns) or
     an (N, 3) point array (rays rebuilt from the scan geometry).
     """
-    from ..perception.synthetic import reconstruct_rays
+    from .synthetic import reconstruct_rays
 
     rays = [
         rays_from_csv(scan) if isinstance(scan, str) else reconstruct_rays(scan)

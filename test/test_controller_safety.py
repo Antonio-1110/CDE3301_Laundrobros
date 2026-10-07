@@ -5,6 +5,7 @@ import math
 from builtin_interfaces.msg import Duration
 from laundry_control import config
 from laundry_control.arm.controller import XArm7Controller
+from laundry_control.arm.trajectory import add_joint7_twist, duration_to_seconds
 from moveit_msgs.msg import RobotTrajectory
 import numpy as np
 import pytest
@@ -23,7 +24,6 @@ class _Self:
     """Just enough of an XArm7Controller for the unbound methods."""
 
     JOINT_NAMES = list(config.JOINT_NAMES)
-    _duration_to_seconds = staticmethod(XArm7Controller._duration_to_seconds)
 
     loaded = None  # planning pipelines move_group reports; None = unknown
 
@@ -73,7 +73,7 @@ def test_pipelines_move_group_lacks_are_not_tried():
 
 
 def test_everything_is_tried_when_nothing_listed_is_loaded():
-    from laundry_control.arm.controller import usable_attempts
+    from laundry_control.arm.moveit_errors import usable_attempts
 
     attempts = [('pilz', 'PTP'), ('ompl', 'RRTConnect')]
 
@@ -86,7 +86,7 @@ def test_unplanned_failures_are_retryable_whatever_the_code():
     from moveit_msgs.action import MoveGroup
     from trajectory_msgs.msg import JointTrajectoryPoint
 
-    from laundry_control.arm.controller import failure_is_retryable
+    from laundry_control.arm.moveit_errors import failure_is_retryable
 
     unloaded_pipeline = MoveGroup.Result()
     unloaded_pipeline.error_code.val = 0
@@ -227,7 +227,7 @@ def _stroke(duration=2.0, count=7):
 
 def _arrays(trajectory):
     points = trajectory.joint_trajectory.points
-    times = np.array([XArm7Controller._duration_to_seconds(p.time_from_start)
+    times = np.array([duration_to_seconds(p.time_from_start)
                       for p in points])
     q = np.array([p.positions for p in points])
     v = np.array([p.velocities for p in points])
@@ -238,7 +238,7 @@ def test_twist_is_added_in_full_and_starts_and_ends_at_rest():
     trajectory = _stroke()
     _t0, q0, _v0 = _arrays(trajectory)
 
-    assert XArm7Controller._add_joint7_twist(_Self(), trajectory, 30.0)
+    assert add_joint7_twist(trajectory, 30.0, _Logger())
 
     times, q, v = _arrays(trajectory)
 
@@ -255,7 +255,7 @@ def test_twist_is_added_in_full_and_starts_and_ends_at_rest():
 def test_twist_velocities_match_positions():
     trajectory = _stroke(count=41)
 
-    assert XArm7Controller._add_joint7_twist(_Self(), trajectory, 30.0)
+    assert add_joint7_twist(trajectory, 30.0, _Logger())
 
     times, q, v = _arrays(trajectory)
 
@@ -268,7 +268,7 @@ def test_twist_velocities_match_positions():
 def test_twist_too_fast_for_j7_slows_the_whole_stroke():
     trajectory = _stroke(duration=0.5)
 
-    assert XArm7Controller._add_joint7_twist(_Self(), trajectory, 150.0)
+    assert add_joint7_twist(trajectory, 150.0, _Logger())
 
     times, q, v = _arrays(trajectory)
 

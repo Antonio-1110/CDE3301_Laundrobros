@@ -1,8 +1,8 @@
 """Generated grab poses for the sensorless sweep (grasp/retrieve_grid.py)."""
 
 from laundry_control import config
+from laundry_control.bucket import seed_cone, to_cylindrical
 from laundry_control.grasp import retrieve_grid
-from laundry_control.perception.bucket_model import seed_cone, to_cylindrical
 import numpy as np
 import pytest
 

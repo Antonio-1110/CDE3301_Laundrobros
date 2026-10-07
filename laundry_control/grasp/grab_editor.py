@@ -62,7 +62,7 @@ from visualization_msgs.msg import (
 from . import grab_targets
 from .. import config
 from ..arm.geometry import look_at_quaternion
-from ..perception.bucket_model import _axis_basis, seed_cone
+from ..bucket import axis_basis, seed_cone
 
 NAMESPACE = 'grab_editor'
 SCENE_TOPIC = 'grab_editor/scene'
@@ -321,7 +321,7 @@ class GrabEditor(Node):
         return marker
 
     def _button(self, name, text, offset_m, callback=None, menu=None):
-        up, side = _axis_basis(self.cone.axis_dir)
+        up, side = axis_basis(self.cone.axis_dir)
         mouth = self.cone.axis_point + self.cone.s_max * self.cone.axis_dir
         where = (
             mouth + 0.1 * self.cone.axis_dir
@@ -504,7 +504,7 @@ class GrabEditor(Node):
             0.002, ColorRGBA(r=0.2, g=0.9, b=0.2, a=0.6),
         )
 
-        up, _ = _axis_basis(self.cone.axis_dir)
+        up, _ = axis_basis(self.cone.axis_dir)
         mouth = (
             self.cone.axis_point + self.cone.s_max * self.cone.axis_dir
         )

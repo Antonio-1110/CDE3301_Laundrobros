@@ -45,8 +45,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from ..arm.geometry import look_at_quaternion
+from ..bucket import to_cylindrical
 from ..config import GRIPPER_OFFSET_Z
-from ..perception.bucket_model import to_cylindrical
 
 __all__ = [
     'GraspTarget',

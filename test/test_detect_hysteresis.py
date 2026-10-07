@@ -20,7 +20,7 @@ def surface():
 
 def _graded_mound(scan, s0, theta0, peak_m, radius_s=0.05, radius_theta=0.3):
     """Push wall points inward by a dome profile: tall centre, thin edges."""
-    from laundry_control.perception.bucket_model import to_cylindrical
+    from laundry_control.bucket import to_cylindrical
 
     s, theta, r = to_cylindrical(scan, CONE)
     gap = np.abs((theta - theta0 + np.pi) % (2.0 * np.pi) - np.pi)

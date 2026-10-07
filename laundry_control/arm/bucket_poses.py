@@ -34,7 +34,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import yaml
 
+from .geometry import precession_axes, precession_pose, reference_axes
 from .. import config
+from ..bucket import MESH_DEPTH_M, seed_cone
 
 PLAN_VERSION = 1
 
@@ -57,12 +59,9 @@ def targets(cone=None, spec=None):
     """
     Return {name: (flange position, tool +Z, boresight +X)} in link_base.
 
-    cone defaults to the configured bucket (perception.bucket_model.
-    seed_cone), spec to config.BUCKET_POSES. Pure geometry: no ROS.
+    cone defaults to the configured bucket (bucket.seed_cone), spec
+    to config.BUCKET_POSES. Pure geometry: no ROS.
     """
-    from ..perception.bucket_model import MESH_DEPTH_M, seed_cone
-    from ..scan.endcap import precession_axes, reference_axes
-
     cone = cone or seed_cone()
     spec = spec or config.BUCKET_POSES
 
@@ -90,8 +89,6 @@ def targets(cone=None, spec=None):
 
 def target_pose(position, tool_z, boresight):
     """Return the flange geometry_msgs Pose for a target."""
-    from ..scan.endcap import precession_pose
-
     # The end scan's alpha = 0 pose about this target's own axes (its
     # "up" is opposite the boresight): exactly this frame.
     up = -np.asarray(boresight, dtype=float)

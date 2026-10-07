@@ -1,23 +1,25 @@
 """
-Unit tests for bucket_model.py.
+Unit tests for bucket.py and perception/bucket_model.py.
 
 Everything here runs on synthetic points generated from a known
 geometry, so the fit can be checked against ground truth rather
 than against another estimate. No ROS, no hardware, no CSVs.
 """
 
-from laundry_control.perception.bucket_model import (
-    _axis_basis,
-    build_baseline_surface,
+from laundry_control.bucket import (
+    axis_basis,
     ConeModel,
-    fit_bucket_profile,
-    fit_cone,
-    fit_report,
-    occupancy_summary,
     seed_axis_direction,
     seed_cone,
     surface_residual,
     to_cylindrical,
+)
+from laundry_control.perception.bucket_model import (
+    build_baseline_surface,
+    fit_bucket_profile,
+    fit_cone,
+    fit_report,
+    occupancy_summary,
 )
 import numpy as np
 import pytest
@@ -43,7 +45,7 @@ def sample_cone(model, n=4000, seed=0, noise_m=0.002, bias=None):
     if bias is not None:
         r = r + bias(theta)
 
-    e1, e2 = _axis_basis(model.axis_dir)
+    e1, e2 = axis_basis(model.axis_dir)
 
     return (
         model.axis_point
@@ -61,7 +63,7 @@ def sample_with_cap(model, n=5000, seed=0, cap_fraction=0.1, noise_m=0.002):
     geometry, and the case a bare cone cannot represent.
     """
     rng = np.random.default_rng(seed)
-    e1, e2 = _axis_basis(model.axis_dir)
+    e1, e2 = axis_basis(model.axis_dir)
 
     n_cap = int(n * cap_fraction)
     n_wall = n - n_cap
@@ -110,11 +112,11 @@ def test_seed_is_the_configured_bucket_pose():
 
 def test_bucket_pose_from_fit_moves_the_mesh_onto_the_cone():
     from laundry_control import config
-    from laundry_control.perception.bucket_model import bucket_pose_from_fit
+    from laundry_control.bucket import bucket_pose_from_fit
     from scipy.spatial.transform import Rotation
 
     seed = seed_cone()
-    e1, e2 = _axis_basis(seed.axis_dir)
+    e1, e2 = axis_basis(seed.axis_dir)
     fitted = ConeModel(
         axis_point=seed.axis_point + 0.03 * e1,
         axis_dir=(seed.axis_dir + 0.03 * e2) / np.linalg.norm(
@@ -152,7 +154,7 @@ def test_seed_cone_widens_toward_the_mouth():
 
 def test_to_cylindrical_round_trips():
     cone = seed_cone()
-    e1, e2 = _axis_basis(cone.axis_dir)
+    e1, e2 = axis_basis(cone.axis_dir)
 
     s_in = np.array([0.05, 0.20, 0.40])
     theta_in = np.array([0.3, 2.0, 5.5])
@@ -175,7 +177,7 @@ def test_to_cylindrical_round_trips():
 def test_theta_zero_is_the_top_of_the_bucket():
     """Theta is anchored to world +Z so the grid stays stable."""
     cone = seed_cone()
-    e1, _e2 = _axis_basis(cone.axis_dir)
+    e1, _e2 = axis_basis(cone.axis_dir)
 
     assert e1[2] > 0.9
 
@@ -192,7 +194,7 @@ def test_to_cylindrical_handles_empty_input():
 
 def test_fit_cone_recovers_known_parameters():
     seed = seed_cone()
-    e1, e2 = _axis_basis(seed.axis_dir)
+    e1, e2 = axis_basis(seed.axis_dir)
 
     axis_dir = seed.axis_dir + 0.02 * e1 - 0.015 * e2
     axis_dir = axis_dir / np.linalg.norm(axis_dir)

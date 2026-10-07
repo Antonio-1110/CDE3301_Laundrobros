@@ -1,15 +1,15 @@
-"""Tests for config.py and arm/geometry.py (pure, no ROS graph)."""
+"""Tests for config/ and arm/geometry.py (pure, no ROS graph)."""
 
 import math
 
 from geometry_msgs.msg import Quaternion
 from laundry_control import config
-from laundry_control.arm.flange_check import describe_alignment
 from laundry_control.arm.geometry import (
     angle_between_deg,
     look_at_quaternion,
     tool_z_from_quaternion,
 )
+from laundry_control.perception.flange_check import describe_alignment
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
