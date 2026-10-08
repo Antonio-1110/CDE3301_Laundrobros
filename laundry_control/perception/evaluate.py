@@ -460,7 +460,7 @@ def report_synthetic(baseline_scans, detect_kwargs, args):
 
 def report_coverage(surface, baseline_scans, extra_scans=()):
     """Print measured vs simulated coverage, and candidate scan paths."""
-    from ..scan import coverage
+    from . import coverage
     from .synthetic import reconstruct_rays
 
     def line(label, result, seconds=None, points=None):

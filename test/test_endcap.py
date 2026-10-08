@@ -5,8 +5,10 @@ import math
 import os
 
 from laundry_control import config
+from laundry_control.arm import geometry
 from laundry_control.arm.joint_path import densify, time_path
-from laundry_control.scan import coverage, endcap, pattern
+from laundry_control.perception import coverage
+from laundry_control.scan import endcap, pattern
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
@@ -19,9 +21,9 @@ Z0 = np.array([0.002, -1.0, -0.02])
 
 @pytest.mark.parametrize('alpha,phi', [(10, -90), (25, 0), (40, 45), (55, 70)])
 def test_beam_is_perpendicular_to_tool_and_leans_to_the_end(alpha, phi):
-    z0, up, side = endcap.reference_axes(Z0)
+    z0, up, side = geometry.reference_axes(Z0)
 
-    tool_z, beam = endcap.precession_axes(alpha, phi, z0, up, side)
+    tool_z, beam = geometry.precession_axes(alpha, phi, z0, up, side)
 
     assert tool_z @ beam == pytest.approx(0.0, abs=1e-12)
     assert np.linalg.norm(beam) == pytest.approx(1.0)
@@ -30,30 +32,30 @@ def test_beam_is_perpendicular_to_tool_and_leans_to_the_end(alpha, phi):
 
 
 def test_zero_tilt_is_inter_orientation():
-    z0, up, side = endcap.reference_axes(Z0)
+    z0, up, side = geometry.reference_axes(Z0)
 
-    tool_z, beam = endcap.precession_axes(0.0, 0.0, z0, up, side)
+    tool_z, beam = geometry.precession_axes(0.0, 0.0, z0, up, side)
 
     assert np.allclose(tool_z, z0)
     assert np.allclose(beam, -up)  # boresight straight down, as at INTER
 
 
 def test_tilt_up_points_the_beam_down():
-    z0, up, side = endcap.reference_axes(Z0)
+    z0, up, side = geometry.reference_axes(Z0)
 
-    tool_z, beam = endcap.precession_axes(40.0, 0.0, z0, up, side)
+    tool_z, beam = geometry.precession_axes(40.0, 0.0, z0, up, side)
 
     assert tool_z @ up > 0.0
     assert beam @ up < 0.0
 
 
 def test_pose_orientation_matches_the_axes():
-    z0, up, side = endcap.reference_axes(Z0)
-    pose = endcap.precession_pose([0.1, -0.5, 0.4], 25.0, 30.0, z0, up, side)
+    z0, up, side = geometry.reference_axes(Z0)
+    pose = geometry.precession_pose([0.1, -0.5, 0.4], 25.0, 30.0, z0, up, side)
 
     q = pose.orientation
     matrix = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-    tool_z, beam = endcap.precession_axes(25.0, 30.0, z0, up, side)
+    tool_z, beam = geometry.precession_axes(25.0, 30.0, z0, up, side)
 
     assert np.allclose(matrix[:, 2], tool_z)
     assert np.allclose(matrix[:, 0], beam)

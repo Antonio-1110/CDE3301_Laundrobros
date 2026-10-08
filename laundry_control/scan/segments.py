@@ -51,7 +51,7 @@ def labels(columns, axis_dir=None):
         return np.full(count, STROKES, dtype=int)
 
     if axis_dir is None:
-        from ..perception.bucket_model import seed_cone
+        from ..bucket import seed_cone
 
         axis_dir = seed_cone().axis_dir
 

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
 """
-Pure orientation math shared by the controller, grasp planning and diagnostics.
+Pure tool-orientation math, shared by the arm, scan, grasp and checks.
 
-The tool-axis-from-quaternion expansion used to be written out twice
-(move.py and check_flange.py) and the look-at construction lived in
-grasp_plan.py; one copy each now, with no node or graph dependency,
-so all of it is unit-testable.
+No node or graph dependency, so all of it is unit-testable.
+
+The precession functions tilt the tool about an insertion axis: the
+end scan's coning sweep (scan/endcap.py, which explains the
+construction) and INTER/BOTTOM (arm/bucket_poses.py) are both built
+from them.
 """
 
 import math
 
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import Pose, Quaternion
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -102,3 +104,45 @@ def look_at_quaternion(direction, reference_x_axis):
     qx, qy, qz, qw = rotation.as_quat()
 
     return Quaternion(x=qx, y=qy, z=qz, w=qw)
+
+
+def reference_axes(tool_z):
+    """Return (z0, up, side): the insertion axis and its perpendicular basis."""
+    z0 = np.asarray(tool_z, dtype=np.float64)
+    z0 = z0 / np.linalg.norm(z0)
+
+    up = np.array([0.0, 0.0, 1.0])
+    up = up - (up @ z0) * z0
+    up = up / np.linalg.norm(up)
+
+    return z0, up, np.cross(z0, up)
+
+
+def precession_axes(alpha_deg, phi_deg, z0, up, side):
+    """Return (tool_z, boresight) for a tilt alpha in direction phi."""
+    alpha = np.deg2rad(alpha_deg)
+    phi = np.deg2rad(phi_deg)
+
+    u = np.cos(phi) * up + np.sin(phi) * side
+
+    tool_z = np.cos(alpha) * z0 + np.sin(alpha) * u
+    boresight = np.sin(alpha) * z0 - np.cos(alpha) * u
+
+    return tool_z, boresight
+
+
+def precession_pose(pivot, alpha_deg, phi_deg, z0, up, side):
+    """Return the flange Pose (base_frame) for a precession sample."""
+    tool_z, boresight = precession_axes(alpha_deg, phi_deg, z0, up, side)
+
+    matrix = np.stack([boresight, np.cross(tool_z, boresight), tool_z], axis=1)
+    qx, qy, qz, qw = Rotation.from_matrix(matrix).as_quat()
+
+    pose = Pose()
+    pose.position.x, pose.position.y, pose.position.z = map(float, pivot)
+    pose.orientation.x = float(qx)
+    pose.orientation.y = float(qy)
+    pose.orientation.z = float(qz)
+    pose.orientation.w = float(qw)
+
+    return pose

@@ -316,7 +316,7 @@ def test_plan_grasp_prefers_a_floor_grab(monkeypatch):
 
 
 def _parse(argv):
-    own, forwarded = cli._split_forwarded(argv)
+    own, forwarded = cli.split_forwarded(argv)
     args = cli.build_parser().parse_args(own)
     args.forwarded_scan_args = forwarded
     return args
@@ -354,7 +354,7 @@ def test_cli_baseline_collect_forwards_scan_args():
 def test_cli_detect_params_reach_detector_names():
     args = _parse(['detect', 'scan.csv', '--k-sigma', '5', '-o', 't.json'])
 
-    params = cli._detect_params(args)
+    params = cli.common.detect_params(args)
 
     assert params['k_sigma'] == 5.0
     assert set(params) == {
@@ -365,16 +365,16 @@ def test_cli_detect_params_reach_detector_names():
 
 def test_cli_gripper_rejects_out_of_range_angle():
     with pytest.raises(ValueError):
-        cli.cmd_gripper(_parse(['gripper', '400', '--fake-hardware']))
+        cli.arm.cmd_gripper(_parse(['gripper', '400', '--fake-hardware']))
 
 
 def test_cli_gripper_fake_angle_does_not_touch_gpio(capsys):
-    assert cli.cmd_gripper(_parse(['gripper', '90', '--fake-hardware'])) == 0
+    assert cli.arm.cmd_gripper(_parse(['gripper', '90', '--fake-hardware'])) == 0
     assert 'fake gripper' in capsys.readouterr().out
 
 
 def test_scan_run_and_clear_scan_quick_by_default():
-    from laundry_control.cli import _baseline_path
+    from laundry_control.cli.common import baseline_path
 
     assert _parse(['run']).end_scan == 'none'
     assert _parse(['clear']).end_scan == 'none'
@@ -385,20 +385,20 @@ def test_scan_run_and_clear_scan_quick_by_default():
     assert _parse(['detect', 'x.csv']).end_scan is None
     assert _parse(['detect', 'x.csv', '--quick']).end_scan == 'none'
     # One baseline set for both kinds of scan.
-    assert _baseline_path(_parse(['run'])).endswith('baseline_scans')
-    assert _baseline_path(_parse(['run', '--full'])).endswith('baseline_scans')
-    assert _baseline_path(
+    assert baseline_path(_parse(['run'])).endswith('baseline_scans')
+    assert baseline_path(_parse(['run', '--full'])).endswith('baseline_scans')
+    assert baseline_path(
         _parse(['run', '--baseline', '/tmp/b'])
     ) == '/tmp/b'
 
 
 def test_run_refuses_before_moving_without_baselines(tmp_path, capsys):
-    from laundry_control.cli import _baselines_ready
+    from laundry_control.cli.common import baselines_ready
 
     args = _parse(['run', '--baseline', str(tmp_path)])
 
-    assert not _baselines_ready(args)
+    assert not baselines_ready(args)
     assert 'laundry baseline collect' in capsys.readouterr().err
 
     (tmp_path / 'baseline_x_01.csv').write_text('x,y,z\n')
-    assert _baselines_ready(args)
+    assert baselines_ready(args)

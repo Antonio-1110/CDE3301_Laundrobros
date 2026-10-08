@@ -4,7 +4,7 @@
 Locate laundry inside the bucket by comparing a scan against the empty-bucket model.
 
 The model is bucket_model.BaselineSurface; run from the terminal as
-`laundry detect` (cli.py).
+`laundry detect` (cli/stages.py).
 
 HOW THIS WORKS, AND WHY IT CHANGED
 ----------------------------------
@@ -65,11 +65,8 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
-from .bucket_model import (
-    BaselineSurface,
-    build_baseline_surface,
-    to_cylindrical,
-)
+from .bucket_model import BaselineSurface, build_baseline_surface
+from ..bucket import to_cylindrical
 from ..scan.cloud_io import load_xyz_csv
 
 # ---------------------------------------------------------------

@@ -59,7 +59,7 @@ def rank_clusters(clusters):
     """
     import numpy as np
 
-    from ..perception.bucket_model import seed_cone
+    from ..bucket import seed_cone
 
     cone = seed_cone()
 
@@ -168,7 +168,7 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Returning to INTER...')
 
-    return go_to(arm, 'inter') and released
+    return go_to(arm, 'inter', gripper_empty=released) and released
 
 
 @dataclass

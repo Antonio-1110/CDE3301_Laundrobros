@@ -17,8 +17,8 @@ Usage:
         --topic scan_record/points --frame link_base
 
 Note: the RViz obstacle/robot model is only an approximation of
-the real setup (see README) - treat point positions as
-approximate relative to real-world obstacles too.
+the real setup (docs/operating.md, "Viewing scans in RViz") - treat
+point positions as approximate relative to real-world obstacles too.
 """
 
 import argparse

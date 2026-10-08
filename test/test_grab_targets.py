@@ -1,8 +1,8 @@
 """The sweep's hand-placed grabs (grasp/grab_targets.py)."""
 
 from laundry_control import config
+from laundry_control.bucket import seed_cone
 from laundry_control.grasp import grab_targets
-from laundry_control.perception.bucket_model import seed_cone
 import numpy as np
 import pytest
 
@@ -121,7 +121,7 @@ def test_the_bucket_wireframe_lies_on_the_bucket():
 
     # Rings and wall lines are on the wall; only the closed end's
     # cross runs inside it, across s = 0.
-    from laundry_control.perception.bucket_model import to_cylindrical
+    from laundry_control.bucket import to_cylindrical
 
     s, _, r = to_cylindrical(lines, cone)
     on_wall = np.abs(cone.radius_at(s) - r) < 1e-6

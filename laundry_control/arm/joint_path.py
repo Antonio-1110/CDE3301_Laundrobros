@@ -70,6 +70,27 @@ def within_joint_limits(joints, lower, upper, margin_rad=0.0):
     )
 
 
+def limits_no_closer_than(start, lower, upper, margin_rad):
+    """
+    Return (lower, upper) bounds that keep margin_rad, or what start has.
+
+    A joint at least margin_rad inside its limits keeps that margin. One
+    already inside it (but within the hard limits) gets its start angle
+    as the bound on that side: it may stay there or move away from the
+    limit, never closer. Without this, an arm left inside the margin
+    could not move at all - every state of every move, including its
+    first, would fail the check.
+    """
+    start = np.asarray(start, dtype=np.float64)
+    low = np.asarray(lower, dtype=np.float64)
+    high = np.asarray(upper, dtype=np.float64)
+
+    return (
+        np.maximum(low, np.minimum(low + margin_rad, start)),
+        np.minimum(high, np.maximum(high - margin_rad, start)),
+    )
+
+
 def split_at_reversals(waypoints):
     """
     Return index ranges [(i0, i1), ...] of monotonic stretches of a path.
@@ -146,16 +167,134 @@ def time_path(waypoints, max_velocity_rad_s):
     return times, velocities
 
 
-def time_stop_at_each(waypoints, max_velocity_rad_s, step_rad=DEFAULT_CHECK_STEP_RAD):
+def _s_curve_phases(length, v_max, a_max, j_max):
+    """
+    Return [(duration, jerk)] for a rest-to-rest jerk-limited move of `length`.
+
+    The classic double-S: jerk up, hold the acceleration, jerk down to
+    cruise speed, cruise, then the mirror image. When the move is too
+    short to reach v_max, the peak speed is lowered (bisection) and
+    there is no cruise; when a_max is not reached on the way to that
+    speed, there is no constant-acceleration phase either.
+    """
+
+    def accel_phase(v_peak):
+        if v_peak * j_max <= a_max ** 2:
+            t_jerk = np.sqrt(v_peak / j_max)
+            t_hold = 0.0
+        else:
+            t_jerk = a_max / j_max
+            t_hold = v_peak / a_max - t_jerk
+
+        # The phase is point-symmetric in velocity: average v_peak / 2.
+        return t_jerk, t_hold, v_peak * (2.0 * t_jerk + t_hold) / 2.0
+
+    t_jerk, t_hold, distance = accel_phase(v_max)
+    v_peak = v_max
+
+    if 2.0 * distance > length:
+        low, high = 0.0, v_max
+
+        for _ in range(60):
+            v_peak = (low + high) / 2.0
+
+            if 2.0 * accel_phase(v_peak)[2] > length:
+                high = v_peak
+            else:
+                low = v_peak
+
+        t_jerk, t_hold, distance = accel_phase(v_peak)
+
+    t_cruise = max(0.0, (length - 2.0 * distance) / v_peak)
+
+    accelerate = [(t_jerk, j_max), (t_hold, 0.0), (t_jerk, -j_max)]
+    decelerate = [(t_jerk, -j_max), (t_hold, 0.0), (t_jerk, j_max)]
+
+    return accelerate + [(t_cruise, 0.0)] + decelerate
+
+
+def s_curve(length, v_max, a_max, j_max, sample_dt=5e-4):
+    """
+    Return (times, s, ds/dt) of a rest-to-rest jerk-limited move.
+
+    Sampled every sample_dt (exactly, per constant-jerk phase); s runs
+    from 0 to `length`. Speed, acceleration and jerk never exceed
+    v_max, a_max and j_max.
+    """
+    times, positions, speeds = [0.0], [0.0], [0.0]
+    t = pos = vel = acc = 0.0
+
+    for duration, jerk in _s_curve_phases(length, v_max, a_max, j_max):
+        if duration <= 0.0:
+            continue
+
+        steps = max(1, int(np.ceil(duration / sample_dt)))
+        dt = duration / steps
+
+        for _ in range(steps):
+            pos += vel * dt + acc * dt ** 2 / 2.0 + jerk * dt ** 3 / 6.0
+            vel += acc * dt + jerk * dt ** 2 / 2.0
+            acc += jerk * dt
+            t += dt
+            times.append(t)
+            positions.append(pos)
+            speeds.append(vel)
+
+    positions = np.array(positions)
+    # Undo the bisection's last ~1e-15 of mismatch.
+    scale = length / positions[-1] if positions[-1] > 0.0 else 1.0
+
+    return np.array(times), positions * scale, np.array(speeds) * scale
+
+
+def _time_s_curve(segment, max_velocity_rad_s, max_acceleration, max_jerk):
+    """Like time_path() for one straight segment, but with an s_curve()."""
+    arc = np.concatenate(
+        [[0.0], np.cumsum(np.abs(np.diff(segment, axis=0)).max(axis=1))]
+    )
+    length = float(arc[-1])
+
+    curve_t, curve_s, curve_v = s_curve(
+        length, max_velocity_rad_s, max_acceleration, max_jerk
+    )
+
+    times = np.interp(arc, curve_s, curve_t)
+    speed = np.interp(times, curve_t, curve_v)
+
+    # Straight segment: every joint moves in proportion to the arc.
+    direction = (segment[-1] - segment[0]) / length
+    velocities = speed[:, None] * direction[None, :]
+    velocities[0] = 0.0
+    velocities[-1] = 0.0
+
+    return times, velocities
+
+
+def time_stop_at_each(
+    waypoints,
+    max_velocity_rad_s,
+    step_rad=DEFAULT_CHECK_STEP_RAD,
+    max_acceleration=None,
+    max_jerk=None,
+):
     """
     Densify and time a polyline that comes to rest at every waypoint.
 
     Returns (dense_waypoints, times, velocities). Each straight
-    segment gets its own minimum-jerk profile from rest to rest, so
-    the arm follows exactly the straight joint-space lines that were
-    collision-checked - no corner-cutting at the vias - at the cost
-    of a brief stop at each one.
+    segment gets its own profile from rest to rest, so the arm follows
+    exactly the straight joint-space lines that were collision-checked
+    - no corner-cutting at the vias - at the cost of a brief stop at
+    each one.
+
+    The profile is minimum-jerk unless max_acceleration and max_jerk
+    are given, then a jerk-limited S-curve (s_curve) that cruises at
+    max_velocity_rad_s. Min-jerk averages only 1/1.875 (53%) of its
+    peak speed, so for the same top speed the S-curve is faster on any
+    segment long enough to cruise. The stops cost nothing extra with
+    min-jerk - its duration is proportional to the distance - but
+    each costs a speed-up and a slow-down with the S-curve.
     """
+    cruise = max_acceleration is not None and max_jerk is not None
     waypoints = np.asarray(waypoints, dtype=np.float64)
 
     dense = [waypoints[:1]]
@@ -168,7 +307,13 @@ def time_stop_at_each(waypoints, max_velocity_rad_s, step_rad=DEFAULT_CHECK_STEP
             continue
 
         segment = densify([start, end], step_rad)
-        seg_times, seg_velocities = time_path(segment, max_velocity_rad_s)
+
+        if cruise:
+            seg_times, seg_velocities = _time_s_curve(
+                segment, max_velocity_rad_s, max_acceleration, max_jerk
+            )
+        else:
+            seg_times, seg_velocities = time_path(segment, max_velocity_rad_s)
 
         dense.append(segment[1:])
         times.append(elapsed + seg_times[1:])

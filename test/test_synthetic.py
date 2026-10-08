@@ -1,5 +1,6 @@
 """Tests for synthetic injection (perception/synthetic.py) and coverage."""
 
+from laundry_control.perception import coverage
 from laundry_control.perception.bucket_model import build_baseline_surface
 from laundry_control.perception.synthetic import (
     inject,
@@ -8,7 +9,6 @@ from laundry_control.perception.synthetic import (
     reconstruct_rays,
 )
 from laundry_control.perception.synthetic_eval import run_campaign, summarize
-from laundry_control.scan import coverage
 import numpy as np
 import pytest
 

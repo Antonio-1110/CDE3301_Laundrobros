@@ -1,8 +1,8 @@
 """Generated grab poses for the sensorless sweep (grasp/retrieve_grid.py)."""
 
 from laundry_control import config
+from laundry_control.bucket import seed_cone, to_cylindrical
 from laundry_control.grasp import retrieve_grid
-from laundry_control.perception.bucket_model import seed_cone, to_cylindrical
 import numpy as np
 import pytest
 
@@ -49,13 +49,17 @@ class _Arm:
 
 class _Gripper:
 
-    def __init__(self, arm, fail_close=False):
+    def __init__(self, arm, fail_close=False, fail_open_at=None):
         self.arm = arm
         self.fail_close = fail_close
+        # Which open (counting from 1) fails, if any.
+        self.fail_open_at = fail_open_at
+        self.opens = 0
 
     def open_blocking(self):
         self.arm.calls.append(('open',))
-        return True
+        self.opens += 1
+        return self.opens != self.fail_open_at
 
     def close_blocking(self):
         self.arm.calls.append(('close',))
@@ -90,6 +94,38 @@ def test_each_grab_goes_down_closes_lifts_and_drops():
         ('linear', (5.0,) * 7), ('go_to', 'drop'), ('open',),
         ('go_to', 'inter'),
     ]
+
+
+def _go_to_recording_empty(arm, name, gripper_empty=False, **_kwargs):
+    arm.calls.append(('go_to', name, gripper_empty))
+    return True
+
+
+def test_after_a_confirmed_open_drop_is_left_as_empty():
+    arm = _Arm()
+
+    assert retrieve_grid.run(
+        arm, _Gripper(arm), [_grab('grab_01', 0.0), _grab('grab_02', 5.0)],
+        _go_to_recording_empty,
+    )
+
+    leaving = [c for c in arm.calls if c[0] == 'go_to' and c[1] != 'drop']
+    assert leaving == [
+        ('go_to', 'grab_01', True), ('go_to', 'grab_02', True),
+        ('go_to', 'inter', True),
+    ]
+
+
+def test_an_unconfirmed_open_at_drop_never_leaves_as_empty():
+    arm = _Arm()
+
+    # Open 1 is before the first grab; open 2 is at DROP.
+    assert not retrieve_grid.run(
+        arm, _Gripper(arm, fail_open_at=2), [_grab('grab_01', 0.0)],
+        _go_to_recording_empty,
+    )
+
+    assert arm.calls[-1] == ('go_to', 'inter', False)
 
 
 def test_a_failed_close_still_lifts_out_then_stops():

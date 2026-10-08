@@ -366,7 +366,7 @@ def generate_launch_description():
     )
 
     # The mock hardware starts at all-zeros, where the modelled gripper
-    # is in the table: move the fake arm to HOME (see cli.py
+    # is in the table: move the fake arm to HOME (see cli/scene.py
     # _fake_start_at_home).
     fake_scene_node = Node(
         package='laundry_control',

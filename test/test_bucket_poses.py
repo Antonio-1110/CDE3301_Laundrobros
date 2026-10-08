@@ -4,7 +4,7 @@ import dataclasses
 
 from laundry_control import config
 from laundry_control.arm import bucket_poses, transfers
-from laundry_control.perception.bucket_model import MESH_DEPTH_M, seed_cone
+from laundry_control.bucket import MESH_DEPTH_M, seed_cone
 from laundry_control.scan import endcap
 import numpy as np
 import pytest

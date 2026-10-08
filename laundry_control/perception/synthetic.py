@@ -83,7 +83,8 @@ from typing import Optional
 
 import numpy as np
 
-from .bucket_model import _axis_basis, BucketProfile, to_cylindrical
+from .bucket_model import BucketProfile
+from ..bucket import axis_basis, to_cylindrical
 from ..config import (
     TOF_FIELD_OF_VIEW_RAD,
     TOF_MIN_RANGE_M,
@@ -261,7 +262,7 @@ def make_mound(
     """
     cone = profile.cone
     axis_dir = cone.axis_dir
-    e1, e2 = _axis_basis(axis_dir)
+    e1, e2 = axis_basis(axis_dir)
 
     a = float(footprint_radius_m)
     h = float(height_m)

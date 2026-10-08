@@ -16,7 +16,7 @@ INTER, +Z is horizontal along -Y, so it would always have reported
 What matters now is the angle between the insertion axis and the
 bucket axis, and how far the sensor therefore drifts relative to the
 bucket over a full-depth scan. The bucket axis is the one fitted
-from baseline_scans/ (perception.bucket_model.fit_cone), falling back
+from baseline_scans/ (bucket_model.fit_cone), falling back
 to the configured bucket (config.OBSTACLES) when no baselines load.
 
 Measured with the recorded INTER (fake-controller FK): 4.6 deg to the
@@ -36,10 +36,11 @@ import rclpy
 from rclpy.node import Node
 import tf2_ros
 
-from .geometry import angle_between_deg, tool_z_from_quaternion
+from .bucket_model import fit_cone
+from .detect import load_baseline_scans
 from .. import config
-from ..perception.bucket_model import fit_cone, seed_axis_direction
-from ..perception.detect import load_baseline_scans
+from ..arm.geometry import angle_between_deg, tool_z_from_quaternion
+from ..bucket import seed_axis_direction
 from ..scan.pattern import DEFAULT_DEPTH_M
 
 # Verdict bands on the sensor's drift relative to the bucket axis
