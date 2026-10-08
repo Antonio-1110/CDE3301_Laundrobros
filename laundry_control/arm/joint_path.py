@@ -70,6 +70,27 @@ def within_joint_limits(joints, lower, upper, margin_rad=0.0):
     )
 
 
+def limits_no_closer_than(start, lower, upper, margin_rad):
+    """
+    Return (lower, upper) bounds that keep margin_rad, or what start has.
+
+    A joint at least margin_rad inside its limits keeps that margin. One
+    already inside it (but within the hard limits) gets its start angle
+    as the bound on that side: it may stay there or move away from the
+    limit, never closer. Without this, an arm left inside the margin
+    could not move at all - every state of every move, including its
+    first, would fail the check.
+    """
+    start = np.asarray(start, dtype=np.float64)
+    low = np.asarray(lower, dtype=np.float64)
+    high = np.asarray(upper, dtype=np.float64)
+
+    return (
+        np.maximum(low, np.minimum(low + margin_rad, start)),
+        np.minimum(high, np.maximum(high - margin_rad, start)),
+    )
+
+
 def split_at_reversals(waypoints):
     """
     Return index ranges [(i0, i1), ...] of monotonic stretches of a path.

@@ -127,20 +127,27 @@ class MoveItQueries:
 
         return [solution[name] for name in self.JOINT_NAMES]
 
-    def state_is_valid(self, joints):
+    def state_is_valid(self, joints, limits=None):
         """
         Return True if the state is within limits and collision-free.
 
         Limits are config.JOINT_*_LIMITS_RAD less JOINT_LIMIT_MARGIN_RAD,
-        checked here because MoveIt's validity service does not. A
-        state MoveIt never answers for counts as invalid.
+        checked here because MoveIt's validity service does not; or
+        limits=(lower, upper), already including any margin (see
+        joint_path.limits_no_closer_than). A state MoveIt never
+        answers for counts as invalid.
         """
-        if not within_joint_limits(
-            joints,
-            config.JOINT_LOWER_LIMITS_RAD,
-            config.JOINT_UPPER_LIMITS_RAD,
-            config.JOINT_LIMIT_MARGIN_RAD,
-        ):
+        if limits is None:
+            inside = within_joint_limits(
+                joints,
+                config.JOINT_LOWER_LIMITS_RAD,
+                config.JOINT_UPPER_LIMITS_RAD,
+                config.JOINT_LIMIT_MARGIN_RAD,
+            )
+        else:
+            inside = within_joint_limits(joints, limits[0], limits[1])
+
+        if not inside:
             return False
 
         response = self._validity_response(joints)
@@ -221,10 +228,14 @@ class MoveItQueries:
             self, padding_m, {config.GRIPPER_LINK: config.GRIPPER_PADDING_M}
         )
 
-    def first_invalid_state(self, waypoints):
-        """Return the index of the first colliding densified state, or None."""
+    def first_invalid_state(self, waypoints, limits=None):
+        """
+        Return the index of the first colliding densified state, or None.
+
+        limits: as for state_is_valid.
+        """
         for index, joints in enumerate(densify(waypoints)):
-            if not self.state_is_valid(joints):
+            if not self.state_is_valid(joints, limits=limits):
                 return index
 
         return None

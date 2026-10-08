@@ -3,6 +3,7 @@
 import math
 
 from laundry_control import config
+from laundry_control.arm.joint_path import limits_no_closer_than
 from laundry_control.cli import arm as cli_arm
 from laundry_control.cli import build_parser
 import pytest
@@ -20,8 +21,9 @@ class _Arm:
     def get_current_joints(self):
         return list(self.current)
 
-    def move_joints_linear(self, target, time_scale=1.0):
+    def move_joints_linear(self, target, time_scale=1.0, **kwargs):
         self.calls.append(('linear', list(target), time_scale))
+        self.kwargs = kwargs
         return not self.collides
 
     def move_joints(self, *_args, **_kwargs):
@@ -130,3 +132,58 @@ def test_the_range_keeps_the_limit_margin():
     margin = math.degrees(config.JOINT_LIMIT_MARGIN_RAD)
     assert low == pytest.approx(math.degrees(config.JOINT_LOWER_LIMITS_RAD[1]) + margin)
     assert high == pytest.approx(math.degrees(config.JOINT_UPPER_LIMITS_RAD[1]) - margin)
+
+
+def test_single_joint_moves_may_leave_the_limit_margin(run):
+    _status, arm = run(['joint1', '5'])
+
+    assert arm.kwargs == {'no_closer_to_limits': True}
+
+
+# J2's hard limit is 120 deg; with the 2 deg margin, 118 is the most.
+AT_J2_MARGIN = [1.84, math.radians(118.1), -2.52, 0.32, 0.16, 0.95, -5.2]
+
+
+def _bounds(start):
+    lower, upper = limits_no_closer_than(
+        start, config.JOINT_LOWER_LIMITS_RAD, config.JOINT_UPPER_LIMITS_RAD,
+        config.JOINT_LIMIT_MARGIN_RAD,
+    )
+    return lower, upper
+
+
+def test_a_joint_inside_its_margin_keeps_its_angle_as_the_bound():
+    lower, upper = _bounds(AT_J2_MARGIN)
+
+    assert upper[1] == pytest.approx(math.radians(118.1))
+    # Every other joint keeps the full margin.
+    assert upper[0] == pytest.approx(
+        config.JOINT_UPPER_LIMITS_RAD[0] - config.JOINT_LIMIT_MARGIN_RAD
+    )
+    assert lower[1] == pytest.approx(
+        config.JOINT_LOWER_LIMITS_RAD[1] + config.JOINT_LIMIT_MARGIN_RAD
+    )
+
+
+def test_the_hard_limit_still_holds():
+    start = list(AT_J2_MARGIN)
+    start[1] = math.radians(125.0)  # Beyond the hard limit already.
+
+    _lower, upper = _bounds(start)
+
+    assert upper[1] == pytest.approx(config.JOINT_UPPER_LIMITS_RAD[1])
+
+
+def test_other_joints_may_move_while_one_sits_in_its_margin(run):
+    status, arm = run(['joint1', '10'], arm=_Arm(current=AT_J2_MARGIN))
+
+    assert status == 0
+    assert arm.calls[0][1][1] == pytest.approx(math.radians(118.1))
+
+
+def test_a_joint_in_its_margin_may_move_out_but_not_further_in(run):
+    out_status, _ = run(['joint2', '-0.05'], arm=_Arm(current=AT_J2_MARGIN))
+    in_status, arm = run(['joint2', '0.5'], arm=_Arm(current=AT_J2_MARGIN))
+
+    assert out_status == 0
+    assert in_status == 1 and arm.calls == []

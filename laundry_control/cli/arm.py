@@ -39,15 +39,26 @@ def single_joint_target(current, index, angle_deg, absolute):
 
     angle_deg is relative to current[index], or the target itself when
     absolute. Raises ValueError, saying why, if it is outside the
-    joint's range (config.JOINT_*_LIMITS_RAD, less the margin).
+    joint's range: config.JOINT_*_LIMITS_RAD less the margin, or for a
+    joint already inside the margin, its current angle on that side.
     """
+    from .. import config
+    from ..arm.joint_path import limits_no_closer_than
+
     target = list(current)
     target[index] = (
         math.radians(angle_deg) if absolute
         else current[index] + math.radians(angle_deg)
     )
 
-    low, high = _limits_deg(index)
+    # A joint already inside its margin may move out, not further in.
+    lower, upper = limits_no_closer_than(
+        current,
+        config.JOINT_LOWER_LIMITS_RAD,
+        config.JOINT_UPPER_LIMITS_RAD,
+        config.JOINT_LIMIT_MARGIN_RAD,
+    )
+    low, high = math.degrees(lower[index]), math.degrees(upper[index])
     wanted = math.degrees(target[index])
 
     if not low <= wanted <= high:
@@ -83,8 +94,12 @@ def _move_single_joint(arm, index, angle_deg, absolute, time_scale):
     # Straight joint-space line: only this joint moves, every 1 deg
     # of it is collision- and limit-checked first, and nothing moves
     # if any state fails - unlike the planner, which may move the
-    # other joints on the way.
-    return arm.move_joints_linear(target, time_scale=time_scale)
+    # other joints on the way. A joint already inside its limit
+    # margin may stay there or move out, never further in, so the
+    # arm can always be moved out of such a pose by hand.
+    return arm.move_joints_linear(
+        target, time_scale=time_scale, no_closer_to_limits=True
+    )
 
 
 def cmd_move(args):

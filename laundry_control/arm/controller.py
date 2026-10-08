@@ -34,7 +34,7 @@ import tf2_ros
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .geometry import tool_z_from_quaternion
-from .joint_path import densify, time_path
+from .joint_path import densify, limits_no_closer_than, time_path
 from .kinematics import MoveItQueries
 from .moveit_errors import (
     describe_moveit_error,
@@ -1231,11 +1231,44 @@ class XArm7Controller(MoveItQueries, Node):
 
         return self._execute_trajectory(robot_trajectory)
 
+    def _why_invalid(self, joints, limits=None):
+        """Say why a state fails state_is_valid: a joint limit, or contacts."""
+        if limits is None:
+            limits = (
+                np.asarray(config.JOINT_LOWER_LIMITS_RAD)
+                + config.JOINT_LIMIT_MARGIN_RAD,
+                np.asarray(config.JOINT_UPPER_LIMITS_RAD)
+                - config.JOINT_LIMIT_MARGIN_RAD,
+            )
+
+        beyond = [
+            f'J{i + 1} at {math.degrees(q):+.1f} deg, allowed '
+            f'{math.degrees(lo):+.1f} .. {math.degrees(hi):+.1f}'
+            for i, (q, lo, hi) in enumerate(zip(joints, *limits))
+            if not lo <= q <= hi
+        ]
+
+        if beyond:
+            return 'too close to a joint limit: ' + '; '.join(beyond)
+
+        response = self._validity_response(joints)
+
+        if response is None:
+            return 'MoveIt did not answer the collision check'
+
+        pairs = sorted({
+            ' touches '.join(sorted((c.contact_body_1, c.contact_body_2)))
+            for c in response.contacts
+        })
+
+        return 'collision: ' + (', '.join(pairs) or 'unspecified')
+
     def move_joints_linear(
         self,
         target,
         max_velocity_rad_s=config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S,
         time_scale=1.0,
+        no_closer_to_limits=False,
     ):
         """
         Move along a straight joint-space line to `target`, deterministically.
@@ -1244,6 +1277,12 @@ class XArm7Controller(MoveItQueries, Node):
         BEFORE the arm moves; if any collides, nothing moves and this
         returns False. Timing is minimum-jerk with the fastest joint
         peaking at max_velocity_rad_s.
+
+        Joints must keep config.JOINT_LIMIT_MARGIN_RAD from their limits.
+        no_closer_to_limits relaxes that for a joint that STARTS inside
+        the margin: it may stay or move away, never closer (see
+        joint_path.limits_no_closer_than). For moves made by hand,
+        which must be able to leave such a pose.
         """
         current = self.get_current_joints()
 
@@ -1255,13 +1294,23 @@ class XArm7Controller(MoveItQueries, Node):
         if np.abs(waypoints[-1] - waypoints[0]).max() < 1e-4:
             return True
 
-        bad = self.first_invalid_state(waypoints)
+        limits = None
+
+        if no_closer_to_limits:
+            limits = limits_no_closer_than(
+                current,
+                config.JOINT_LOWER_LIMITS_RAD,
+                config.JOINT_UPPER_LIMITS_RAD,
+                config.JOINT_LIMIT_MARGIN_RAD,
+            )
+
+        bad = self.first_invalid_state(waypoints, limits=limits)
 
         if bad is not None:
             self.get_logger().error(
-                'Straight joint move would collide at '
-                f'{100.0 * bad / (len(waypoints) - 1):.0f}% of the way; '
-                'not moving.'
+                'Straight joint move refused at '
+                f'{100.0 * bad / (len(waypoints) - 1):.0f}% of the way '
+                f'({self._why_invalid(waypoints[bad], limits)}); not moving.'
             )
             return False
 
