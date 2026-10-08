@@ -14,8 +14,115 @@ import sys
 from .common import add_fake_arguments, add_observed_state_argument, RosSession
 
 
+def _bake_timing(arm):
+    """
+    Time every baked transfer with vias to pass through them; save them.
+
+    Route geometry is not changed. Routes without vias keep the
+    stop-at-each timing, which is already as fast for a single leg.
+    Each timing's curve is collision-checked with the route's own
+    gripper clearance, as the route itself was baked.
+    """
+    from .. import config
+    from ..arm import pass_through, scene, transfers
+    from ..arm.joint_path import time_stop_at_each
+
+    routes, _speed = transfers.load()
+
+    if not routes:
+        print('No baked transfers to time (scan_plans/transfers.yaml).')
+        return 1
+
+    v_max = config.TRANSFER_MAX_VELOCITY_RAD_S
+    a_max = config.TRANSFER_MAX_ACCELERATION_RAD_S2
+    j_max = config.TRANSFER_MAX_JERK_RAD_S3
+    limits = pass_through.current_limits()
+
+    with_vias = {
+        name: waypoints for name, waypoints in routes.items()
+        if len(waypoints) > 2
+    }
+    # Routes without vias keep the stop-at-each timing.
+    timings = {name: None for name in routes if name not in with_vias}
+    status = 0
+
+    print(
+        f'Timing {len(with_vias)} transfer(s) with vias to pass through them '
+        f'(limits {math.degrees(v_max):g} deg/s, {a_max:g} rad/s^2, '
+        f'{j_max:g} rad/s^3); TOTG runs in its own MoveIt (~25 s)...',
+        flush=True,
+    )
+
+    timed = pass_through.time_routes(with_vias, v_max, a_max, j_max)
+
+    # One padding change per (arm, gripper) padding: each change makes
+    # move_group rebuild the padded meshes, and repeated changes have
+    # grown it past the Pi's memory (OOM-killed 2026-10-08).
+    def padding_of(name):
+        return (
+            transfers.route_arm_padding(name),
+            transfers.expected_gripper_clearance(name),
+        )
+
+    try:
+        for name in sorted(with_vias, key=padding_of):
+            waypoints = with_vias[name]
+            stop = time_stop_at_each(
+                waypoints, v_max, max_acceleration=a_max, max_jerk=j_max
+            )[1][-1]
+
+            if timed.get(name) is None:
+                print(f'  {name:<11} no timing within the limits; stops at vias')
+                timings[name] = None
+                status = 1
+                continue
+
+            times, positions, velocities, settings = timed[name]
+            arm_padding, gripper_clearance = padding_of(name)
+            scene.set_padding(
+                arm, arm_padding, {config.GRIPPER_LINK: gripper_clearance}
+            )
+
+            states = pass_through.dense_states(times, positions, velocities)
+            bad = arm.first_invalid_state(states)
+
+            if bad is not None:
+                print(
+                    f'  {name:<11} rounded corners collide '
+                    f'({arm._why_invalid(states[bad])}); stops at vias'
+                )
+                timings[name] = None
+                status = 1
+                continue
+
+            timings[name] = pass_through.to_document(
+                times, positions, velocities, limits, settings
+            )
+            v, a, j = settings['peaks']
+            print(
+                f'  {name:<11} {len(waypoints) - 2} via(s): {stop:.2f} s '
+                f'stopping -> {times[-1]:.2f} s passing through (peaks '
+                f'{math.degrees(v):.0f} deg/s, {a:.2f} rad/s^2, {j:.1f} '
+                f'rad/s^3; checked with {gripper_clearance * 100:g} cm '
+                'gripper clearance)',
+                flush=True,
+            )
+    finally:
+        scene.set_padding(
+            arm,
+            config.OBSTACLE_PADDING_M,
+            {config.GRIPPER_LINK: config.GRIPPER_PADDING_M},
+        )
+
+    path = transfers.default_plan_path()
+    transfers.save_timings(path, timings)
+    print(f'Saved the timings in {path}')
+
+    return status
+
+
 def cmd_plan(args):
-    """Run `laundry plan bake [poses|endcap|transfers|retrieve|all]`."""
+    """Run `laundry plan bake [poses|endcap|transfers|retrieve|timing|all]`."""
     import socket
 
     from .. import config
@@ -134,6 +241,9 @@ def cmd_plan(args):
                 )
                 status = 1
 
+        if args.which in ('timing', 'transfers', 'retrieve', 'all'):
+            status = max(status, _bake_timing(arm))
+
         if args.which in ('endcap', 'all'):
             try:
                 plan = endcap.bake(
@@ -213,14 +323,17 @@ def add_plan_parser(subparsers):
     )
     bake.add_argument(
         'which', nargs='?',
-        choices=('poses', 'endcap', 'transfers', 'retrieve', 'all'),
+        choices=('poses', 'endcap', 'transfers', 'retrieve', 'timing', 'all'),
         default='all',
         help=(
             'What to bake (default: all, in the order poses, retrieve, '
-            'transfers, endcap). poses: derive INTER and BOTTOM from the '
-            'bucket (config.BUCKET_POSES); no motion. retrieve: solve the '
-            "sweep's grabs exactly as placed (scan_plans/grab_targets.yaml, "
-            '`laundry plan edit-grabs`) and bake routes to them.'
+            'transfers, timing, endcap). poses: derive INTER and BOTTOM '
+            'from the bucket (config.BUCKET_POSES); no motion. retrieve: '
+            "solve the sweep's grabs exactly as placed "
+            '(scan_plans/grab_targets.yaml, `laundry plan edit-grabs`) and '
+            'bake routes to them. timing: time the baked transfers to pass '
+            'through their vias (also run after transfers/retrieve); needs '
+            'moveit_py. Re-run it after changing config.TRANSFER_MAX_*.'
         ),
     )
     from ..scan.pattern import DEFAULT_DEPTH_M

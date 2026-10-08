@@ -184,6 +184,12 @@ TRANSFER_MAX_JERK_RAD_S3 = 17.0
 # MoveIt's own xArm7 limits are 2.14 rad/s (123 deg/s) and 10 rad/s^2.
 TRANSFER_MAX_VELOCITY_RAD_S = math.radians(45.0)
 
+# Pass through the vias of baked transfers instead of stopping at each
+# (arm/pass_through.py): uses the timing `laundry plan bake timing`
+# stored for these limits; without one a route stops at its vias. The
+# rounded corners are collision-checked before every replay.
+TRANSFER_PASS_THROUGH_VIAS = True
+
 # Peak joint speed for the planner-free straight joint moves
 # (XArm7Controller.move_joints_linear) and the baked end scan: 45
 # deg/s, well inside every xArm7 joint's limit.
