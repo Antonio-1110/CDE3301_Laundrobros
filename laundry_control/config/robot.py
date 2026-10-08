@@ -164,6 +164,26 @@ JOINT7_MAX_ACCELERATION_RAD_S2 = 10.0
 TRANSFER_MAX_ACCELERATION_RAD_S2 = 2.0
 TRANSFER_MAX_JERK_RAD_S3 = 17.0
 
+# Peak joint speed of baked-transfer replays (and of go_to's straight
+# fallback). transfers.yaml records the speed it was baked at, but the
+# route is speed-independent, so replays use this instead.
+#
+# RAISING THESE THREE: one step at a time, on the cable, never over
+# WiFi (2026-10-07: a WiFi dropout mid-move aborted INTER -> HOME).
+# At each step run HOME <-> INTER and a DROP round trip, first with
+# --speed 0.3, then at full speed; check ros2_control_node's log for
+# overruns and set_servo_angle_j errors, and watch for shiver. Keep
+# the last step that ran clean. Per preplanned grab (4 transfer legs):
+#
+#   speed deg/s  accel rad/s^2  jerk rad/s^3   seconds
+#        45           2.0           17           14.0   (tested)
+#        60           2.0           17           12.6
+#        60           3.0           25           11.2
+#        90           3.0           25           10.1
+#
+# MoveIt's own xArm7 limits are 2.14 rad/s (123 deg/s) and 10 rad/s^2.
+TRANSFER_MAX_VELOCITY_RAD_S = math.radians(45.0)
+
 # Peak joint speed for the planner-free straight joint moves
 # (XArm7Controller.move_joints_linear) and the baked end scan: 45
 # deg/s, well inside every xArm7 joint's limit.

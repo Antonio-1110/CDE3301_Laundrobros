@@ -634,8 +634,7 @@ def go_to(
     mismatches = {}
 
     if routes is None:
-        routes, baked_velocity = load()
-        max_velocity_rad_s = max_velocity_rad_s or baked_velocity
+        routes, _baked_velocity = load()
         stamp = baked_scene()
         mismatches = padding_mismatches()
 
@@ -654,7 +653,7 @@ def go_to(
         }
 
     max_velocity_rad_s = (
-        max_velocity_rad_s or config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S
+        max_velocity_rad_s or config.TRANSFER_MAX_VELOCITY_RAD_S
     )
 
     target = config.get_named_pose(target_name)

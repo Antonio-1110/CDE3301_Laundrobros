@@ -91,8 +91,9 @@ GRIPPER_PADDING_M = 0.0
 ROUTE_GRIPPER_CLEARANCE_M = {
     'home': 0.01,
     # Laundry hanging from the gripper swings out on the way to DROP;
-    # keep it well clear of the rim so it does not snag (2026-09-29).
-    'drop': 0.10,
+    # keep it clear of the rim so it does not snag. 10 cm until
+    # 2026-10-07; at 5 cm the route is shorter (issue #11).
+    'drop': 0.05,
     # The way back from DROP once the gripper has let go (go_to's
     # gripper_empty): nothing hangs from it, so 1 cm, like HOME. On
     # the fake controller (2026-10-01) that cut the return from 7.2 s
