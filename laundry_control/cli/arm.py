@@ -16,9 +16,9 @@ from .common import (
 # `laundry move jointN`: N = 1..7.
 SINGLE_JOINTS = tuple(f'joint{n}' for n in range(1, 8))
 
-# Default --speed for a single-joint move: half the straight-move
-# speed (22.5 deg/s peak), as these are moves made by hand.
-SINGLE_JOINT_DEFAULT_SPEED = 0.5
+# Default --speed for a single-joint move: the full straight-move
+# speed (45 deg/s peak), like the other straight moves.
+SINGLE_JOINT_DEFAULT_SPEED = 1.0
 
 
 def _limits_deg(index):
