@@ -27,7 +27,7 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | Command | Needs |
 |---|---|
 | `laundry move inter` / `home` / `bottom` / `drop` / `grab_NN` `[--speed 0.3]` | MoveIt |
-| `laundry move joints J1 .. J7 [--degrees]`, `joint6 DEG`, `joint7 DEG`, `linear M`, `twist M DEG` | MoveIt |
+| `laundry move joints J1 .. J7 [--degrees]`, `joint1` … `joint7 DEG [--to] [--speed F]`, `linear M`, `twist M DEG` | MoveIt |
 | `laundry check-flange` — insertion axis vs bucket axis (run at INTER) | MoveIt |
 | `laundry scene apply` / `check` — put the obstacles into MoveIt / also check every recorded pose and baked route against them (no motion) | MoveIt |
 | `laundry scene fit` — the bucket pose the baseline scans measure, as a `config.OBSTACLES` entry | nothing |

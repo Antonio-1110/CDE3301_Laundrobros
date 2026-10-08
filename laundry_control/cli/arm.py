@@ -13,6 +13,80 @@ from .common import (
 )
 
 
+# `laundry move jointN`: N = 1..7.
+SINGLE_JOINTS = tuple(f'joint{n}' for n in range(1, 8))
+
+# Default --speed for a single-joint move: half the straight-move
+# speed (22.5 deg/s peak), as these are moves made by hand.
+SINGLE_JOINT_DEFAULT_SPEED = 0.5
+
+
+def _limits_deg(index):
+    """Return a joint's usable range in degrees: its limits minus the margin."""
+    from .. import config
+
+    margin = config.JOINT_LIMIT_MARGIN_RAD
+
+    return (
+        math.degrees(config.JOINT_LOWER_LIMITS_RAD[index] + margin),
+        math.degrees(config.JOINT_UPPER_LIMITS_RAD[index] - margin),
+    )
+
+
+def single_joint_target(current, index, angle_deg, absolute):
+    """
+    Return the seven-joint target that moves only joint `index`, or raise.
+
+    angle_deg is relative to current[index], or the target itself when
+    absolute. Raises ValueError, saying why, if it is outside the
+    joint's range (config.JOINT_*_LIMITS_RAD, less the margin).
+    """
+    target = list(current)
+    target[index] = (
+        math.radians(angle_deg) if absolute
+        else current[index] + math.radians(angle_deg)
+    )
+
+    low, high = _limits_deg(index)
+    wanted = math.degrees(target[index])
+
+    if not low <= wanted <= high:
+        raise ValueError(
+            f'J{index + 1} to {wanted:+.1f} deg is outside its range '
+            f'{low:+.1f} .. {high:+.1f} deg; not moving.'
+        )
+
+    return target
+
+
+def _move_single_joint(arm, index, angle_deg, absolute, time_scale):
+    """Move only joint `index`, in a straight collision-checked move."""
+    current = arm.get_current_joints()
+
+    if current is None:
+        print('Could not read the current joint angles.', file=sys.stderr)
+        return False
+
+    try:
+        target = single_joint_target(current, index, angle_deg, absolute)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return False
+
+    print(
+        f'J{index + 1}: {math.degrees(current[index]):+.1f} -> '
+        f'{math.degrees(target[index]):+.1f} deg '
+        f'({math.degrees(target[index] - current[index]):+.1f}); '
+        'the other joints stay put.'
+    )
+
+    # Straight joint-space line: only this joint moves, every 1 deg
+    # of it is collision- and limit-checked first, and nothing moves
+    # if any state fails - unlike the planner, which may move the
+    # other joints on the way.
+    return arm.move_joints_linear(target, time_scale=time_scale)
+
+
 def cmd_move(args):
     """Run `laundry move ...`."""
     from .. import config
@@ -21,6 +95,31 @@ def cmd_move(args):
     # so a typo is reported immediately instead of after waiting on
     # MoveIt interfaces to come up.
     kind = args.move_kind
+
+    if kind in SINGLE_JOINTS:
+        index = SINGLE_JOINTS.index(kind)
+
+        if not 0.0 < args.speed <= 1.0:
+            print('--speed must be in (0, 1].', file=sys.stderr)
+            return 2
+
+        if args.to:
+            low, high = _limits_deg(index)
+
+            if not low <= args.angle <= high:
+                print(
+                    f'J{index + 1} to {args.angle:+.1f} deg is outside its '
+                    f'range {low:+.1f} .. {high:+.1f} deg; not moving.',
+                    file=sys.stderr,
+                )
+                return 2
+
+        with RosSession(args=args) as arm:
+            ok = _move_single_joint(
+                arm, index, args.angle, args.to, args.speed
+            )
+
+        return 0 if ok else 1
 
     joint_speed = (
         args.velocity if args.velocity is not None else 0.3,
@@ -42,19 +141,7 @@ def cmd_move(args):
         target = config.get_named_pose(kind)
 
     with RosSession(args=args) as arm:
-        if kind == 'joint6':
-            velocity, acceleration = joint_speed
-            ok = arm.rotate_joint6(
-                args.angle, velocity=velocity, acceleration=acceleration
-            )
-
-        elif kind == 'joint7':
-            velocity, acceleration = joint_speed
-            ok = arm.rotate_joint7(
-                args.angle, velocity=velocity, acceleration=acceleration
-            )
-
-        elif kind == 'linear':
+        if kind == 'linear':
             velocity, acceleration = cartesian_speed
             ok = arm.move_tool_z(
                 args.distance,
@@ -181,7 +268,7 @@ def add_move_parser(subparsers):
 
     move = subparsers.add_parser(
         'move',
-        help='Move the arm (named pose, joints, J6/J7, linear, twist).',
+        help='Move the arm (named pose, joints, one joint, linear, twist).',
     )
 
     move.add_argument(
@@ -226,12 +313,32 @@ def add_move_parser(subparsers):
         help='Interpret angles as degrees.',
     )
 
-    for joint in ('joint6', 'joint7'):
+    for index, joint in enumerate(SINGLE_JOINTS):
+        low, high = _limits_deg(index)
         parser = kinds.add_parser(
-            joint, help=f'Rotate {joint.upper()} relative to where it is.'
+            joint,
+            help=(
+                f'Turn J{index + 1} alone by DEG (or to DEG with --to); '
+                'straight, collision-checked.'
+            ),
         )
         parser.add_argument(
-            'angle', type=float, help='Relative rotation in degrees.'
+            'angle', type=float, metavar='DEG',
+            help=(
+                f'Degrees to turn J{index + 1} by (relative), or with --to '
+                f'the angle to turn it to; range {low:+.0f} .. {high:+.0f}.'
+            ),
+        )
+        parser.add_argument(
+            '--to', action='store_true',
+            help='DEG is the target angle, not a relative turn.',
+        )
+        parser.add_argument(
+            '--speed', type=float, default=SINGLE_JOINT_DEFAULT_SPEED,
+            help=(
+                'Fraction of the straight-move speed (45 deg/s), (0, 1] '
+                f'(default: {SINGLE_JOINT_DEFAULT_SPEED:g}).'
+            ),
         )
 
     linear = kinds.add_parser('linear', help='Move along current tool Z.')

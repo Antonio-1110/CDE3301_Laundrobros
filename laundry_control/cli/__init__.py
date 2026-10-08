@@ -43,7 +43,8 @@ MOVING AND CHECKING THE ARM
   * laundry move home|inter|bottom|drop|grab_NN
         Go to a named pose (baked route if there is one).
   * laundry move joints J1 .. J7 [--degrees]
-  * laundry move joint6 DEG | joint7 DEG       turn one joint by DEG
+  * laundry move joint1 .. joint7 DEG [--to]   turn one joint alone by
+                                               DEG (--to: to DEG)
   * laundry move linear M | twist M DEG        along the tool axis by M
                                                metres (twist: also J7)
     laundry gripper open|close|ANGLE
