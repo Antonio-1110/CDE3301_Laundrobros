@@ -32,8 +32,12 @@ servo pulls amps, which browns out the board and drops WiFi.
    (Nick O'Leary), **VL53L0X** (Pololu), **ESP32Servo** (Kevin
    Harrington), and **ArduinoJson** (Benoit Blanchon, v7).
 3. `cp tof_gripper_bridge/config.h.example tof_gripper_bridge/config.h`,
-   then set your WiFi and the Pi's LAN IP (`hostname -I` on the Pi).
-   Check the pins at the top of the sketch. `config.h` is git-ignored.
+   then set your WiFi and the Pi's name (`MQTT_HOST`, default
+   `cde3301a-desktop.local`; the name needs avahi on the Pi). If the
+   ESP32 cannot resolve it, use the Pi's IP (`hostname -I` on the Pi)
+   for the network the ESP32 is on. `config.h` is git-ignored, so
+   when flashing from another machine copy the template there and fill
+   it in. The pins at the top of the sketch are for the C3 SuperMini.
 4. Flash it, then open the serial monitor at 115200. It should print
    `VL53L0X ready` and `MQTT connected`.
 

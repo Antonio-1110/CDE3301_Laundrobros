@@ -5,8 +5,11 @@
 #define WIFI_SSID     "your-ssid"
 #define WIFI_PASSWORD "your-password"
 
-// The Pi's LAN address: mosquitto runs on it (setup/mosquitto).
-#define MQTT_HOST     "192.168.1.100"
+// The Pi's mDNS name (`hostname` on the Pi + ".local"): mosquitto runs
+// on it (setup/mosquitto). Unlike an IP it survives network changes; the
+// Pi is on two networks. If the ESP32 cannot resolve the name, use the
+// Pi's IP from `hostname -I` for the network the ESP32 is on.
+#define MQTT_HOST     "cde3301a-desktop.local"
 #define MQTT_PORT     1883
 #define MQTT_CLIENT   "laundrobros_esp32"
 
