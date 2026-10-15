@@ -228,7 +228,7 @@ class _StubArm:
     def set_arm_padding(self, padding_m):
         self.calls.append(('padding', padding_m))
 
-    def first_invalid_state(self, waypoints):
+    def first_invalid_state(self, waypoints, limits=None):
         return 3 if self.blocked else None
 
     def execute_joint_path(self, waypoints, times, velocities, time_scale=1.0):

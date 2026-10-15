@@ -56,31 +56,19 @@ from launch import LaunchDescription, LaunchDescriptionSource
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.actions import OpaqueFunction, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
-def _moveit_launch_file(launch_file):
-    return PythonLaunchDescriptionSource(
-        PathJoinSubstitution(
-            [FindPackageShare('xarm_moveit_config'), 'launch', launch_file]
-        )
-    )
-
-
-def _realmove_with_control_rate():
+def _private_moveit_launch(launch_file):
     """
-    Return the manufacturer's real-arm launch, at our controller rate.
+    Load a private copy of a manufacturer MoveIt launch module.
 
-    Their _robot_moveit_realmove.launch.py, unmodified, loaded from its
-    installed file - except that its call building the ros2_control
-    parameters (uf_robot_utils.generate_ros2_control_params_temp_file)
-    also gets update_rate, from the control_rate_hz launch argument.
-    That helper already supports it; the launch just never passes it,
-    so the rate would otherwise be the stock xarm7_controllers.yaml's
-    150 Hz (config.ARM_CONTROL_RATE_HZ says why we run slower).
+    Their file, unmodified, loaded from where it is installed, with
+    its MoveItConfigsBuilder swapped for one that also puts the task
+    joint ranges into MoveIt's robot model (arm/joint_ranges.
+    add_to_moveit_limits). Only this copy of their module is changed.
     """
     import importlib.util
     import os
@@ -90,11 +78,60 @@ def _realmove_with_control_rate():
     path = os.path.join(
         get_package_share_directory('xarm_moveit_config'),
         'launch',
-        '_robot_moveit_realmove.launch.py',
+        launch_file,
     )
-    spec = importlib.util.spec_from_file_location('xarm_realmove', path)
-    realmove = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(realmove)
+    spec = importlib.util.spec_from_file_location(
+        'xarm_' + launch_file.replace('.', '_'), path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Loud, not silently without the ranges, if xarm_ros2 renames it.
+    module.MoveItConfigsBuilder = _builder_with_task_ranges(
+        module.MoveItConfigsBuilder
+    )
+
+    return module
+
+
+def _builder_with_task_ranges(stock):
+    """Return MoveItConfigsBuilder, adding the task joint ranges."""
+    from laundry_control.arm.joint_ranges import add_to_moveit_limits
+
+    class Builder(stock):
+
+        def to_moveit_configs(self):
+            configs = super().to_moveit_configs()
+            add_to_moveit_limits(
+                configs.joint_limits['robot_description_planning']
+            )
+            return configs
+
+    return Builder
+
+
+def _fake_with_task_ranges():
+    """Return the manufacturer's fake-controller launch, with our ranges."""
+    fake = _private_moveit_launch('_robot_moveit_fake.launch.py')
+
+    return LaunchDescriptionSource(
+        LaunchDescription([OpaqueFunction(function=fake.launch_setup)])
+    )
+
+
+def _realmove_with_control_rate():
+    """
+    Return the manufacturer's real-arm launch, at our controller rate.
+
+    Their _robot_moveit_realmove.launch.py (see _private_moveit_launch),
+    whose call building the ros2_control parameters
+    (uf_robot_utils.generate_ros2_control_params_temp_file) also gets
+    update_rate, from the control_rate_hz launch argument. That helper
+    already supports it; the launch just never passes it, so the rate
+    would otherwise be the stock xarm7_controllers.yaml's 150 Hz
+    (config.ARM_CONTROL_RATE_HZ says why we run slower).
+    """
+    realmove = _private_moveit_launch('_robot_moveit_realmove.launch.py')
 
     # Loud, not silently 150 Hz, if an xarm_ros2 update renames these.
     stock_params = realmove.generate_ros2_control_params_temp_file
@@ -156,7 +193,7 @@ def _rviz_node(context):
     from laundry_control import config
     from uf_ros_lib.moveit_configs_builder import MoveItConfigsBuilder
 
-    moveit_config = MoveItConfigsBuilder(
+    moveit_config = _builder_with_task_ranges(MoveItConfigsBuilder)(
         context=context, **config.xarm_description_arguments()
     ).to_moveit_configs().to_dict()
 
@@ -307,7 +344,7 @@ def generate_launch_description():
     # The fake controller keeps the stock rate: there is no arm to wait
     # for, so it never overruns the way the real one did.
     fake_moveit = _moveit_include(
-        _moveit_launch_file('_robot_moveit_fake.launch.py'),
+        _fake_with_task_ranges(),
         IfCondition(fake),
         {},
     )

@@ -61,17 +61,6 @@ from ..bucket import axis_basis, seed_cone, to_cylindrical
 
 PLAN_VERSION = 1
 
-# An IK solution with any joint further than this from INTER is a
-# flipped posture, not a grab: the IK solver restarts from random
-# joint values when it cannot converge from the seed, and can land
-# with J1 turned a full revolution or the wrist (J5, J7) flipped.
-# Such a grab has no clean route from INTER. Measured (fake
-# controller, 2026-09-28, three bakes of the grid): real grabs stay
-# within 111 deg of INTER in every joint (approach poses within 96);
-# flipped ones were 176-448 deg. Rejected, so the grab falls back to
-# its next height/tilt instead.
-MAX_TRAVEL_FROM_INTER_DEG = 150.0
-
 # How far into a detected pile to sink the grab, as in grasp/plan.py:
 # half the pile's sensed height above the floor, at most 5 cm.
 FLOOR_GRAB_SINK_FRACTION = 0.5
@@ -135,13 +124,6 @@ def _seeds():
     ]
 
 
-def flipped(joints, inter):
-    """Return True if any joint is past MAX_TRAVEL_FROM_INTER_DEG from INTER."""
-    travel = np.degrees(np.abs(np.asarray(joints) - np.asarray(inter)))
-
-    return bool(travel.max() > MAX_TRAVEL_FROM_INTER_DEG)
-
-
 def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
     """
     Return the best grab at one spot, searching heights then tilts.
@@ -149,8 +131,9 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
     Used for detected items (plan_floor_grab). Must run with the
     gripper padded by the grid's clearance (gripper_padding).
     Checks: grab and approach states, and the straight descent
-    between them; solutions in a flipped posture (see
-    MAX_TRAVEL_FROM_INTER_DEG) are skipped. seeds default to INTER
+    between them. IK only answers inside the task joint ranges
+    (arm/joint_ranges), so a flipped posture - J1 a full turn round,
+    or the wrist flipped - is never offered. seeds default to INTER
     and config.GRAB_IK_SEEDS. grid needs 'heights_m' (tried in
     order, each at every tilt) on top of RETRIEVE_GRID's keys.
     """
@@ -187,8 +170,8 @@ def solve_one(arm, depth_m, floor_angle_deg, grid=None, seeds=None):
 
 # Why _try_pose() found nothing, by how far the best seed got.
 _FAILURES = (
-    'no IK for the grab (out of reach, or the gripper collides there)',
-    'the grab only solves in a flipped posture',
+    'no IK for the grab within the task joint ranges (out of reach, '
+    'the gripper collides there, or it needs a flipped posture)',
     'no IK for the approach pose (it collides, or is out of reach)',
     'the straight descent from the approach pose collides',
 )
@@ -212,20 +195,16 @@ def _try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
         if grab is None:
             continue
 
-        if flipped(grab, inter):
-            stage = max(stage, 1)
-            continue
-
         approach = arm.compute_ik(
             _flange_pose(contact, tool_z, claw_x, approach_m), grab,
         )
 
-        if approach is None or flipped(approach, inter):
-            stage = max(stage, 2)
+        if approach is None:
+            stage = max(stage, 1)
             continue
 
         if arm.first_invalid_state([approach, grab]) is not None:
-            stage = max(stage, 3)
+            stage = max(stage, 2)
             continue
 
         cost = weighted_travel_deg([inter, approach])

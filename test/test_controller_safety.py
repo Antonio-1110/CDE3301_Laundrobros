@@ -38,7 +38,7 @@ class _Self:
 # Fix 2: fall back to OMPL only when the first attempt failed to PLAN
 # ---------------------------------------------------------------
 
-def _move_joints_with(outcomes, loaded=None):
+def _move_joints_with(outcomes, loaded=None, target=None):
     arm = _Self()
     arm.loaded = loaded
     arm.attempts = []
@@ -49,9 +49,19 @@ def _move_joints_with(outcomes, loaded=None):
 
     arm._move_joints_once = once
 
-    ok = XArm7Controller.move_joints(arm, [0.0] * 7)
+    ok = XArm7Controller.move_joints(arm, target or [0.0] * 7)
 
     return ok, arm.attempts
+
+
+def test_a_target_outside_the_task_ranges_is_refused_before_planning():
+    target = [0.0] * 7
+    target[6] = math.radians(-300.0)
+
+    ok, attempts = _move_joints_with([], target=target)
+
+    assert ok is False
+    assert attempts == []
 
 
 def test_planning_failure_falls_back_to_ompl():

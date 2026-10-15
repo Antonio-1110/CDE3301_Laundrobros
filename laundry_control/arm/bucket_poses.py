@@ -48,10 +48,11 @@ POSE_NAMES = ('inter', 'bottom')
 LARGE_SHIFT_M = 0.03
 LARGE_TILT_DEG = 5.0
 
-# An IK solution that turns any joint further than this from the
-# recorded pose is a different posture (the solver can flip the
-# wrist or elbow to get clear), not the same one moved a little: it
-# would change every route. It is rejected, and the pose not derived.
+# A derived pose must be the recorded posture moved a little, not a
+# different one (the solver can flip the wrist or elbow to get clear),
+# which would change every route. IK is asked for a solution with every
+# joint within this of the recorded pose (and inside the task ranges);
+# if there is none, the pose is not derived.
 MAX_JOINT_CHANGE_DEG = 30.0
 
 
@@ -132,6 +133,7 @@ def solve(arm, log=print):
     previously derived one), the one closest to the recorded pose in
     weighted joint travel wins.
     """
+    from .joint_ranges import task_limits
     from .transfers import weighted_travel_deg
 
     recorded = config.recorded_poses()
@@ -149,17 +151,15 @@ def solve(arm, log=print):
         )
 
         candidates = []
+        near_recorded = task_limits(
+            around=recorded[name],
+            within_rad=np.radians(MAX_JOINT_CHANGE_DEG),
+        )
 
         for seed in seeds:
-            joints = arm.compute_ik(pose, seed)
+            joints = arm.compute_ik(pose, seed, limits=near_recorded)
 
-            if (
-                joints is not None
-                and np.degrees(
-                    np.abs(np.asarray(joints) - recorded[name])
-                ).max() <= MAX_JOINT_CHANGE_DEG
-                and arm.state_is_valid(joints)
-            ):
+            if joints is not None and arm.state_is_valid(joints):
                 candidates.append(joints)
 
         if not candidates:
