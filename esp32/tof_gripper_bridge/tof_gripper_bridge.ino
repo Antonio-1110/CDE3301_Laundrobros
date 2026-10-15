@@ -26,12 +26,10 @@
 
 #include "config.h"
 
-// Pins. Wemos/LOLIN D1 mini ESP32 (MH-ET LIVE MiniKit) defaults - TO
-// CONFIRM against the rig's board and wiring.
-// ESP32-C3 SuperMini: SDA 8, SCL 9, servo e.g. 4.
-#define I2C_SDA_PIN 21
-#define I2C_SCL_PIN 22
-#define SERVO_PIN 18
+// Pins: ESP32-C3 SuperMini.
+#define I2C_SDA_PIN 8
+#define I2C_SCL_PIN 9
+#define SERVO_PIN 20
 
 static const char *T_RANGE = TOPIC_PREFIX "/tof/range";
 static const char *T_PING = TOPIC_PREFIX "/time/ping";
