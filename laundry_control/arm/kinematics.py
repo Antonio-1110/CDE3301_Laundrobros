@@ -20,6 +20,7 @@ import numpy as np
 from sensor_msgs.msg import JointState
 
 from .joint_path import densify, within_joint_limits
+from .joint_ranges import constraints, outside, task_limits
 from .. import config
 
 # State-validity requests are sent ONE AT A TIME. With several in
@@ -89,13 +90,23 @@ class MoveItQueries:
             ]),
         )
 
-    def compute_ik(self, pose, seed, avoid_collisions=True, timeout=0.2):
+    def compute_ik(
+        self, pose, seed, avoid_collisions=True, timeout=0.2, limits=None,
+    ):
         """
         Solve IK for the flange at `pose` (base_frame), seeded at `seed`.
 
         Returns 7 joint angles in JOINT_NAMES order, or None. The
         seed matters: the xArm7 is redundant, so the solver returns
         the solution nearest the seed's elbow configuration.
+
+        The solver searches inside the task joint ranges: MoveIt's
+        robot model has them as its joint limits (laundry_bringup.
+        launch.py, joint_ranges.add_to_moveit_limits), so it never
+        finds a flipped posture. limits=(lower, upper) narrows that
+        further; it goes to MoveIt as constraints on the request,
+        which reject an answer outside them (MoveIt then reports no
+        solution - it does not search on).
         """
         client = self._client('_ik_client', GetPositionIK, '/compute_ik')
 
@@ -112,6 +123,10 @@ class MoveItQueries:
         stamped.header.frame_id = self.base_frame
         stamped.pose = pose
         request.ik_request.pose_stamped = stamped
+        if limits is not None:
+            request.ik_request.constraints = constraints(
+                limits, self.JOINT_NAMES
+            )
 
         response = self._call(client, request)
 
@@ -124,28 +139,43 @@ class MoveItQueries:
                 response.solution.joint_state.position,
             )
         )
+        joints = [solution[name] for name in self.JOINT_NAMES]
 
-        return [solution[name] for name in self.JOINT_NAMES]
+        # MoveIt keeps to these itself, with two exceptions: KDL hands
+        # back a seed that already solves the pose unchanged, even
+        # outside the model's limits (measured on the fake controller,
+        # 2026-10-14); and a move_group started before the ranges were
+        # in its model knows nothing of them.
+        beyond = outside(
+            joints, limits if limits is not None else task_limits()
+        )
+
+        if beyond:
+            self.get_logger().warning(
+                'IK solution outside the joint ranges ('
+                + '; '.join(beyond) + '); ignoring it. If every solution '
+                'is, restart the bring-up so MoveIt loads '
+                'config.JOINT_TASK_RANGES_DEG.'
+            )
+            return None
+
+        return joints
 
     def state_is_valid(self, joints, limits=None):
         """
         Return True if the state is within limits and collision-free.
 
-        Limits are config.JOINT_*_LIMITS_RAD less JOINT_LIMIT_MARGIN_RAD,
-        checked here because MoveIt's validity service does not; or
+        Limits default to joint_ranges.task_limits() (the task ranges,
+        inside the hard limits less JOINT_LIMIT_MARGIN_RAD), checked
+        here because MoveIt's validity service does not; or
         limits=(lower, upper), already including any margin (see
         joint_path.limits_no_closer_than). A state MoveIt never
         answers for counts as invalid.
         """
         if limits is None:
-            inside = within_joint_limits(
-                joints,
-                config.JOINT_LOWER_LIMITS_RAD,
-                config.JOINT_UPPER_LIMITS_RAD,
-                config.JOINT_LIMIT_MARGIN_RAD,
-            )
-        else:
-            inside = within_joint_limits(joints, limits[0], limits[1])
+            limits = task_limits()
+
+        inside = within_joint_limits(joints, limits[0], limits[1])
 
         if not inside:
             return False
@@ -165,14 +195,9 @@ class MoveItQueries:
         beyond = [
             (name, 'joint limit')
             for name, q, lo, hi in zip(
-                self.JOINT_NAMES,
-                joints,
-                config.JOINT_LOWER_LIMITS_RAD,
-                config.JOINT_UPPER_LIMITS_RAD,
+                self.JOINT_NAMES, joints, *task_limits()
             )
-            if not within_joint_limits(
-                [q], [lo], [hi], config.JOINT_LIMIT_MARGIN_RAD
-            )
+            if not within_joint_limits([q], [lo], [hi])
         ]
 
         if beyond:

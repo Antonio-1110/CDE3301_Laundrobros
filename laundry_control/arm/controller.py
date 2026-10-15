@@ -35,6 +35,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .geometry import tool_z_from_quaternion
 from .joint_path import densify, limits_no_closer_than, time_path
+from .joint_ranges import outside, task_limits
 from .kinematics import MoveItQueries
 from .moveit_errors import (
     describe_moveit_error,
@@ -594,12 +595,28 @@ class XArm7Controller(MoveItQueries, Node):
             Falling back is safe precisely because Pilz fails
             rather than degrading: a failure is a clean signal, not
             a trajectory that half-works.
+
+        The planners work inside the task joint ranges: MoveIt's robot
+        model has them as its joint limits (laundry_bringup.launch.py,
+        joint_ranges.add_to_moveit_limits). A target outside them is
+        refused here, before planning, with the joints named.
         """
         if len(joint_angles) != 7:
 
             raise ValueError(
                 'xArm7 requires exactly 7 joint angles.'
             )
+
+        beyond = outside(joint_angles, task_limits())
+
+        if beyond:
+            self.get_logger().error(
+                'Joint-space target is outside the task joint ranges '
+                '(config.JOINT_TASK_RANGES_DEG): ' + '; '.join(beyond)
+                + '. Not moving; `laundry move jointN` keeps the full '
+                'hard limits.'
+            )
+            return False
 
         attempts = [(pipeline_id, planner_id)]
 
@@ -1234,22 +1251,12 @@ class XArm7Controller(MoveItQueries, Node):
     def _why_invalid(self, joints, limits=None):
         """Say why a state fails state_is_valid: a joint limit, or contacts."""
         if limits is None:
-            limits = (
-                np.asarray(config.JOINT_LOWER_LIMITS_RAD)
-                + config.JOINT_LIMIT_MARGIN_RAD,
-                np.asarray(config.JOINT_UPPER_LIMITS_RAD)
-                - config.JOINT_LIMIT_MARGIN_RAD,
-            )
+            limits = task_limits()
 
-        beyond = [
-            f'J{i + 1} at {math.degrees(q):+.1f} deg, allowed '
-            f'{math.degrees(lo):+.1f} .. {math.degrees(hi):+.1f}'
-            for i, (q, lo, hi) in enumerate(zip(joints, *limits))
-            if not lo <= q <= hi
-        ]
+        beyond = outside(joints, limits)
 
         if beyond:
-            return 'too close to a joint limit: ' + '; '.join(beyond)
+            return 'outside the joint ranges: ' + '; '.join(beyond)
 
         response = self._validity_response(joints)
 
@@ -1278,11 +1285,13 @@ class XArm7Controller(MoveItQueries, Node):
         returns False. Timing is minimum-jerk with the fastest joint
         peaking at max_velocity_rad_s.
 
-        Joints must keep config.JOINT_LIMIT_MARGIN_RAD from their limits.
-        no_closer_to_limits relaxes that for a joint that STARTS inside
-        the margin: it may stay or move away, never closer (see
-        joint_path.limits_no_closer_than). For moves made by hand,
-        which must be able to leave such a pose.
+        Joints must stay inside the task ranges (joint_ranges.
+        task_limits; a joint that starts outside may stay or come
+        back in). no_closer_to_limits instead allows the full hard
+        limits less config.JOINT_LIMIT_MARGIN_RAD, and a joint that
+        STARTS inside the margin may stay or move away, never closer
+        (see joint_path.limits_no_closer_than). For moves made by
+        hand, which must be able to leave such a pose.
         """
         current = self.get_current_joints()
 
@@ -1294,7 +1303,7 @@ class XArm7Controller(MoveItQueries, Node):
         if np.abs(waypoints[-1] - waypoints[0]).max() < 1e-4:
             return True
 
-        limits = None
+        limits = task_limits(start=current)
 
         if no_closer_to_limits:
             limits = limits_no_closer_than(

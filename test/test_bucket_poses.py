@@ -153,7 +153,7 @@ class _IkArm:
     def set_arm_padding(self, padding_m):
         self.paddings.append(padding_m)
 
-    def compute_ik(self, pose, seed):
+    def compute_ik(self, pose, seed, limits=None):
         if not self.reachable:
             return None
         return list(np.asarray(seed) + 0.01)
@@ -196,22 +196,35 @@ def test_solve_reports_what_it_cannot_reach(tmp_path, monkeypatch):
     assert set(failures) == {'inter', 'bottom'}
 
 
-def test_solve_rejects_a_different_posture(tmp_path, monkeypatch):
+def test_solve_asks_ik_for_the_recorded_posture_only(tmp_path, monkeypatch):
     monkeypatch.setattr(
         config, 'bucket_poses_path', lambda: str(tmp_path / 'none.yaml')
     )
 
     class _FlippingArm(_IkArm):
+        """Only finds J7 flipped 200 deg; honours limits, as MoveIt does."""
 
-        def compute_ik(self, pose, seed):
-            flipped = list(seed)
+        limits = []
+
+        def compute_ik(self, pose, seed, limits=None):
+            self.limits.append(limits)
+            flipped = np.asarray(seed, dtype=float).copy()
             flipped[6] += np.radians(200.0)
-            return flipped
+            inside = np.all(flipped >= limits[0]) and np.all(flipped <= limits[1])
+            return list(flipped) if inside else None
 
-    poses, failures = bucket_poses.solve(_FlippingArm(), log=lambda *_: None)
+    arm = _FlippingArm()
+    poses, failures = bucket_poses.solve(arm, log=lambda *_: None)
 
     assert poses == {}
     assert set(failures) == {'inter', 'bottom'}
+
+    recorded = np.asarray(config.INTER_RECORDED)
+    lower, upper = arm.limits[0]
+    window = np.radians(bucket_poses.MAX_JOINT_CHANGE_DEG) + 1e-9
+    assert np.all(lower >= recorded - window)
+    assert np.all(upper <= recorded + window)
+    assert np.all(lower <= recorded) and np.all(recorded <= upper)
 
 
 def test_routes_baked_from_another_inter_are_not_used():

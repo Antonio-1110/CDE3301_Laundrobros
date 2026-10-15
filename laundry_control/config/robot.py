@@ -27,7 +27,8 @@ JOINT_STATE_TOPIC = '/joint_states'
 #     (the URDF defaults), including J7 +/-360 deg - the scan and grabs
 #     turn J7 past -180 deg (INTER is -155, grabs reach ~-197). The
 #     manufacturer's default, limited:=true, narrows J7 to +/-178 deg.
-#     It also narrows J2 to -118..+120 deg (was +/-125).
+#     It also narrows J2 to -118..+120 deg (was +/-125). Automatic
+#     motion is kept to JOINT_TASK_RANGES_DEG instead.
 # =============================================================
 
 GRIPPER_LINK = 'other_geometry_link'
@@ -110,6 +111,36 @@ JOINT_UPPER_LIMITS_RAD = [
     2.0 * math.pi, math.pi, 2.0 * math.pi,
 ]
 JOINT_LIMIT_MARGIN_RAD = math.radians(2.0)
+
+# Task joint ranges (degrees) for AUTOMATIC motion (issue #7). With
+# XARM_LIMITED False, J1, J3, J5 and J7 may turn +/-360 deg, so the IK
+# solver could hand back a posture with J1 a full turn round or the
+# wrist flipped, and OMPL could take wild routes. Instead of filtering
+# such answers afterwards, MoveIt's robot model gets these as its joint
+# limits (laundry_bringup.launch.py, arm/joint_ranges.
+# add_to_moveit_limits; xarm_ros2 stays unmodified): KDL's iterations
+# and random restarts, OMPL's sampling and Pilz's checks all stay
+# inside them. Our own checks (state_is_valid, straight joint moves,
+# baked routes) use the same ranges. Changing them needs a bring-up
+# restart.
+#
+# Each is the range used by every baked motion and named pose on
+# 2026-10-08 plus about 30 deg (J7 includes the baseline scans'
+# -239 .. -75), rounded; test_joint_ranges checks the baked plans still
+# fit. The hard limits less JOINT_LIMIT_MARGIN_RAD still apply on top.
+# `laundry move jointN` (a straight move, not planned by MoveIt) keeps
+# the full hard limits. A straight move that STARTS outside a range
+# (after such a hand move) may stay there or come back in, never go
+# further out; `laundry move inter` gets back that way.
+JOINT_TASK_RANGES_DEG = (
+    (-80.0, 170.0),    # J1   used  -48 .. 138
+    (-30.0, 143.0),    # J2   used    0 .. 113
+    (-210.0, 30.0),    # J3   used -177 ..   0
+    (-30.0, 157.0),    # J4   used    0 .. 127
+    (-70.0, 145.0),    # J5   used  -37 .. 115
+    (-110.0, 125.0),   # J6   used  -79 ..  95
+    (-270.0, 30.0),    # J7   used -239 ..   0
+)
 
 # Planning pipelines for joint-space moves.
 #

@@ -165,43 +165,6 @@ def test_a_changed_grid_is_reported(tmp_path, monkeypatch):
     assert 'clearance_m' in retrieve_grid.grid_mismatch(path)
 
 
-class _IkArm:
-    """IK flips J1 a full turn at the first height, and is fine after."""
-
-    def __init__(self):
-        self.heights = []
-
-    def compute_ik(self, pose, seed):
-        # The approach pose is solved seeded from the grab.
-        solution = np.array(config.get_named_pose('inter')) + 0.1
-
-        if len(self.heights) == 1:
-            solution[0] += np.radians(360.0)
-
-        return list(solution)
-
-    def first_invalid_state(self, waypoints):
-        return None
-
-
-def test_a_flipped_ik_solution_is_skipped_for_the_next_height(monkeypatch):
-    arm = _IkArm()
-    grid = dict(config.RETRIEVE_GRID, heights_m=[0.02, 0.03], tilts_deg=[0.0])
-
-    real_geometry = retrieve_grid.grab_geometry
-
-    def geometry(depth, angle, height, tilt, cone=None):
-        arm.heights.append(height)
-        return real_geometry(depth, angle, height, tilt, cone)
-
-    monkeypatch.setattr(retrieve_grid, 'grab_geometry', geometry)
-
-    grab = retrieve_grid.solve_one(arm, 0.30, 0.0, grid, seeds=[[0.0] * 7])
-
-    assert grab['height_m'] == pytest.approx(0.03)
-    assert not retrieve_grid.flipped(grab['grab'], config.get_named_pose('inter'))
-
-
 class _ReachArm:
     """Reaches a grab only at the given (height, tilt) pairs."""
 
@@ -210,13 +173,13 @@ class _ReachArm:
         self.current = None
         self.seen = []
 
-    def compute_ik(self, pose, seed):
+    def compute_ik(self, pose, seed, limits=None):
         if self.current not in self.reachable:
             return None
 
         return list(np.array(config.get_named_pose('inter')) + 0.1)
 
-    def first_invalid_state(self, waypoints):
+    def first_invalid_state(self, waypoints, limits=None):
         return None
 
 
@@ -280,7 +243,7 @@ def test_the_sweep_solves_each_target_exactly_as_placed(monkeypatch):
 
 def test_an_unreachable_approach_is_named(monkeypatch):
     class _NoApproach(_ReachArm):
-        def compute_ik(self, pose, seed):
+        def compute_ik(self, pose, seed, limits=None):
             self.calls = getattr(self, 'calls', 0) + 1
             return super().compute_ik(pose, seed) if self.calls % 2 else None
 

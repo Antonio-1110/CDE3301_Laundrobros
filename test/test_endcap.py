@@ -139,7 +139,7 @@ class _StubArm:
     def get_logger(self):
         return _Logger()
 
-    def first_invalid_state(self, waypoints):
+    def first_invalid_state(self, waypoints, limits=None):
         self.calls.append(('check', len(waypoints)))
         return 3 if self.blocked else None
 

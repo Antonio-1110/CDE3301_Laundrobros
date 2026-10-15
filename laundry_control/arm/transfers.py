@@ -57,6 +57,7 @@ from scipy.spatial.transform import Rotation
 import yaml
 
 from .joint_path import time_stop_at_each
+from .joint_ranges import task_limits
 from .. import config
 
 PLAN_VERSION = 1
@@ -797,7 +798,11 @@ def go_to(
             ),
         )
 
-    if arm.first_invalid_state([current, target]) is None:
+    # Widened to where the arm is, as move_joints_linear checks it: a
+    # hand move may have left a joint outside the task ranges.
+    if arm.first_invalid_state(
+        [current, target], limits=task_limits(start=current)
+    ) is None:
         return arm.move_joints_linear(
             target,
             max_velocity_rad_s=max_velocity_rad_s,
@@ -806,7 +811,8 @@ def go_to(
 
     arm.get_logger().warning(
         f'No baked or straight collision-free route to {target_name.upper()} '
-        'from here; falling back to the planner (route not repeatable).'
+        'from here; falling back to the planner (route not repeatable, but '
+        'kept inside the task joint ranges).'
     )
 
     return arm.move_joints(target)
