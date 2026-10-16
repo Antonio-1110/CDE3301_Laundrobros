@@ -6,7 +6,7 @@
 #define WIFI_PASSWORD "your-password"
 
 // The Pi's mDNS name (`hostname` on the Pi + ".local"): mosquitto runs
-// on it (setup/mosquitto). Unlike an IP it survives network changes; the
+// on it (mqtt_broker). Unlike an IP it survives network changes; the
 // Pi is on two networks. If the ESP32 cannot resolve the name, use the
 // Pi's IP from `hostname -I` for the network the ESP32 is on.
 #define MQTT_HOST     "cde3301a-desktop.local"

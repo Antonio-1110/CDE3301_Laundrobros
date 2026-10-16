@@ -2,9 +2,10 @@
 
 `tof_gripper_bridge/` is the ESP32 firmware. It reads the VL53L0X,
 drives the gripper servo, and talks to the Pi over WiFi through
-mosquitto on the Pi (`setup/mosquitto/README.md`). On the Pi, the
-same `tof_sensor` and `gripper_node` nodes switch to it with
-`tof_source:=mqtt gripper_backend:=mqtt`. Nothing after them
+mosquitto on the Pi (`mqtt_broker/README.md`). On the Pi, the
+same `tof_sensor` and `gripper_node` nodes use it by default
+(`tof_source:=mqtt gripper_backend:=mqtt`; `i2c`/`gpio` selects the
+Pi's own wiring). Nothing after them
 changes: the scan recorder and the pipeline see the same topic and
 services.
 

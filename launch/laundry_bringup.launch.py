@@ -39,11 +39,11 @@ not the stock 150 Hz; to compare against stock:
 
     ros2 launch laundry_control laundry_bringup.launch.py control_rate_hz:=150
 
-ToF sensor and gripper on the ESP32 (over MQTT) instead of this Pi's
-I2C/GPIO - defaults from config.TOF_SOURCE / GRIPPER_BACKEND:
+ToF sensor and gripper are on the ESP32 (over MQTT) by default, from
+config.TOF_SOURCE / GRIPPER_BACKEND; for this Pi's I2C/GPIO instead:
 
     ros2 launch laundry_control laundry_bringup.launch.py \\
-        tof_source:=mqtt gripper_backend:=mqtt
+        tof_source:=i2c gripper_backend:=gpio
 
 Scan CSVs: scan_recorder_node's records_dir defaults (when left "")
 to config.scan_records_dir() - the SOURCE tree's scan_records/,

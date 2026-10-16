@@ -2,14 +2,15 @@
 
 The ESP32 (`esp32/tof_gripper_bridge`) owns the ToF sensor and the
 gripper servo, and talks to this Pi over MQTT, through mosquitto
-running on this Pi. Only needed with `tof_source:=mqtt` or
-`gripper_backend:=mqtt` (`config.TOF_SOURCE` / `GRIPPER_BACKEND`).
+running on this Pi. Needed with `tof_source:=mqtt` or
+`gripper_backend:=mqtt`, which are the defaults (`config.TOF_SOURCE` /
+`GRIPPER_BACKEND`). `broker.sh` here starts and checks it.
 
 ## 1. Install and configure mosquitto
 
 ```
 sudo apt install mosquitto mosquitto-clients
-sudo cp setup/mosquitto/laundrobros.conf /etc/mosquitto/conf.d/
+sudo cp mqtt_broker/laundrobros.conf /etc/mosquitto/conf.d/
 sudo systemctl restart mosquitto
 sudo systemctl enable mosquitto
 ```

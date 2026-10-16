@@ -11,7 +11,7 @@ Callbacks run on paho's network thread, not the ROS executor.
 Works with paho-mqtt 1.x (Ubuntu's python3-paho-mqtt) and 2.x (pip).
 paho is imported in MqttLink(), so importing this module needs none.
 
-The broker is mosquitto on this Pi (setup/mosquitto/README.md).
+The broker is mosquitto on this Pi (mqtt_broker/README.md).
 """
 
 import socket

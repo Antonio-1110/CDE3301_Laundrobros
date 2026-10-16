@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Start (if needed) and check the MQTT broker the ESP32 talks to.
 #
-#   setup/mosquitto/broker.sh          make sure mosquitto is up, show status
-#   setup/mosquitto/broker.sh --watch  same, then print every laundrobros/ message
+#   mqtt_broker/broker.sh          make sure mosquitto is up, show status
+#   mqtt_broker/broker.sh --watch  same, then print every laundrobros/ message
 #
 # mosquitto is a systemd service (enabled at boot), so this normally only
 # reports; it starts the service (sudo) when it is not running.

@@ -67,15 +67,7 @@ TOF_SENSOR_OFFSET_Z = 0.028
 # GRIPPER_OFFSET_Z is a user-reported measurement, not yet verified
 # against the physical hardware - confirm it (HARDWARE_TESTS.md)
 # before trusting it for an unattended grasp.
-GRIPPER_OFFSET_X = 0.0
-GRIPPER_OFFSET_Y = 0.0
 GRIPPER_OFFSET_Z = 0.15
-
-# The claw is roughly 6cm wide, so it doesn't need pinpoint lateral
-# accuracy - being within this tolerance of the intended point is
-# still graspable. A documented error budget, not an offset: nothing
-# applies it as a coordinate correction.
-GRIPPER_LATERAL_TOLERANCE_M = 0.03
 
 # Raw servo angles that open/close the physical claw. Which angle
 # does what depends on how the claw is linked to the servo horn;
@@ -107,14 +99,16 @@ SERVO_MAX_PULSE_WIDTH_S = 2.5 / 1000
 # The protocol, and how the ESP32's timestamps are synced to this
 # Pi's clock: hardware/esp32_protocol.py. The ESP32's firmware:
 # esp32/tof_gripper_bridge. The broker (mosquitto, on this Pi):
-# setup/mosquitto/README.md.
+# mqtt_broker/README.md.
 # =============================================================
 
 TOF_SOURCES = ('i2c', 'mqtt')
 GRIPPER_BACKENDS = ('gpio', 'mqtt')
 
-TOF_SOURCE = 'i2c'
-GRIPPER_BACKEND = 'gpio'
+# The ESP32 is mounted on the arm: wireless by default. Use
+# tof_source:=i2c gripper_backend:=gpio for the Pi's own wiring.
+TOF_SOURCE = 'mqtt'
+GRIPPER_BACKEND = 'mqtt'
 
 # The broker runs on this Pi, so the nodes reach it on localhost;
 # the ESP32 is given the Pi's LAN address in its own config.
