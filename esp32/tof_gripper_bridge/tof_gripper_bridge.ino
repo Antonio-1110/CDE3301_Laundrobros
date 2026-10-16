@@ -50,6 +50,7 @@ int64_t nextTofInitUs = 0;
 int64_t nextConnectUs = 0;
 int64_t nextPollUs = 0;
 int64_t lastReadingUs = 0;
+int64_t nextStatusUs = 0;
 
 // The move in progress, acknowledged once it has settled.
 bool moving = false;
@@ -182,6 +183,96 @@ void pollTof() {
   mqtt.publish(T_RANGE, out);
 }
 
+// ---- Connection diagnostics (serial monitor, 115200) -----------------
+
+const char *wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS: return "IDLE (starting)";
+    case WL_NO_SSID_AVAIL: return "NO_SSID_AVAIL (network not seen)";
+    case WL_SCAN_COMPLETED: return "SCAN_COMPLETED";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED (wrong password?)";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+  }
+}
+
+// ESP-IDF disconnect reasons that matter here; others print as a number.
+const char *disconnectReason(uint8_t reason) {
+  switch (reason) {
+    case 2: return "AUTH_EXPIRE";
+    case 15: return "4WAY_HANDSHAKE_TIMEOUT (wrong password)";
+    case 201: return "NO_AP_FOUND (SSID not seen: wrong name, 5 GHz only, "
+                     "or out of range)";
+    case 202: return "AUTH_FAIL (wrong password or security mode)";
+    case 203: return "ASSOC_FAIL";
+    case 204: return "HANDSHAKE_TIMEOUT (wrong password)";
+    case 205: return "CONNECTION_FAIL";
+    default: return "";
+  }
+}
+
+void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.printf("WiFi: joined '%s' (channel %u)\n", WIFI_SSID,
+                    info.wifi_sta_connected.channel);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.printf("WiFi: got IP %s, RSSI %d dBm\n",
+                    WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
+      uint8_t reason = info.wifi_sta_disconnected.reason;
+      Serial.printf("WiFi: disconnected, reason %u %s\n", reason,
+                    disconnectReason(reason));
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// What the board can actually see: is the SSID there, how strong, and
+// on which channel (the C3 only does 2.4 GHz, channels 1-13).
+void scanForSsid() {
+  Serial.println("WiFi: scanning...");
+  int n = WiFi.scanNetworks();
+  if (n < 0) {
+    Serial.printf("WiFi: scan failed (%d)\n", n);
+    return;
+  }
+
+  bool found = false;
+  for (int i = 0; i < n; i++) {
+    bool match = WiFi.SSID(i) == WIFI_SSID;
+    found = found || match;
+    Serial.printf("  %s '%s' ch %d, %d dBm%s\n", match ? ">>" : "  ",
+                  WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i),
+                  WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? ", open" : "");
+  }
+  Serial.printf("WiFi: %d networks, '%s' %s\n", n, WIFI_SSID,
+                found ? "SEEN" : "NOT SEEN (2.4 GHz only; check the name)");
+  WiFi.scanDelete();
+}
+
+// One line every 5 s: where the link is, whatever the other output says.
+void printStatus() {
+  if (nowUs() < nextStatusUs) return;
+  nextStatusUs = nowUs() + 5000000;
+
+  wl_status_t wifi = WiFi.status();
+  Serial.printf("status: wifi=%s", wifiStatusName(wifi));
+  if (wifi == WL_CONNECTED) {
+    Serial.printf(" ip=%s rssi=%d", WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI());
+  }
+  Serial.printf(" mqtt=%s tof=%s readings=%lu\n",
+                mqtt.connected() ? "connected" : "DOWN",
+                tofOk ? "ok" : "DOWN", (unsigned long)seq);
+}
+
 void keepConnected() {
   if (WiFi.status() != WL_CONNECTED || mqtt.connected()) return;
   if (nowUs() < nextConnectUs) return;
@@ -190,7 +281,12 @@ void keepConnected() {
   // Last will: the broker announces "offline" if this board drops off.
   if (!mqtt.connect(MQTT_CLIENT, nullptr, nullptr, T_STATUS, 1, true,
                     "offline")) {
-    Serial.printf("MQTT connect failed (%d)\n", mqtt.state());
+    IPAddress broker;
+    bool resolved = WiFi.hostByName(MQTT_HOST, broker) == 1;
+    Serial.printf("MQTT connect to %s:%d failed (state %d); host %s %s\n",
+                  MQTT_HOST, MQTT_PORT, mqtt.state(),
+                  resolved ? "resolves to" : "does NOT resolve",
+                  resolved ? broker.toString().c_str() : "(use the Pi's IP)");
     return;
   }
 
@@ -203,8 +299,18 @@ void keepConnected() {
 
 void setup() {
   Serial.begin(115200);
+  // The C3's USB serial only appears once the monitor attaches.
+  uint32_t waitStart = millis();
+  while (!Serial && millis() - waitStart < 3000) delay(10);
 
+  Serial.println();
+  Serial.printf("laundrobros ESP32 bridge: WiFi '%s' -> MQTT %s:%d\n",
+                WIFI_SSID, MQTT_HOST, MQTT_PORT);
+
+  WiFi.onEvent(onWifiEvent);
   WiFi.mode(WIFI_STA);
+  Serial.printf("WiFi: MAC %s\n", WiFi.macAddress().c_str());
+  scanForSsid();
   // Power save holds packets for up to a beacon interval (~100 ms):
   // it would wreck the clock sync and the reading latency.
   WiFi.setSleep(false);
@@ -228,6 +334,7 @@ void loop() {
   mqtt.loop();  // Delivers pings and commands (onMessage).
 
   pollTof();  // Publishing just fails while disconnected.
+  printStatus();
 
   finishMove();
 }
