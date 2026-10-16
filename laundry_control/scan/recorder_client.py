@@ -159,10 +159,6 @@ class ScanRecorderClient:
             timeout_sec=timeout_sec,
         )
 
-    def clear_async(self):
-        """Reset scan_recorder_node's accumulated points (fire-and-forget)."""
-        self._call_async(self._clear_client, 'clear_scan')
-
     def save_async(self):
         """Ask scan_recorder_node to checkpoint to CSV (fire-and-forget)."""
         self._call_async(self._save_client, 'save_scan')

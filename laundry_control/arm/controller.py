@@ -894,33 +894,6 @@ class XArm7Controller(MoveItQueries, Node):
             acceleration=acceleration,
         )
 
-    def rotate_joint6(
-        self,
-        delta_deg,
-        velocity=0.3,
-        acceleration=0.3,
-    ):
-        """
-        Rotate ONLY J6 relative to its current position.
-
-        For example,
-            rotate_joint6(-75)
-
-        means:
-
-            J1 -> current J1
-            ...
-            J5 -> current J5
-            J6 -> current J6 - 75 deg
-            J7 -> current J7
-        """
-        return self._rotate_joint_relative(
-            joint_index=5,
-            delta_deg=delta_deg,
-            velocity=velocity,
-            acceleration=acceleration,
-        )
-
     def rotate_joint7(
         self,
         delta_deg,

@@ -80,13 +80,6 @@ def rank_clusters(clusters):
     )
 
 
-def select_target_cluster(clusters):
-    """Return the single best-ranked cluster, or None if there are none."""
-    ranked = rank_clusters(clusters)
-
-    return ranked[0] if ranked else None
-
-
 def describe_grasp(grasp):
     """One-line summary of a GraspTarget, for the log."""
     return (

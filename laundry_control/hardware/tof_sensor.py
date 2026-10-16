@@ -181,10 +181,6 @@ class ToFSensor:
         self.i2c = busio.I2C(board.SCL, board.SDA)
         self.sensor = adafruit_vl53l0x.VL53L0X(self.i2c)
 
-    def get_distance_mm(self):
-        """Return current distance in millimeters."""
-        return self.sensor.range
-
     def get_distance_cm(self):
         """Return current calibrated distance in centimeters."""
         distance_mm = self.sensor.range

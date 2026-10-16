@@ -95,9 +95,6 @@ class FakeRecorder:
         """Label nothing: there are no readings."""
         return True
 
-    def clear_async(self):
-        """Clear nothing: there is no accumulated state."""
-
     def save_async(self):
         """Skip mid-scan checkpoints; only the final save matters."""
 

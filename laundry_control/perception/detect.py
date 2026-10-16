@@ -244,20 +244,6 @@ def load_baseline_scans(
     return [load_points(path, segments) for path in paths]
 
 
-def load_baseline_xyz(
-    baseline: Union[str, Sequence[str]],
-) -> np.ndarray:
-    """
-    All baseline points pooled into one (N, 3) array.
-
-    Anything that wants a single cloud of
-    empty-bucket points rather than the per-scan split the model
-    builder uses, and callers should not have to care whether
-    `baseline` names one CSV or a directory of them.
-    """
-    return np.concatenate(load_baseline_scans(baseline), axis=0)
-
-
 @dataclass
 class IntrusionResult:
     """
