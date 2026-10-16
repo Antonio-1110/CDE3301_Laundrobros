@@ -315,6 +315,11 @@ void setup() {
   // it would wreck the clock sync and the reading latency.
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Many ESP32-C3 SuperMini boards cannot finish the WiFi handshake
+  // (disconnect reason 2, AUTH_EXPIRE) at full transmit power, even
+  // with a strong signal: their antenna is badly matched. Lowering it
+  // fixes those boards; remove this line if yours joins without it.
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.setAutoReconnect(true);
 
   snprintf(bootId, sizeof bootId, "%08lx", (unsigned long)esp_random());
