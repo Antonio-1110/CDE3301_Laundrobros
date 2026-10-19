@@ -84,6 +84,19 @@ def clean(target):
     return result
 
 
+def generated_for(file_path=None):
+    """Return what the targets were generated from, or None if hand-placed."""
+    file_path = file_path or path()
+
+    if not os.path.isfile(file_path):
+        return None
+
+    with open(file_path) as handle:
+        document = yaml.safe_load(handle) or {}
+
+    return document.get('generated')
+
+
 def default_targets():
     """Return the starting layout (see _DEFAULT_TILT_BY_DEPTH)."""
     return [
@@ -115,8 +128,13 @@ def load(file_path=None):
     return [clean(target) for target in document.get('grabs', [])]
 
 
-def save(targets, file_path=None):
-    """Write the targets (visiting order) as YAML."""
+def save(targets, file_path=None, generated=None):
+    """
+    Write the targets (visiting order) as YAML.
+
+    generated: what a generator made them from (grasp/pile_layers.py:
+    config.PILE as plain data); None for hand-placed targets.
+    """
     file_path = file_path or path()
 
     directory = os.path.dirname(file_path)
@@ -124,17 +142,26 @@ def save(targets, file_path=None):
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    document = {
-        'version': TARGETS_VERSION,
-        'grabs': [clean(target) for target in targets],
-    }
+    document = {'version': TARGETS_VERSION}
+
+    if generated is not None:
+        document['generated'] = generated
+
+    document['grabs'] = [clean(target) for target in targets]
 
     with open(file_path, 'w') as handle:
         handle.write(
             "# The sweep's grabs, in visiting order "
             '(grasp/grab_targets.py).\n'
-            '# Edit by dragging: `laundry plan edit-grabs`; then '
-            '`./rebake.sh retrieve`.\n'
+            + (
+                '# Generated from config.PILE by `laundry plan bake '
+                'retrieve` (grasp/pile_layers.py); it regenerates when\n'
+                '# PILE changes. Dragging a grab in `laundry plan '
+                'edit-grabs` and saving drops the mark and keeps your list.\n'
+                if generated is not None else
+                '# Edit by dragging: `laundry plan edit-grabs`; then '
+                '`./rebake.sh retrieve`.\n'
+            )
         )
         yaml.safe_dump(document, handle, sort_keys=False, width=100)
 

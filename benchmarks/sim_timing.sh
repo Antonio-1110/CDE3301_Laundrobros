@@ -20,7 +20,7 @@
 #   full      laundry scan --full (adds the end scan)
 #   step06    quick scan with --step 0.06
 #   step12    quick scan with --step 0.12
-#   sweep     laundry preplanned: all 12 grabs of the generated grid
+#   sweep     laundry preplanned: every grab of the generated sweep
 #   run       laundry run on a scan with an item in it (needs
 #             LAUNDRY_SCAN=<a scan csv that detects something>)
 #

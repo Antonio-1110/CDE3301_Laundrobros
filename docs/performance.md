@@ -21,11 +21,11 @@ Where the quick scan's 97 s goes: 7 s from INTER to the mouth, 35 s inward strok
 
 | What | Time (simulation) | On the rig |
 |---|---|---|
-| Sensorless sweep, all 12 grabs (`laundry preplanned`) | 196 s | about 3.8 min |
-| One grab of the sweep, INTER to INTER via DROP | 11-22 s, mean 15.7 s | mean about 18.7 s |
+| Sensorless sweep, all 24 grabs of the full-drum plan (`laundry preplanned`) | 346 s | about 7 min |
+| One grab of the sweep, INTER to INTER via DROP | 12-17 s, mean 14.4 s | mean about 17.4 s |
 | `laundry run`, one item in the bucket | **125 s** | about 130 s |
 
-- **Per grab:** deeper grabs take longer: 11-16 s at 40 and 30 cm from the closed end, 16-22 s at 10 cm. The rig adds about 3 s per grab, for the claw to close and to open at DROP.
+- **The sweep** is 2 layers of 12 grabs (about 19 and 13 cm above the floor, for a pile top at 25 cm, `config.PILE`): 163 s for the first layer, 173 s for the second. Deeper grabs take longer (13-16 s at 10 cm from the closed end, 13-14 s elsewhere). The rig adds about 3 s per grab, for the claw to close and to open at DROP. A fuller or emptier drum changes the heights and the number of layers; see `docs/operating.md`. (An earlier version of these numbers, 196 s for 12 grabs, was measured on the old plan that aimed 2 cm above the floor.)
 - **`laundry run`, one item (125 s):** scan 93 s (75%), detection 0.4 s, grasp 28 s. The grasp is about 10 s of reachability probing and 18 s of moving, including the drop. The rig adds about 4.5 s for the three gripper moves (open before the scan, close, release).
 - **`laundry clear` is an estimate, not a measurement.** Each further item costs a rescan: about 97 s scan, 30 s grasp and 4.5 s of gripper, so **about 2.2 min per item**, plus about 1.6 min for the final scan that finds nothing (about 2.5 min if the end scan runs on its own). With the grab grid first (`--no-grabs` skips it), add the sweep's 3.8 min.
 
@@ -60,7 +60,7 @@ The upper wall and ceiling are outside the scan's design: 418 of 1200 items plac
 
 ## Reachability
 
-`laundry scene check` on the fake controller: all 12 generated grab spots, their approach routes, HOME, DROP, BOTTOM and `drop_return` are collision-free under the 3 cm arm padding. One problem is reported: `scan_plans/retrieve.yaml` was solved for other settings (`grab_targets.yaml` and `clearance_m` changed). Re-bake it (`./rebake.sh retrieve`) before treating the sweep times as final, since they were measured with that plan.
+`laundry scene check` on the fake controller, with the generated plan for a pile top at 25 cm: all 24 sweep grabs and their approach routes, HOME, DROP, BOTTOM and `drop_return` are collision-free under the 3 cm arm padding. Generating the plan, which tries heights and tilts for each of 12 spots, takes seconds; baking the routes and timing them takes the rest of the 2.5 minutes of `./rebake.sh retrieve`. The reachable heights, from the generator on the fake controller (a pile top at 25 cm): about 19 cm above the floor at 45° tilt near the mouth and 60° deeper, then 13 cm at 45°. Those come from collision checks against the modelled bucket, so confirm the clearance on the rig (HARDWARE_TESTS 17b).
 
 ## What only the rig can tell
 

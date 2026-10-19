@@ -501,14 +501,20 @@ def save(grabs, path=None, baked_on='', targets=None):
         yaml.safe_dump(document, handle, sort_keys=False, width=100)
 
 
-def grid_mismatch(path=None, targets=None):
+def grid_mismatch(path=None, targets=None, generated=None):
     """
     Return why retrieve.yaml no longer matches what it was baked for, or None.
 
     The grab targets (scan_plans/grab_targets.yaml), the gripper
-    clearance and the gripper offset, against now.
+    clearance and the gripper offset, against now; and, when the
+    targets were generated from config.PILE (pile_layers), whether
+    PILE has changed since (`generated`: what they were generated
+    from, default: read from the targets file).
     """
+    from . import pile_layers
+
     path = path or plan_path()
+    generated = grab_targets.generated_for() if targets is None else generated
 
     if not os.path.isfile(path):
         return None
@@ -531,6 +537,9 @@ def grid_mismatch(path=None, targets=None):
         baked and not same(values(baked), values(targets))
     ):
         changed.append('grab_targets.yaml')
+
+    if pile_layers.pile_changed(generated):
+        changed.append('config.PILE')
 
     if not same(
         document.get('clearance_m', -1.0), config.RETRIEVE_GRID['clearance_m']

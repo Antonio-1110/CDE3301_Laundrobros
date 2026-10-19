@@ -172,9 +172,51 @@ def cmd_plan(args):
                     return status
 
         if args.which in ('retrieve', 'all'):
-            from ..grasp import grab_targets
+            from ..grasp import grab_targets, pile_layers
 
             placed = grab_targets.load()
+            generated = grab_targets.generated_for()
+
+            # Generate the list from config.PILE when asked, when there
+            # is none, or when it was generated for another PILE;
+            # a hand-placed list (edit-grabs) is kept.
+            if (
+                args.regenerate
+                or not placed
+                or pile_layers.pile_changed(generated)
+            ):
+                print(
+                    'Generating the sweep from config.PILE '
+                    f'(pile top {config.PILE["top_height_m"] * 100:.0f} cm '
+                    'above the floor)...'
+                )
+                placed, gen_misses, layers = pile_layers.generate(
+                    arm, log=print
+                )
+
+                if not placed:
+                    print(
+                        'No sweep grabs for this pile: its top is too low '
+                        f'for the {config.PILE["min_height_m"] * 100:.0f} cm '
+                        'lowest sweep height, or nothing was reachable. '
+                        'Laundry that low is for the scan-then-grasp stage '
+                        '(`laundry clear --no-grabs`).',
+                        file=sys.stderr,
+                    )
+                    return 1
+
+                grab_targets.save(
+                    placed,
+                    generated={
+                        'pile': pile_layers.pile_signature(),
+                        'layers': len(layers),
+                    },
+                )
+                print(
+                    f'Saved {grab_targets.path()} ({len(placed)} grabs in '
+                    f'{len(layers)} layer(s); {len(gen_misses)} spot(s) '
+                    'unreachable).'
+                )
 
             if not placed:
                 print(
@@ -349,6 +391,16 @@ def add_plan_parser(subparsers):
     bake.add_argument(
         '--max-joint-speed', type=float, default=45.0,
         help='Peak joint speed along the plan, deg/s (default: 45).',
+    )
+    bake.add_argument(
+        '--regenerate', action='store_true',
+        help=(
+            'With retrieve/all: generate the sweep from config.PILE even '
+            'when a grab list exists (a hand-placed one is otherwise '
+            'kept; a generated one regenerates by itself when PILE '
+            'changes). The pile level: config.PILE, or '
+            'LAUNDRY_PILE_TOP_M=0.20 for one run.'
+        ),
     )
     add_observed_state_argument(bake)
     bake.set_defaults(func=cmd_plan)
