@@ -1,64 +1,148 @@
 # The sweep's grabs, in visiting order (grasp/grab_targets.py).
-# Edit by dragging: `laundry plan edit-grabs`; then `./rebake.sh retrieve`.
+# Generated from config.PILE by `laundry plan bake retrieve` (grasp/pile_layers.py); it regenerates when
+# PILE changes. Dragging a grab in `laundry plan edit-grabs` and saving drops the mark and keeps your list.
 version: 1
+generated:
+  pile:
+    top_height_m: 0.25
+    sink_m: 0.06
+    layer_step_m: 0.06
+    min_height_m: 0.1
+    depths_m:
+    - 0.4
+    - 0.3
+    - 0.2
+    - 0.1
+    angles_deg:
+    - 0.0
+    - -20.0
+    - 20.0
+    tilts_deg:
+    - 0.0
+    - 15.0
+    - 30.0
+    - 45.0
+    - 60.0
+    approach_m: 0.05
+  layers: 2
 grabs:
 - depth_m: 0.4
   floor_angle_deg: 0.0
-  height_m: 0.08
-  tilt_deg: 15.0
+  height_m: 0.19
+  tilt_deg: 45.0
   approach_m: 0.05
 - depth_m: 0.4
   floor_angle_deg: -20.0
-  height_m: 0.08
-  tilt_deg: 15.0
+  height_m: 0.188
+  tilt_deg: 45.0
   approach_m: 0.05
 - depth_m: 0.4
   floor_angle_deg: 20.0
-  height_m: 0.08
-  tilt_deg: 15.0
-  approach_m: 0.05
-- depth_m: 0.3
-  floor_angle_deg: 0.0
-  height_m: 0.08
-  tilt_deg: 30.0
-  approach_m: 0.05
-- depth_m: 0.3
-  floor_angle_deg: -20.0
-  height_m: 0.08
-  tilt_deg: 30.0
-  approach_m: 0.05
-- depth_m: 0.3
-  floor_angle_deg: 20.0
-  height_m: 0.08
-  tilt_deg: 30.0
-  approach_m: 0.05
-- depth_m: 0.2
-  floor_angle_deg: 0.0
-  height_m: 0.08
-  tilt_deg: 30.0
-  approach_m: 0.05
-- depth_m: 0.2
-  floor_angle_deg: -20.0
-  height_m: 0.08
-  tilt_deg: 30.0
-  approach_m: 0.05
-- depth_m: 0.2
-  floor_angle_deg: 20.0
-  height_m: 0.08
-  tilt_deg: 30.0
-  approach_m: 0.05
-- depth_m: 0.1
-  floor_angle_deg: 0.0
-  height_m: 0.08
+  height_m: 0.188
   tilt_deg: 45.0
   approach_m: 0.05
-- depth_m: 0.1
-  floor_angle_deg: -20.0
-  height_m: 0.08
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.1
-  floor_angle_deg: 20.0
-  height_m: 0.08
+- depth_m: 0.3
+  floor_angle_deg: 0.0
+  height_m: 0.19
   tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.3
+  floor_angle_deg: -20.0
+  height_m: 0.188
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.3
+  floor_angle_deg: 20.0
+  height_m: 0.188
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.2
+  floor_angle_deg: 0.0
+  height_m: 0.19
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.2
+  floor_angle_deg: -20.0
+  height_m: 0.189
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.2
+  floor_angle_deg: 20.0
+  height_m: 0.189
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.1
+  floor_angle_deg: 0.0
+  height_m: 0.18
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.1
+  floor_angle_deg: -20.0
+  height_m: 0.179
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.1
+  floor_angle_deg: 20.0
+  height_m: 0.179
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.4
+  floor_angle_deg: 0.0
+  height_m: 0.13
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.4
+  floor_angle_deg: -20.0
+  height_m: 0.124
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.4
+  floor_angle_deg: 20.0
+  height_m: 0.124
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.3
+  floor_angle_deg: 0.0
+  height_m: 0.13
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.3
+  floor_angle_deg: -20.0
+  height_m: 0.124
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.3
+  floor_angle_deg: 20.0
+  height_m: 0.124
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.2
+  floor_angle_deg: 0.0
+  height_m: 0.13
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.2
+  floor_angle_deg: -20.0
+  height_m: 0.125
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.2
+  floor_angle_deg: 20.0
+  height_m: 0.125
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.1
+  floor_angle_deg: 0.0
+  height_m: 0.12
+  tilt_deg: 60.0
+  approach_m: 0.05
+- depth_m: 0.1
+  floor_angle_deg: -20.0
+  height_m: 0.115
+  tilt_deg: 45.0
+  approach_m: 0.05
+- depth_m: 0.1
+  floor_angle_deg: 20.0
+  height_m: 0.115
+  tilt_deg: 45.0
   approach_m: 0.05
