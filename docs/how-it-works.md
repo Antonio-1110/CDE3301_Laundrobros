@@ -77,5 +77,5 @@ To move them, see [After moving the bucket](operating.md#after-moving-the-bucket
 All of these live in `config/` (`config/hardware.py` for the sensor and gripper, `config/poses.py` for INTER), with comments on how each was measured.
 
 - **At INTER**, link7's local +Z points horizontally along −Y, straight into the bucket along its axis. Its local +X is the ToF boresight and points straight down, so the scan's J7 sweep is centred on the floor.
-- **ToF sensor:** 7.75 cm along link7 +X (its boresight) and 2.8 cm along +Z. It's published as the static transform `link7 -> tof_sensor_link`, so readings stay correct as J7 rotates.
+- **ToF sensor:** 6.1 cm along link7 +X (its boresight) and 2.0 cm along +Z. It's published as the static transform `link7 -> tof_sensor_link`, so readings stay correct as J7 rotates.
 - **Gripper contact point:** 15 cm along link7 +Z. This is still to be verified on the hardware ([HARDWARE_TESTS.md](../HARDWARE_TESTS.md)).

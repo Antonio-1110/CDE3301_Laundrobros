@@ -254,7 +254,7 @@ laundry scan --step 0.02 --save scan_records/hw_empty_step2.csv
 **15. Grasp offset (measure by hand).** `config.GRIPPER_OFFSET_Z = 0.15` is reported, not verified. It's the distance along link7 +Z (at INTER, horizontally into the bucket) from the flange face to the point where the claw closes.
 
 - **Paste back:** the distance in cm.
-- **Also measure** the ToF sensor's offset from the flange axis (7.75 cm expected) and its distance forward of the flange face (2.8 cm expected). The old README had these two swapped relative to the code; the code's values are the ones in use.
+- **Also measure** the ToF sensor's offset from the flange axis (6.1 cm expected) and its distance forward of the flange face (2.0 cm expected). The old README had these two swapped relative to the code; the code's values are the ones in use.
 
 **16. Dry run with one item.** Put a small towel on the floor, mid-depth.
 

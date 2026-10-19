@@ -34,18 +34,18 @@ TOF_DEFAULT_OFFSET_CM = -10.0
 # Measured by ruler at the INTER pose, where link7's local +Z points
 # horizontally INTO the bucket (see INTER_RECORDED, config/poses.py):
 #
-#   - 7.75 cm along local +X - the sensor's own boresight axis. It
+#   - 6.1 cm along local +X - the sensor's own boresight axis. It
 #     looks radially outward from the insertion axis at the bucket
 #     wall (straight down at INTER's J7), offset slightly along the
 #     same direction it looks.
-#   - 2.8 cm along local +Z - forward, further into the bucket.
+#   - 2.0 cm along local +Z - forward, further into the bucket.
 #
 # Because the offset is expressed in link7's own frame, it is
 # joint7-invariant: it stays correct as J7 rotates during a scan,
 # which is what sweeps the beam around the bucket.
-TOF_SENSOR_OFFSET_X = 0.0775
+TOF_SENSOR_OFFSET_X = 0.061
 TOF_SENSOR_OFFSET_Y = 0.0
-TOF_SENSOR_OFFSET_Z = 0.028
+TOF_SENSOR_OFFSET_Z = 0.02
 
 # =============================================================
 # GRIPPER

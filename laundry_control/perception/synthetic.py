@@ -17,13 +17,13 @@ A reading is a ray, not a point, but the baseline CSVs predate ray
 recording (no raw_range/ox/oy/oz columns), so the ray is rebuilt from
 the scan geometry:
 
-  - Strokes: the ToF sensor sits TOF_SENSOR_OFFSET_X = 7.75cm from
+  - Strokes: the ToF sensor sits TOF_SENSOR_OFFSET_X = 6.1cm from
     link7's axis and looks radially outward from it (its boresight is
     link7 +X, which J7 sweeps around +Z). During the tool-Z strokes
     that axis is the INSERTION LINE through INTER's flange position
     along INTER's tool +Z, so for a point P: the foot F of P on that
     line gives the radial direction v = (P - F)/|P - F|, the origin
-    O = F + 0.0775 v and the range |P - F| - 0.0775.
+    O = F + 0.061 v and the range |P - F| - 0.061.
 
   - BOTTOM detour: the same construction about BOTTOM's tilted tool
     axis, for points beyond the strokes' axial reach that lie at the
