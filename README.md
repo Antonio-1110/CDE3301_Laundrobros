@@ -14,7 +14,8 @@ Everything runs through one command, `laundry`.
 | [docs/operating.md](docs/operating.md) | Bring-up, every `laundry` command, baselines, the grab grid, moving the bucket |
 | [docs/how-it-works.md](docs/how-it-works.md) | Detection, the scan path, baked motions, obstacles and padding, frames |
 | [HARDWARE_TESTS.md](HARDWARE_TESTS.md) | Commands that need the real rig, with what to paste back |
-| [esp32/README.md](esp32/README.md), [setup/](setup/) | The ESP32 link, the MQTT broker, hardware PWM |
+| [docs/performance.md](docs/performance.md) | Scan and retrieve times and detection numbers from simulation, and the scripts that measure them |
+| [esp32/README.md](esp32/README.md), [mqtt_broker/](mqtt_broker/) | The ESP32 link and the MQTT broker |
 
 Quick start, once set up: `source ~/ros2_ws/src/CDE3301_Laundrobros/env.sh`, then
 
