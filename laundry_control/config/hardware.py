@@ -110,6 +110,18 @@ GRIPPER_BACKENDS = ('gpio', 'mqtt')
 TOF_SOURCE = 'mqtt'
 GRIPPER_BACKEND = 'mqtt'
 
+# Keep the ESP32 servo's pulses on after a move (gripper_backend
+# 'mqtt'; the Pi's own GPIO servo never holds, its software pulses
+# shake the claw). Stopping them and starting them again on the next
+# move left the claw short of 55 or 100 deg two moves in three, until
+# the third command (rig, 2026-10-19); with the pulses held every move
+# reached its angle. The ESP32's hardware PWM holds steadily, and a
+# limp claw could let go of laundry on the way to DROP. The servo
+# then stays driven until the ESP32 is reset or a move says
+# hold=False. gripper_node's hold_open / hold_closed parameters
+# override it.
+GRIPPER_HOLD_PULSES = True
+
 # The broker runs on this Pi, so the nodes reach it on localhost;
 # the ESP32 is given the Pi's LAN address in its own config.
 MQTT_HOST = 'localhost'

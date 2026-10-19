@@ -210,7 +210,7 @@ def _gripper_angle_over_mqtt(angle):
             return 1
 
         print(f'Moving the ESP32 servo to {angle:.1f} degrees')
-        driver.move(angle, hold=False)
+        driver.move(angle, hold=config.GRIPPER_HOLD_PULSES)
 
     except GripperLinkError as exc:
         print(f'Gripper move failed: {exc}', file=sys.stderr)

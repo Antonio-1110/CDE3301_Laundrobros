@@ -9,7 +9,8 @@ a failed service call - as it does for a GPIO error.
 
 The ESP32 makes the pulses with its LEDC hardware PWM, so they are
 exact however busy the Pi is (compare servo.py, SOFTWARE PWM). That
-should also make hold_closed worth trying again - untested.
+is why config.GRIPPER_HOLD_PULSES keeps them on: stopping the pulses
+after each move left the claw short of its angle on the rig.
 """
 
 import itertools
