@@ -208,12 +208,22 @@ TRANSFER_MAX_JERK_RAD_S3 = 17.0
 #
 #   speed deg/s  accel rad/s^2  jerk rad/s^3   seconds
 #        45           2.0           17           14.0   (tested)
-#        60           2.0           17           12.6
+#        60           2.0           17           12.6   (set 2026-10-19)
 #        60           3.0           25           11.2
 #        90           3.0           25           10.1
 #
+# 60 deg/s is set but NOT yet run on the arm, and the routes are not
+# re-timed for it: run `./rebake.sh timing` (about 2 min), then the
+# staged test above. Until then replays ignore the old timing and stop
+# at each via (safe, a little slower). Simulated 24-grab sweep on the
+# fake controller (2026-10-19, one run each): 45/2.0/17 346 s,
+# 60/2.0/17 339 s (-2%: the routes are short, so the acceleration
+# limit, not the top speed, sets the time), 60/3.0/25 304 s (-12%, but
+# the two DROP routes then have no pass-through timing within the
+# limits and stop at their vias). The next step is 60/3.0/25.
+#
 # MoveIt's own xArm7 limits are 2.14 rad/s (123 deg/s) and 10 rad/s^2.
-TRANSFER_MAX_VELOCITY_RAD_S = math.radians(45.0)
+TRANSFER_MAX_VELOCITY_RAD_S = math.radians(60.0)
 
 # Pass through the vias of baked transfers instead of stopping at each
 # (arm/pass_through.py): uses the timing `laundry plan bake timing`
