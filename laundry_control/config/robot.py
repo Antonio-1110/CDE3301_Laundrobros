@@ -192,8 +192,8 @@ JOINT7_MAX_ACCELERATION_RAD_S2 = 10.0
 # shortest segment (29 deg) peaked at 2.0 rad/s^2 and 17 rad/s^3. So
 # no transfer accelerates harder than one already did; the long legs
 # just do it as often. MoveIt's xArm7 limit is 10 rad/s^2.
-TRANSFER_MAX_ACCELERATION_RAD_S2 = 2.0
-TRANSFER_MAX_JERK_RAD_S3 = 17.0
+TRANSFER_MAX_ACCELERATION_RAD_S2 = 5.0
+TRANSFER_MAX_JERK_RAD_S3 = 42.0
 
 # Peak joint speed of baked-transfer replays (and of go_to's straight
 # fallback). transfers.yaml records the speed it was baked at, but the
@@ -208,21 +208,22 @@ TRANSFER_MAX_JERK_RAD_S3 = 17.0
 #
 #   speed deg/s  accel rad/s^2  jerk rad/s^3   seconds
 #        45           2.0           17           14.0   (tested)
-#        60           2.0           17           12.6   (set 2026-10-19)
+#        60           2.0           17           12.6
 #        60           3.0           25           11.2
 #        90           3.0           25           10.1
 #
-# 60 deg/s is set but NOT yet run on the arm, and the routes are not
-# re-timed for it: run `./rebake.sh timing` (about 2 min), then the
-# staged test above. Until then replays ignore the old timing and stop
-# at each via (safe, a little slower). Simulated 24-grab sweep on the
-# fake controller (2026-10-19, one run each): 45/2.0/17 346 s,
-# 60/2.0/17 339 s (-2%: the routes are short, so the acceleration
-# limit, not the top speed, sets the time), 60/3.0/25 304 s (-12%, but
-# the two DROP routes then have no pass-through timing within the
-# limits and stop at their vias). The next step is 60/3.0/25.
-#
-# MoveIt's own xArm7 limits are 2.14 rad/s (123 deg/s) and 10 rad/s^2.
+# 2026-10-21: set to 60 deg/s, accel 5.0 rad/s^2 (50% of MoveIt's 10),
+# jerk 42 rad/s^3 (MoveIt has no jerk limit; this keeps the ~8.4 ratio of
+# the earlier settings). NOT yet run on the arm; the routes are timed for
+# these limits (`./rebake.sh timing`). Simulated 24-grab sweep on the fake
+# controller (single runs, a few seconds of noise): 45/2.0/17 346 s,
+# 60/2.0/17 339 s (-2%: the routes are short, so the acceleration limit,
+# not the top speed, sets the time), 60/3.0/25 304 s (-12%, but the two
+# DROP routes then had no pass-through timing within the limits), and
+# 60/5.0/42 318 s with every route passing through its vias (DROP legs
+# 3.5 -> 2.5 s). The sweep total did not fall further in that run; why
+# was not investigated (more runs would show whether it is noise).
+# Go back one step if the arm overruns, shivers or throws laundry.
 TRANSFER_MAX_VELOCITY_RAD_S = math.radians(60.0)
 
 # Pass through the vias of baked transfers instead of stopping at each
