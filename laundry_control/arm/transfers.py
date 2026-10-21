@@ -56,7 +56,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import yaml
 
-from .joint_path import time_stop_at_each
+from .joint_path import densify, time_path, time_stop_at_each
 from .joint_ranges import task_limits
 from .. import config
 
@@ -429,13 +429,7 @@ def route_arm_padding(name):
 
 
 def _read(path):
-    path = path or default_plan_path()
-
-    if not os.path.isfile(path):
-        return None
-
-    with open(path) as handle:
-        return yaml.safe_load(handle)
+    return config.read_yaml(path or default_plan_path())
 
 
 def load(path=None):
@@ -492,23 +486,151 @@ def load_timings(path=None):
         ):
             timings[name] = (times, positions, velocities)
 
+    for name, entry in (document.get('direct') or {}).items():
+        timed = entry.get('timed')
+
+        if not timed or timed.get('limits') != limits:
+            continue
+
+        times, positions, velocities = pass_through.from_document(timed)
+        waypoints = np.asarray(entry['waypoints'])
+
+        if (
+            np.abs(positions[0] - waypoints[0]).max() < 1e-5
+            and np.abs(positions[-1] - waypoints[-1]).max() < 1e-5
+        ):
+            timings[name] = (times, positions, velocities)
+
+    # Chains (chain_pairs): only for the routes exactly as they are now.
+    routes = {
+        name: np.asarray(route['waypoints'])
+        for name, route in document['routes'].items()
+    }
+
+    for name, chain in (document.get('chains') or {}).items():
+        back, out = chain.get('back'), chain.get('out')
+        timed = chain.get('timed')
+
+        if (
+            back not in routes or out not in routes or not timed
+            or timed.get('limits') != limits
+            or chain.get('digest')
+            != route_digest(chain_waypoints(routes, back, out))
+        ):
+            continue
+
+        timings[name] = pass_through.from_document(timed)
+
     return timings
 
 
-def save_timings(path, timings):
+def load_direct(path=None):
+    """
+    Return {direct route: waypoints} (arm/direct.py), or {}.
+
+    Only routes that still start at their grab pose and end at their
+    target pose as config has them now.
+    """
+    from . import direct
+
+    document = _read(path)
+
+    if document is None:
+        return {}
+
+    poses = config.named_poses()
+    found = {}
+
+    for name, entry in (document.get('direct') or {}).items():
+        if direct.split(name) is None:
+            continue
+
+        waypoints = np.asarray(entry['waypoints'], dtype=np.float64)
+        start, end = poses.get(entry['from']), poses.get(entry['to'])
+
+        if (
+            start is not None and end is not None
+            and np.abs(waypoints[0] - start).max() < 1e-5
+            and np.abs(waypoints[-1] - end).max() < 1e-5
+        ):
+            found[name] = waypoints
+
+    return found
+
+
+def save_direct(path, entries):
+    """Replace the direct routes in transfers.yaml (arm/direct.bake)."""
+    document = _read(path)
+    document['direct'] = {
+        name: {
+            'from': entry['from'],
+            'to': entry['to'],
+            'join': entry['join'],
+            'exit': int(entry['exit']),
+            'padding_m': entry['padding_m'],
+            'waypoints': [
+                [round(float(v), 6) for v in q] for q in entry['waypoints']
+            ],
+        }
+        for name, entry in entries.items()
+    }
+    _write(path, document)
+
+
+def save_timings(path, timings, chains=None, direct=None):
     """
     Store pass-through timings with their routes in transfers.yaml.
 
     timings: {route: pass_through.to_document(...)}, or None for a
     route to drop its timing. The routes themselves are not changed.
+    chains: {chain name (chain_pairs): {'back', 'out', 'timed'}}, to
+    replace the stored chains; None keeps them.
+    direct: {direct route: pass_through.to_document(...) or None (no
+    timing)}, the direct routes to keep; the others are removed. None
+    keeps them all as they are.
     """
     document = _read(path)
+
+    if direct is not None:
+        kept = {}
+
+        for name, entry in (document.get('direct') or {}).items():
+            if name not in direct:
+                continue
+
+            entry.pop('timed', None)
+
+            if direct[name] is not None:
+                entry['timed'] = direct[name]
+
+            kept[name] = entry
+
+        document['direct'] = kept
 
     for name, timed in timings.items():
         if timed is None:
             document['routes'][name].pop('timed', None)
         else:
             document['routes'][name]['timed'] = timed
+
+    if chains is not None:
+        routes = {
+            name: np.asarray(route['waypoints'])
+            for name, route in document['routes'].items()
+        }
+        document['chains'] = {
+            name: {
+                'back': chain['back'],
+                'out': chain['out'],
+                # The routes it was timed along: a re-baked route
+                # leaves its chains unused (load_timings).
+                'digest': route_digest(
+                    chain_waypoints(routes, chain['back'], chain['out'])
+                ),
+                'timed': chain['timed'],
+            }
+            for name, chain in chains.items()
+        }
 
     _write(path, document)
 
@@ -595,7 +717,7 @@ def from_other_inter(routes):
 
     return sorted(
         name for name, route in routes.items()
-        if len(route) and not _at(route[0], inter)
+        if len(route) and not _at(route[0], inter) and '>' not in name
     )
 
 
@@ -669,6 +791,11 @@ def _pieces(current, target_name, routes, gripper_empty=False):
     if here is None or here == target_name:
         return None
 
+    direct = _direct_piece(here, target_name, routes, gripper_empty)
+
+    if direct is not None:
+        return [direct]
+
     if here == 'inter':
         return [(target_name, False)] if target_name in routes else None
 
@@ -679,6 +806,36 @@ def _pieces(current, target_name, routes, gripper_empty=False):
 
     if target_name in routes:
         return [back, (target_name, False)]
+
+    return None
+
+
+def _direct_piece(here, target_name, routes, gripper_empty):
+    """
+    Return (direct route, backward) between a grab and DROP, or None.
+
+    grab_NN -> DROP carrying laundry: 'grab_NN>drop'; DROP -> grab_NN
+    once the gripper let go: 'grab_NN>drop_return', backwards (see
+    arm/direct.py). Present only where it was found faster.
+    """
+    from . import direct
+
+    for route_name in routes:
+        parts = direct.split(route_name)
+
+        if parts is None:
+            continue
+
+        grab, join = parts
+
+        if here == grab and target_name == route_pose(join) and join == 'drop':
+            return route_name, False
+
+        if (
+            here == route_pose(join) and target_name == grab
+            and join == EMPTY_GRIPPER_RETURNS.get(here) and gripper_empty
+        ):
+            return route_name, True
 
     return None
 
@@ -696,6 +853,8 @@ def go_to(
     arm_paddings=None,
     gripper_empty=False,
     timings=None,
+    before=(),
+    after=(),
 ):
     """
     Move to a named pose along the most repeatable route available.
@@ -706,6 +865,9 @@ def go_to(
     gripper_empty: the gripper is known to hold nothing (it just let go
     at DROP), so DROP is left by drop_return (see route_for).
 
+    before / after: straight moves to make first / afterwards, in the
+    same trajectory; see prepare_go_to.
+
     1. A baked transfer (see route_for), re-checked against the
        current planning scene, then replayed exactly - under the
        arm-link padding config sets for it now (route_arm_padding;
@@ -715,6 +877,46 @@ def go_to(
     2. Otherwise a straight, collision-checked joint move.
     3. Only if that would collide: the planner (move_joints), with a
        warning, since its route is not repeatable.
+    """
+    move = prepare_go_to(
+        arm, target_name, routes=routes,
+        max_velocity_rad_s=max_velocity_rad_s, time_scale=time_scale,
+        arm_paddings=arm_paddings, gripper_empty=gripper_empty,
+        timings=timings, before=before, after=after,
+    )
+
+    return move is not None and move()
+
+
+def prepare_go_to(
+    arm,
+    target_name,
+    routes=None,
+    max_velocity_rad_s=None,
+    time_scale=1.0,
+    arm_paddings=None,
+    gripper_empty=False,
+    timings=None,
+    before=(),
+    after=(),
+):
+    """
+    Choose and collision-check go_to's move now; return it, to make later.
+
+    Returns a function that makes the move (True if it succeeded), or
+    None if no move is allowed (the reason is logged). The arm must
+    stay where it is until the move is made: the checks take ~0.5 s,
+    and this lets a caller make them while the gripper opens or
+    closes (grasp/retrieve_grid.run) instead of with the arm standing
+    still.
+
+    before: joint poses to go to first, each in a straight joint move
+    (as move_joints_linear: config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S,
+    collision-checked); the route is then the one from the last of
+    them. after: poses to go on to the same way from the target. With
+    a baked route the whole move is ONE trajectory - it comes to rest
+    at each join, but does not wait there for a new goal and its
+    checks. Otherwise the moves are made one after another.
     """
     stamp = None
     mismatches = {}
@@ -739,6 +941,11 @@ def go_to(
             name: route for name, route in routes.items() if name not in moved
         }
 
+    if stamp is not None:
+        # Direct grab <-> DROP routes do not start at INTER: added after
+        # the check above.
+        routes = dict(routes, **load_direct())
+
     max_velocity_rad_s = (
         max_velocity_rad_s or config.TRANSFER_MAX_VELOCITY_RAD_S
     )
@@ -747,63 +954,125 @@ def go_to(
     current = arm.get_current_joints()
 
     if current is None:
-        return False
+        return None
 
-    route = route_for(current, target_name, routes, gripper_empty)
+    before = [list(q) for q in before]
+    after = [list(q) for q in after]
+    origin = before[-1] if before else current
 
-    if route is not None:
-        here = _where(current, routes)
-        leaving = (
-            None if here in (None, 'inter')
-            else _leaving_by(here, routes, gripper_empty)
+    route = route_for(origin, target_name, routes, gripper_empty)
+
+    if route is None:
+        return _prepare_unbaked(
+            arm, target_name, current, target, before, after,
+            max_velocity_rad_s, time_scale,
+            {'routes': routes, 'timings': timings,
+             'arm_paddings': arm_paddings, 'gripper_empty': gripper_empty},
         )
-        used = [
-            name for name in (leaving, target_name.lower())
-            if name in routes
-        ]
 
-        for name in used:
-            if name in mismatches:
-                arm.get_logger().warning(
-                    f'Route to {name.upper()} {mismatches[name]}',
-                    throttle_duration_sec=60.0,
+    here = _where(origin, routes)
+    leaving = (
+        None if here in (None, 'inter')
+        else _leaving_by(here, routes, gripper_empty)
+    )
+    used = [
+        name for name in (leaving, target_name.lower())
+        if name in routes
+    ]
+
+    for name in used:
+        if name in mismatches:
+            arm.get_logger().warning(
+                f'Route to {name.upper()} {mismatches[name]}',
+                throttle_duration_sec=60.0,
+            )
+
+    # Checked under the arm padding config asks for NOW (arm_paddings
+    # overrides it, for tests), so raising OBSTACLE_PADDING_M is
+    # enforced on routes baked before - they are refused if they no
+    # longer keep it - rather than replayed at their old clearance.
+    wanted = dict(
+        {name: route_arm_padding(name) for name in used},
+        **(arm_paddings or {}),
+    )
+    padding = min(
+        [config.OBSTACLE_PADDING_M]
+        + [wanted.get(name, config.OBSTACLE_PADDING_M) for name in used]
+    )
+
+    pieces = _pieces(origin, target_name, routes, gripper_empty)
+
+    if '>' in pieces[0][0]:
+        note = f', direct by {pieces[0][0]}, not via INTER'
+    else:
+        note = (
+            f', leaving {here.upper()} by {leaving}'
+            if leaving not in (None, here) else ''
+        )
+
+    if before or after:
+        note += f', with {len(before) + len(after)} straight move(s)'
+
+    # The padding matters only to the checks: set it for them alone.
+    changed = padding != config.OBSTACLE_PADDING_M
+
+    if changed:
+        arm.set_arm_padding(padding)
+
+    try:
+        plan = _checked_plan(
+            arm, target_name, current, origin, route, before, after,
+            pieces, routes, timings or {}, max_velocity_rad_s, stamp,
+        )
+    finally:
+        if changed:
+            arm.set_arm_padding(config.OBSTACLE_PADDING_M)
+
+    if plan is None:
+        return None
+
+    message, times, positions, velocities = plan
+
+    def move():
+        arm.get_logger().info(message + note + ').')
+        return arm.execute_joint_path(
+            positions, times, velocities, time_scale=time_scale
+        )
+
+    return move
+
+
+def _prepare_unbaked(
+    arm, target_name, current, target, before, after, max_velocity_rad_s,
+    time_scale, go_to_options,
+):
+    """prepare_go_to without a baked route: straight, else the planner."""
+    if before or after:
+        # One move at a time, each checked as it is made.
+        def move():
+            return (
+                all(
+                    arm.move_joints_linear(q, time_scale=time_scale)
+                    for q in before
                 )
+                and go_to(
+                    arm, target_name, max_velocity_rad_s=max_velocity_rad_s,
+                    time_scale=time_scale, **go_to_options,
+                )
+                and all(
+                    arm.move_joints_linear(q, time_scale=time_scale)
+                    for q in after
+                )
+            )
 
-        # Checked under the arm padding config asks for NOW (arm_paddings
-        # overrides it, for tests), so raising OBSTACLE_PADDING_M is
-        # enforced on routes baked before - they are refused if they no
-        # longer keep it - rather than replayed at their old clearance.
-        wanted = dict(
-            {name: route_arm_padding(name) for name in used},
-            **(arm_paddings or {}),
-        )
-        padding = min(
-            [config.OBSTACLE_PADDING_M]
-            + [wanted.get(name, config.OBSTACLE_PADDING_M) for name in used]
-        )
-
-        return _replay(
-            arm, target_name, current, route, max_velocity_rad_s,
-            time_scale, stamp, padding,
-            note=(
-                f', leaving {here.upper()} by {leaving}'
-                if leaving not in (None, here) else ''
-            ),
-            plan=_pass_through_plan(
-                current,
-                _pieces(current, target_name, routes, gripper_empty),
-                routes,
-                timings or {},
-                max_velocity_rad_s,
-            ),
-        )
+        return move
 
     # Widened to where the arm is, as move_joints_linear checks it: a
     # hand move may have left a joint outside the task ranges.
     if arm.first_invalid_state(
         [current, target], limits=task_limits(start=current)
     ) is None:
-        return arm.move_joints_linear(
+        return lambda: arm.move_joints_linear(
             target,
             max_velocity_rad_s=max_velocity_rad_s,
             time_scale=time_scale,
@@ -815,38 +1084,20 @@ def go_to(
         'kept inside the task joint ranges).'
     )
 
-    return arm.move_joints(target)
+    return lambda: arm.move_joints(target)
 
 
-def _replay(
-    arm, target_name, current, route, max_velocity_rad_s, time_scale, stamp,
-    padding, note='', plan=None,
-):
-    """Re-check and replay a baked route under its arm-link padding."""
-    changed = padding != config.OBSTACLE_PADDING_M
-
-    if changed:
-        arm.set_arm_padding(padding)
-
-    try:
-        return _replay_checked(
-            arm, target_name, current, route, max_velocity_rad_s,
-            time_scale, stamp, note, plan,
-        )
-    finally:
-        if changed:
-            arm.set_arm_padding(config.OBSTACLE_PADDING_M)
-
-
-def _replay_checked(
-    arm, target_name, current, route, max_velocity_rad_s, time_scale, stamp,
-    note='', plan=None,
+def _checked_plan(
+    arm, target_name, current, origin, route, before, after, pieces, routes,
+    timings, max_velocity_rad_s, stamp,
 ):
     """
-    Re-check a baked route against the live scene, then replay it.
+    Return (log message, times, positions, velocities), or None.
 
-    plan: a pass-through timing (_pass_through_plan); used if its own
-    curve is collision-free now, else the route stops at its vias.
+    The first of the route's timings (_route_plans) whose states are
+    all collision-free in the live planning scene, with the straight
+    moves before and after it. None if the straight moves, or every
+    timing, collide.
     """
     if stamp is not None:
         from . import scene
@@ -859,63 +1110,63 @@ def _replay_checked(
         if stale:
             arm.get_logger().warning(stale, throttle_duration_sec=60.0)
 
-    path = [current] + [list(q) for q in route]
+    straight_before = _straight_legs([current] + before)
+    straight_after = _straight_legs([route[-1]] + after)
 
-    # Re-check the WHOLE route - including the (< 2 deg) bridge from
-    # where the arm actually is - against the planning scene loaded
-    # NOW. The route was checked when it was baked, but possibly on
-    # another machine or against an older bucket/table pose;
-    # replaying it unchecked would trust geometry that may have
-    # moved since.
-    bad = arm.first_invalid_state(path)
+    for start, leg in straight_before + straight_after:
+        limits = task_limits(start=start)
+        bad = arm.first_invalid_state(leg[1], limits=limits)
 
-    if bad is not None:
-        arm.get_logger().error(
-            f'Baked transfer to {target_name.upper()} collides with the '
-            f'current planning scene (at checked state {bad}); the '
-            'obstacles, padding or poses changed since it was baked. Not '
-            'moving. Re-bake: laundry plan bake transfers'
-        )
-        return False
+        if bad is not None:
+            arm.get_logger().error(
+                f'Straight joint move on the way to {target_name.upper()} '
+                f'refused at {100.0 * bad / (len(leg[1]) - 1):.0f}% of the '
+                f'way ({arm._why_invalid(leg[1][bad], limits)}); not moving.'
+            )
+            return None
 
     vias = len(route) - 2
 
-    if plan is not None:
-        times, positions, velocities, check = plan
-
-        # The rounded corners leave the straight lines checked above.
+    # Re-check the route as it will be run - including the (< 2 deg)
+    # bridge from where the arm actually is - against the planning
+    # scene loaded NOW. The route was checked when it was baked, but
+    # possibly on another machine or against an older bucket/table
+    # pose; replaying it unchecked would trust geometry that may have
+    # moved since. A pass-through timing's rounded corners leave the
+    # straight lines, so its own curve is what is checked.
+    for how, legs, check in _route_plans(
+        origin, pieces, routes, timings, max_velocity_rad_s
+    ):
         bad = arm.first_invalid_state(check)
 
         if bad is None:
-            arm.get_logger().info(
+            times, positions, velocities = _join(
+                [leg for _start, leg in straight_before]
+                + legs
+                + [leg for _start, leg in straight_after],
+                current,
+            )
+            return (
                 f'Baked transfer to {target_name.upper()} ({vias} via(s), '
-                f'passing through{note}).'
-            )
-            return arm.execute_joint_path(
-                positions, times, velocities, time_scale=time_scale
+                + how,
+                times, positions, velocities,
             )
 
-        arm.get_logger().warning(
-            f'The rounded corners of the transfer to {target_name.upper()} '
-            'collide with the current planning scene; stopping at its vias '
-            'instead. Re-time: laundry plan bake timing'
-        )
+        if how.startswith('passing'):
+            arm.get_logger().warning(
+                f'The rounded corners of the transfer to '
+                f'{target_name.upper()} collide with the current planning '
+                f'scene ({how}); trying the next timing. Re-time: laundry '
+                'plan bake timing'
+            )
 
-    arm.get_logger().info(
-        f'Baked transfer to {target_name.upper()} '
-        f'({vias} via(s), stopping at each{note}).'
+    arm.get_logger().error(
+        f'Baked transfer to {target_name.upper()} collides with the '
+        f'current planning scene (at checked state {bad}); the '
+        'obstacles, padding or poses changed since it was baked. Not '
+        'moving. Re-bake: laundry plan bake transfers'
     )
-
-    waypoints, times, velocities = time_stop_at_each(
-        path,
-        max_velocity_rad_s,
-        max_acceleration=config.TRANSFER_MAX_ACCELERATION_RAD_S2,
-        max_jerk=config.TRANSFER_MAX_JERK_RAD_S3,
-    )
-
-    return arm.execute_joint_path(
-        waypoints, times, velocities, time_scale=time_scale
-    )
+    return None
 
 
 # Bridges shorter than this (rad, largest joint) are absorbed into the
@@ -923,23 +1174,100 @@ def _replay_checked(
 _BRIDGE_TOLERANCE_RAD = 1e-3
 
 
-def _pass_through_plan(current, pieces, routes, timings, max_velocity_rad_s):
+def _straight_legs(poses):
     """
-    Return (times, positions, velocities, check_states), or None.
+    Return [(start, (times, states, velocities))] between consecutive poses.
 
-    Each piece of the move with a pass-through timing (see
-    load_timings) uses it, run backwards for a backward piece; any
-    other piece stops at its vias as before, as does the small bridge
-    from where the arm is to the route's first pose. None when no piece
-    has a timing, or pass-through is off (config.TRANSFER_PASS_THROUGH_VIAS).
+    Each a straight joint move timed as move_joints_linear times it;
+    the states are its 1 deg checks. Moves of nothing are left out.
+    """
+    legs = []
+
+    for start, end in zip(poses[:-1], poses[1:]):
+        states = densify([start, end])
+
+        if np.abs(states[-1] - states[0]).max() < 1e-4:
+            continue
+
+        times, velocities = time_path(
+            states, config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S
+        )
+        legs.append((np.asarray(start), (times, states, velocities)))
+
+    return legs
+
+
+def chain_name(pieces):
+    """
+    Return the name of the timing that runs `pieces` in one go, or None.
+
+    Back to INTER along one route and out along another, passing
+    through INTER: '<back>..<out>' (see chain_pairs).
+    """
+    if (
+        pieces is not None and len(pieces) == 2
+        and pieces[0][1] and not pieces[1][1]
+    ):
+        return f'{pieces[0][0]}..{pieces[1][0]}'
+
+    return None
+
+
+def chain_waypoints(routes, back, out):
+    """Return the waypoints back along `back` and out along `out`."""
+    return np.concatenate([
+        _piece_waypoints(routes, back, True),
+        _piece_waypoints(routes, out, False)[1:],
+    ])
+
+
+def chain_pairs(routes):
+    """
+    Return {chain name: (back, out)} for the moves a sweep makes.
+
+    Each grab_NN -> DROP (back along grab_NN, out along drop), and
+    DROP -> grab_NN once the gripper let go (back along drop_return):
+    each is timed in one piece, passing through INTER, so the arm
+    does not stop there (`laundry plan bake timing`).
+    """
+    empty = EMPTY_GRIPPER_RETURNS.get('drop')
+    pairs = {}
+
+    for grab in config.generated_grab_poses():
+        if grab not in routes:
+            continue
+
+        for back, out in ((grab, 'drop'), (empty, grab)):
+            if back in routes and out in routes:
+                pairs[chain_name([(back, True), (out, False)])] = (back, out)
+
+    return pairs
+
+
+def route_digest(waypoints):
+    """Return a short digest of waypoints, to tell when a chain's routes changed."""
+    import hashlib
+
+    rounded = np.round(np.asarray(waypoints, dtype=np.float64), 5) + 0.0
+
+    return hashlib.sha1(rounded.tobytes()).hexdigest()[:16]
+
+
+def _route_plans(origin, pieces, routes, timings, max_velocity_rad_s):
+    """
+    Yield the ways to time a move, fastest first: (how, legs, check states).
+
+    1. pass through it all, INTER included (a chain timing, chain_name);
+    2. pass through each piece's vias, stopping at INTER between them
+       (the pieces' own timings);
+    3. stop at every via.
+
+    Each leg is (times, positions, velocities), starting and ending at
+    rest; the first starts at origin (bridged with a short straight
+    move when the route starts more than _BRIDGE_TOLERANCE_RAD away).
+    1 and 2 only when config.TRANSFER_PASS_THROUGH_VIAS.
     """
     from . import pass_through
-
-    if not config.TRANSFER_PASS_THROUGH_VIAS or not pieces:
-        return None
-
-    if not any(name in timings for name, _backward in pieces):
-        return None
 
     def stop_at_each(waypoints):
         dense, times, velocities = time_stop_at_each(
@@ -948,48 +1276,78 @@ def _pass_through_plan(current, pieces, routes, timings, max_velocity_rad_s):
             max_acceleration=config.TRANSFER_MAX_ACCELERATION_RAD_S2,
             max_jerk=config.TRANSFER_MAX_JERK_RAD_S3,
         )
-        return times, dense, velocities, dense
+        return (times, dense, velocities), dense
 
-    legs = []
-    start = _piece_waypoints(routes, *pieces[0])[0]
+    def timed(name, backward):
+        times, positions, velocities = timings[name]
 
-    if np.abs(np.asarray(current) - start).max() > _BRIDGE_TOLERANCE_RAD:
-        legs.append(stop_at_each([current, start]))
+        if backward:
+            times, positions, velocities = pass_through.reverse(
+                times, positions, velocities
+            )
 
-    for name, backward in pieces:
-        if name in timings:
-            times, positions, velocities = timings[name]
+        return (
+            (times, positions, velocities),
+            pass_through.dense_states(times, positions, velocities),
+        )
 
-            if backward:
-                times, positions, velocities = pass_through.reverse(
-                    times, positions, velocities
-                )
+    def with_bridge(parts):
+        start = parts[0][0][1][0]
+        if np.abs(np.asarray(origin) - start).max() > _BRIDGE_TOLERANCE_RAD:
+            parts = [stop_at_each([origin, start])] + parts
 
-            legs.append((
-                times, positions, velocities,
-                pass_through.dense_states(times, positions, velocities),
-            ))
-        else:
-            legs.append(stop_at_each(_piece_waypoints(routes, name, backward)))
+        return (
+            [leg for leg, _check in parts],
+            np.concatenate([check for _leg, check in parts]),
+        )
 
-    # Every leg starts and ends at rest: join end to start.
-    times, positions, velocities, check = [], [], [], []
+    if config.TRANSFER_PASS_THROUGH_VIAS and pieces:
+        chain = chain_name(pieces)
+
+        if chain in timings:
+            yield ('passing through, INTER included',) + with_bridge(
+                [timed(chain, False)]
+            )
+
+        if any(name in timings for name, _backward in pieces):
+            yield (
+                'passing through' + (
+                    ', stopping at INTER' if len(pieces) > 1 else ''
+                ),
+            ) + with_bridge([
+                timed(name, backward) if name in timings
+                else stop_at_each(_piece_waypoints(routes, name, backward))
+                for name, backward in pieces
+            ])
+
+    route = np.concatenate([
+        _piece_waypoints(routes, name, backward)[0 if k == 0 else 1:]
+        for k, (name, backward) in enumerate(pieces)
+    ])
+    leg, check = stop_at_each([origin] + list(route))
+
+    yield 'stopping at each', [leg], check
+
+
+def _join(legs, start):
+    """
+    Return one (times, positions, velocities) from legs run one after another.
+
+    Every leg starts and ends at rest: each is joined end to start
+    (its first point dropped), and the first point is set to `start`,
+    where the arm is (within the bridge tolerance).
+    """
+    times, positions, velocities = [], [], []
     elapsed = 0.0
 
-    for k, (t, q, qd, states) in enumerate(legs):
+    for k, (t, q, qd) in enumerate(legs):
         first = 0 if k == 0 else 1
         times.append(elapsed + np.asarray(t)[first:])
         positions.append(np.asarray(q)[first:])
         velocities.append(np.asarray(qd)[first:])
-        check.append(np.asarray(states)[first:])
         elapsed += float(t[-1])
 
     positions = np.concatenate(positions)
+    positions[0] = start
 
-    # Start exactly where the arm is (within the bridge tolerance).
-    positions[0] = current
-
-    return (
-        np.concatenate(times), positions, np.concatenate(velocities),
-        np.concatenate(check),
-    )
+    return np.concatenate(times), positions, np.concatenate(velocities)

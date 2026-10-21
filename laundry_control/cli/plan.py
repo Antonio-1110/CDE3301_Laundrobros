@@ -11,6 +11,8 @@ so every run replays the same motion. Run it through ./rebake.sh.
 import math
 import sys
 
+import numpy as np
+
 from .common import add_fake_arguments, add_observed_state_argument, RosSession
 
 
@@ -24,7 +26,7 @@ def _bake_timing(arm):
     gripper clearance, as the route itself was baked.
     """
     from .. import config
-    from ..arm import pass_through, scene, transfers
+    from ..arm import pass_through, transfers
     from ..arm.joint_path import time_stop_at_each
 
     routes, _speed = transfers.load()
@@ -53,60 +55,139 @@ def _bake_timing(arm):
         flush=True,
     )
 
-    timed = pass_through.time_routes(with_vias, v_max, a_max, j_max)
+    chains = transfers.chain_pairs(routes)
+    chain_waypoints = {
+        name: transfers.chain_waypoints(routes, back, out)
+        for name, (back, out) in chains.items()
+    }
 
-    # One padding change per (arm, gripper) padding: each change makes
-    # move_group rebuild the padded meshes, and repeated changes have
-    # grown it past the Pi's memory (OOM-killed 2026-10-08).
+    if chains:
+        print(
+            f'... and {len(chains)} grab <-> DROP move(s) in one piece, '
+            'passing through INTER.',
+            flush=True,
+        )
+
+    directs = transfers.load_direct()
+
+    if directs:
+        print(
+            f'... and {len(directs)} direct grab <-> DROP route(s), not '
+            'through INTER.',
+            flush=True,
+        )
+
+    timed = pass_through.time_routes(
+        dict(with_vias, **chain_waypoints, **directs), v_max, a_max, j_max
+    )
+
     def padding_of(name):
         return (
             transfers.route_arm_padding(name),
             transfers.expected_gripper_clearance(name),
         )
 
+    # Every curve - routes, chains, direct routes - is checked in ONE
+    # pass, grouped by padding: each padding change makes move_group
+    # rebuild its padded meshes and grow, and twelve changes in one
+    # bake grew it to 3.5 GB and got it OOM-killed (2026-10-21, and
+    # 2026-10-08 before that).
+    jobs = {}
+
+    for name in sorted(with_vias):
+        if timed.get(name) is None:
+            continue
+
+        times, positions, velocities, _settings = timed[name]
+        jobs.setdefault(padding_of(name), []).append(
+            (name, pass_through.dense_states(times, positions, velocities))
+        )
+
+    chain_states = _chain_jobs(routes, chains, timed, padding_of, jobs)
+    _direct_jobs(directs, timed, padding_of, jobs)
+
+    failed = _grouped_checks(arm, jobs, 'rounded corners collide')
+
+    for name in sorted(with_vias):
+        waypoints = with_vias[name]
+        stop = time_stop_at_each(
+            waypoints, v_max, max_acceleration=a_max, max_jerk=j_max
+        )[1][-1]
+
+        if timed.get(name) is None or name in failed:
+            print(
+                f'  {name:<11} '
+                + ('no timing within the limits' if name not in failed
+                   else 'rounded corners collide')
+                + '; stops at vias'
+            )
+            timings[name] = None
+            status = 1
+            continue
+
+        times, positions, velocities, settings = timed[name]
+        timings[name] = pass_through.to_document(
+            times, positions, velocities, limits, settings
+        )
+        v, a, j = settings['peaks']
+        print(
+            f'  {name:<11} {len(waypoints) - 2} via(s): {stop:.2f} s '
+            f'stopping -> {times[-1]:.2f} s passing through (peaks '
+            f'{math.degrees(v):.0f} deg/s, {a:.2f} rad/s^2, {j:.1f} '
+            f'rad/s^3; checked with {padding_of(name)[1] * 100:g} cm '
+            'gripper clearance)',
+            flush=True,
+        )
+
+    chain_timings = _keep_chains(
+        routes, chains, timed, limits, chain_states, failed,
+        v_max, a_max, j_max,
+    )
+    direct_timings = _keep_direct(
+        routes, directs, timed, chain_timings, limits, failed,
+        v_max, a_max, j_max,
+    )
+
+    path = transfers.default_plan_path()
+    transfers.save_timings(
+        path, timings, chains=chain_timings, direct=direct_timings
+    )
+    print(f'Saved the timings in {path}')
+
+    return status
+
+
+def _grouped_checks(arm, jobs, what):
+    """
+    Collision-check states under their padding; return the names that collide.
+
+    jobs: {(arm padding, gripper clearance): [(name, states)]}. One
+    padding change per group: every change makes move_group rebuild
+    its padded meshes (see _bake_timing).
+    """
+    from .. import config
+    from ..arm import scene
+
+    failed = set()
+
     try:
-        for name in sorted(with_vias, key=padding_of):
-            waypoints = with_vias[name]
-            stop = time_stop_at_each(
-                waypoints, v_max, max_acceleration=a_max, max_jerk=j_max
-            )[1][-1]
-
-            if timed.get(name) is None:
-                print(f'  {name:<11} no timing within the limits; stops at vias')
-                timings[name] = None
-                status = 1
-                continue
-
-            times, positions, velocities, settings = timed[name]
-            arm_padding, gripper_clearance = padding_of(name)
+        for (arm_padding, gripper_clearance), checks in sorted(jobs.items()):
             scene.set_padding(
                 arm, arm_padding, {config.GRIPPER_LINK: gripper_clearance}
             )
 
-            states = pass_through.dense_states(times, positions, velocities)
-            bad = arm.first_invalid_state(states)
+            for name, states in checks:
+                if name in failed:
+                    continue
 
-            if bad is not None:
-                print(
-                    f'  {name:<11} rounded corners collide '
-                    f'({arm._why_invalid(states[bad])}); stops at vias'
-                )
-                timings[name] = None
-                status = 1
-                continue
+                bad = arm.first_invalid_state(states)
 
-            timings[name] = pass_through.to_document(
-                times, positions, velocities, limits, settings
-            )
-            v, a, j = settings['peaks']
-            print(
-                f'  {name:<11} {len(waypoints) - 2} via(s): {stop:.2f} s '
-                f'stopping -> {times[-1]:.2f} s passing through (peaks '
-                f'{math.degrees(v):.0f} deg/s, {a:.2f} rad/s^2, {j:.1f} '
-                f'rad/s^3; checked with {gripper_clearance * 100:g} cm '
-                'gripper clearance)',
-                flush=True,
-            )
+                if bad is not None:
+                    print(
+                        f'  {name:<20} {what} '
+                        f'({arm._why_invalid(states[bad])})'
+                    )
+                    failed.add(name)
     finally:
         scene.set_padding(
             arm,
@@ -114,15 +195,202 @@ def _bake_timing(arm):
             {config.GRIPPER_LINK: config.GRIPPER_PADDING_M},
         )
 
-    path = transfers.default_plan_path()
-    transfers.save_timings(path, timings)
-    print(f'Saved the timings in {path}')
+    return failed
 
-    return status
+
+def _leg_time(routes, timed, name, v_max, a_max, j_max):
+    """Return a route's replay time: its pass-through timing, else stopping."""
+    from ..arm.joint_path import time_stop_at_each
+
+    timing = timed.get(name) if len(routes[name]) > 2 else None
+
+    if timing is not None:
+        return float(timing[0][-1])
+
+    return float(time_stop_at_each(
+        routes[name], v_max, max_acceleration=a_max, max_jerk=j_max
+    )[1][-1])
+
+
+def _direct_jobs(directs, timed, padding_of, jobs):
+    """
+    Add the direct routes' curve checks (arm/direct.py) to jobs.
+
+    The curve up to the exit is checked under the grab route's
+    padding, the rest under the direct route's own.
+    """
+    from ..arm import direct, pass_through, transfers
+
+    exits = {
+        name: int(entry['exit'])
+        for name, entry in (
+            transfers._read(None) or {}
+        ).get('direct', {}).items()
+    }
+
+    for name, waypoints in directs.items():
+        if timed.get(name) is None:
+            continue
+
+        grab, join = direct.split(name)
+        times, positions, velocities, _settings = timed[name]
+        states = pass_through.dense_states(times, positions, velocities)
+        # Where the curve passes the exit (direct.py).
+        exit_pose = waypoints[exits.get(name, 1)]
+        turn = int(np.argmin(np.abs(states - exit_pose).max(axis=1)))
+
+        jobs.setdefault(padding_of(grab), []).append((name, states[:turn + 1]))
+        jobs.setdefault(
+            (transfers.route_arm_padding(join),
+             transfers.expected_gripper_clearance(join)),
+            [],
+        ).append((name, states[turn:]))
+
+
+def _keep_direct(
+    routes, directs, timed, chain_timings, limits, failed, v_max, a_max, j_max,
+):
+    """
+    Return the direct routes to keep: {name: timing document or None}.
+
+    For save_timings; None replays it stopping at its vias (its
+    rounded corners collide, or TOTG found no timing). A route is kept
+    only where it beats the way through INTER (the chain timing if
+    there is one, else the two routes).
+    """
+    from ..arm import direct, pass_through
+    from ..arm.joint_path import time_stop_at_each
+
+    keep = {}
+
+    for name in sorted(directs):
+        grab, join = direct.split(name)
+        chain = (
+            f'{grab}..{join}' if join == 'drop' else f'{join}..{grab}'
+        )
+
+        if chain in chain_timings:
+            via_inter = chain_timings[chain]['timed']['times'][-1]
+        else:
+            via_inter = sum(
+                _leg_time(routes, timed, leg, v_max, a_max, j_max)
+                for leg in (grab, join)
+            )
+
+        passing = timed.get(name) if name not in failed else None
+        seconds = (
+            float(passing[0][-1]) if passing is not None
+            else float(time_stop_at_each(
+                directs[name], v_max, max_acceleration=a_max, max_jerk=j_max
+            )[1][-1])
+        )
+
+        if seconds >= via_inter:
+            print(
+                f'  {name:<20} {seconds:.2f} s, via INTER '
+                f'{via_inter:.2f} s: not faster, not kept'
+            )
+            continue
+
+        keep[name] = None if passing is None else pass_through.to_document(
+            *passing[:3], limits, passing[3]
+        )
+        print(
+            f'  {name:<20} {seconds:.2f} s direct (via INTER '
+            f'{via_inter:.2f} s)',
+            flush=True,
+        )
+
+    print(f'{len(keep)} of {len(directs)} direct route(s) kept.')
+
+    return keep
+
+
+def _chain_jobs(routes, chains, timed, padding_of, jobs):
+    """
+    Add the chain timings' curve checks (transfers.chain_pairs) to jobs.
+
+    Each half of a chain's curve - up to where it passes INTER, and
+    after - is checked under its own route's padding, as that route
+    was baked: the way to DROP keeps the laundry clear of the rim,
+    the way into the bucket may bring the gripper to the floor.
+    Returns the names checked.
+    """
+    from ..arm import pass_through
+
+    checked = set()
+
+    for name, (back, out) in chains.items():
+        if timed.get(name) is None:
+            print(f'  {name:<20} no timing within the limits; stops at INTER')
+            continue
+
+        times, positions, velocities, _settings = timed[name]
+        states = pass_through.dense_states(times, positions, velocities)
+        inter = routes[out][0]
+        turn = int(np.argmin(np.abs(states - inter).max(axis=1)))
+        checked.add(name)
+
+        jobs.setdefault(padding_of(back), []).append((name, states[:turn + 1]))
+        jobs.setdefault(padding_of(out), []).append((name, states[turn:]))
+
+    return checked
+
+
+def _keep_chains(
+    routes, chains, timed, limits, checked, failed, v_max, a_max, j_max,
+):
+    """
+    Return the chains to keep, {name: {'back', 'out', 'timed'}}.
+
+    For save_timings: collision-free, and faster than stopping at INTER.
+    """
+    from ..arm import pass_through
+
+    def leg_time(name):
+        return _leg_time(routes, timed, name, v_max, a_max, j_max)
+
+    good = {}
+
+    for name in sorted(checked - failed):
+        back, out = chains[name]
+        times, positions, velocities, settings = timed[name]
+        stopping = leg_time(back) + leg_time(out)
+
+        # Most wrist joints reverse at INTER (into the bucket and back
+        # out), so rounding it saves ~0.1 s at best, and TOTG's slower
+        # settings over the longer path can lose that: keep a chain
+        # only when it is faster.
+        if times[-1] >= stopping:
+            print(
+                f'  {name:<20} {stopping:.2f} s stopping at INTER -> '
+                f'{times[-1]:.2f} s passing through: not faster, not kept'
+            )
+            continue
+
+        good[name] = {
+            'back': back,
+            'out': out,
+            'timed': pass_through.to_document(
+                times, positions, velocities, limits, settings
+            ),
+        }
+        print(
+            f'  {name:<20} {stopping:.2f} s stopping at INTER -> '
+            f'{times[-1]:.2f} s passing through',
+            flush=True,
+        )
+
+    print(
+        f'{len(good)} of {len(chains)} grab <-> DROP move(s) pass INTER '
+        '(faster that way, and collision-free).'
+    )
+
+    return good
 
 
 def cmd_plan(args):
-    """Run `laundry plan bake [poses|endcap|transfers|retrieve|timing|all]`."""
+    """Run `laundry plan bake [poses|endcap|transfers|retrieve|direct|timing|all]`."""
     import socket
 
     from .. import config
@@ -283,8 +551,28 @@ def cmd_plan(args):
                 )
                 status = 1
 
+        if args.which == 'direct':
+            from ..arm import direct
+
+            routes, _speed = transfers.load()
+            path = transfers.default_plan_path()
+            transfers.save_direct(path, direct.bake(arm, routes, log=print))
+            print(
+                f'Saved the direct routes in {path}. Now time them, in a '
+                'fresh fake bring-up: ./rebake.sh timing'
+            )
+
         if args.which in ('timing', 'transfers', 'retrieve', 'all'):
             status = max(status, _bake_timing(arm))
+
+        if args.which in ('transfers', 'retrieve', 'all'):
+            # Not in the same bake: each search changes the gripper
+            # padding, and move_group grows with every change (it was
+            # OOM-killed at 3.5 GB, 2026-10-21).
+            print(
+                'Direct grab <-> DROP routes are baked on their own: '
+                './rebake.sh direct, then ./rebake.sh timing.'
+            )
 
         if args.which in ('endcap', 'all'):
             try:
@@ -365,7 +653,10 @@ def add_plan_parser(subparsers):
     )
     bake.add_argument(
         'which', nargs='?',
-        choices=('poses', 'endcap', 'transfers', 'retrieve', 'timing', 'all'),
+        choices=(
+            'poses', 'endcap', 'transfers', 'retrieve', 'direct', 'timing',
+            'all',
+        ),
         default='all',
         help=(
             'What to bake (default: all, in the order poses, retrieve, '
@@ -375,7 +666,9 @@ def add_plan_parser(subparsers):
             '(scan_plans/grab_targets.yaml, `laundry plan edit-grabs`) and '
             'bake routes to them. timing: time the baked transfers to pass '
             'through their vias (also run after transfers/retrieve); needs '
-            'moveit_py. Re-run it after changing config.TRANSFER_MAX_*.'
+            'moveit_py. Re-run it after changing config.TRANSFER_MAX_*. '
+            'direct: grab <-> DROP routes that skip INTER (arm/direct.py); '
+            'run timing after it, in a fresh bring-up.'
         ),
     )
     from ..scan.pattern import DEFAULT_DEPTH_M

@@ -24,7 +24,7 @@ from datetime import datetime
 import os
 
 from . import config
-from .arm.transfers import go_to
+from .arm.transfers import go_to, prepare_go_to
 from .grasp.execute import describe_plan, execute_plan, grasp_best, plan_grasp
 from .perception.bucket_model import build_baseline_surface
 from .perception.detect import detect_on_points, load_baseline_scans
@@ -359,7 +359,9 @@ def run_preplanned(arm, gripper, limit=None, time_scale=1.0):
         print('Failed to reach INTER; aborting.')
         return False
 
-    return retrieve_grid.run(arm, gripper, grabs, go_to, time_scale=time_scale)
+    return retrieve_grid.run(
+        arm, gripper, grabs, go_to, prepare_go_to, time_scale=time_scale
+    )
 
 
 # `laundry clear` gives up after this many scan -> grasp rounds, or

@@ -577,20 +577,25 @@ def load(path=None):
     return list(document.get('grabs', [])), str(document.get('scene', ''))
 
 
-def run(arm, gripper, grabs, go_to, time_scale=1.0, log=print):
+def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
     """
-    Visit each grab: route in, down, close, up, DROP, open.
+    Visit each grab: route in and down, close, up and to DROP, open.
+
+    go_to / prepare: transfers.go_to and transfers.prepare_go_to (or
+    stand-ins, for tests). "Route in and down" and "up and to DROP"
+    are one trajectory each (prepare_go_to's after / before), and
+    each is collision-checked while the gripper is still opening or
+    closing, so the arm does not stand still for its checks
+    (2026-10-21: ~1.5 s before every move, twice per grab).
 
     Returns True if every motion succeeded. Stops at the first failure
     after getting the arm back to INTER where it can.
     """
     log('Opening gripper...')
 
-    if not gripper.open_blocking():
-        log('Gripper did not confirm it opened; aborting before any grab.')
-        return False
+    opening = gripper.start_open()
 
-    for grab in grabs:
+    for index, grab in enumerate(grabs):
         name = grab['name']
 
         log(
@@ -599,40 +604,75 @@ def run(arm, gripper, grabs, go_to, time_scale=1.0, log=print):
             f'{grab["height_m"] * 100:.0f} cm above the floor'
         )
 
-        # The gripper confirmed it opened (before the first grab, else
-        # at DROP below), so DROP is left by the empty-gripper route.
-        if not go_to(arm, name, time_scale=time_scale, gripper_empty=True):
-            log(f'Failed to reach {name}; aborting.')
+        # Checked while the gripper opens; used only once it confirms
+        # it did, so DROP is left by the empty-gripper route.
+        descend = prepare(
+            arm, name, after=[grab['grab']], time_scale=time_scale,
+            gripper_empty=True,
+        )
+
+        if not opening.wait():
+            if index == 0:
+                log('Gripper did not confirm it opened; aborting before any '
+                    'grab.')
+            else:
+                log('Gripper did not confirm it opened at DROP; returning '
+                    'to INTER and aborting.')
+                go_to(arm, 'inter', time_scale=time_scale)
+
+            return False
+
+        if descend is None:
+            log(f'No collision-free way to {name} and down; aborting.')
             go_to(arm, 'inter', time_scale=time_scale)
             return False
 
-        if not arm.move_joints_linear(grab['grab'], time_scale=time_scale):
-            log(f'Descent at {name} would collide; aborting.')
-            go_to(arm, 'inter', time_scale=time_scale)
-            return False
-
-        closed = gripper.close_blocking()
-
-        # Always lift back out, even with nothing held.
-        if not arm.move_joints_linear(grab['approach'], time_scale=time_scale):
-            log(f'Could not lift back out at {name}; stopping here.')
-            return False
-
-        if not closed:
-            log('Gripper did not confirm it closed; returning to INTER and '
+        if not descend():
+            log(f'The move to {name} and down failed; lifting out and '
                 'aborting.')
-            go_to(arm, 'inter', time_scale=time_scale)
+
+            if arm.move_joints_linear(grab['approach'], time_scale=time_scale):
+                go_to(arm, 'inter', time_scale=time_scale)
+
             return False
 
-        if not go_to(arm, 'drop', time_scale=time_scale):
-            log('Failed to reach DROP; aborting.')
+        closing = gripper.start_close()
+
+        # Checked while the gripper closes.
+        lift = prepare(
+            arm, 'drop', before=[grab['approach']], time_scale=time_scale
+        )
+
+        closed = closing.wait()
+
+        if not closed or lift is None:
+            # Always lift back out, even with nothing held.
+            if not arm.move_joints_linear(
+                grab['approach'], time_scale=time_scale
+            ):
+                log(f'Could not lift back out at {name}; stopping here.')
+                return False
+
+            if not closed:
+                log('Gripper did not confirm it closed; returning to INTER '
+                    'and aborting.')
+                go_to(arm, 'inter', time_scale=time_scale)
+            else:
+                log('No collision-free route to DROP; aborting.')
+
             return False
 
-        if not gripper.open_blocking():
-            log('Gripper did not confirm it opened at DROP; returning to '
-                'INTER and aborting.')
-            go_to(arm, 'inter', time_scale=time_scale)
+        if not lift():
+            log('Failed to lift out and reach DROP; aborting.')
             return False
+
+        opening = gripper.start_open()
+
+    if not opening.wait():
+        log('Gripper did not confirm it opened at DROP; returning to INTER '
+            'and aborting.')
+        go_to(arm, 'inter', time_scale=time_scale)
+        return False
 
     log('Returning to INTER...')
 

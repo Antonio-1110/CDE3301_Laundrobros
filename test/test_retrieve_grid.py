@@ -47,7 +47,18 @@ class _Arm:
         return True
 
 
+class _Pending:
+
+    def __init__(self, arm, what, ok):
+        self.arm, self.what, self.ok = arm, what, ok
+
+    def wait(self):
+        self.arm.calls.append((self.what + 'ed',))
+        return self.ok
+
+
 class _Gripper:
+    """Records when each claw move starts and when it is waited for."""
 
     def __init__(self, arm, fail_close=False, fail_open_at=None):
         self.arm = arm
@@ -56,14 +67,14 @@ class _Gripper:
         self.fail_open_at = fail_open_at
         self.opens = 0
 
-    def open_blocking(self):
+    def start_open(self):
         self.arm.calls.append(('open',))
         self.opens += 1
-        return self.opens != self.fail_open_at
+        return _Pending(self.arm, 'open', self.opens != self.fail_open_at)
 
-    def close_blocking(self):
+    def start_close(self):
         self.arm.calls.append(('close',))
-        return not self.fail_close
+        return _Pending(self.arm, 'clos', not self.fail_close)
 
 
 def _grab(name, value):
@@ -73,9 +84,28 @@ def _grab(name, value):
     }
 
 
-def _go_to(arm, name, **_kwargs):
-    arm.calls.append(('go_to', name))
+def _go_to(arm, name, gripper_empty=False, **_kwargs):
+    arm.calls.append(('go_to', name, gripper_empty))
     return True
+
+
+def _prepare(refuse=()):
+    """Return a prepare_go_to stand-in that records the check, then the move."""
+    def prepare(arm, name, before=(), after=(), gripper_empty=False,
+                **_kwargs):
+        straight = tuple(tuple(q) for q in list(before) + list(after))
+        arm.calls.append(('check', name, straight, gripper_empty))
+
+        if name in refuse:
+            return None
+
+        def move():
+            arm.calls.append(('move', name))
+            return True
+
+        return move
+
+    return prepare
 
 
 def test_each_grab_goes_down_closes_lifts_and_drops():
@@ -83,35 +113,21 @@ def test_each_grab_goes_down_closes_lifts_and_drops():
 
     assert retrieve_grid.run(
         arm, _Gripper(arm), [_grab('grab_01', 0.0), _grab('grab_02', 5.0)],
-        _go_to,
+        _go_to, _prepare(),
     )
 
     assert arm.calls == [
         ('open',),
-        ('go_to', 'grab_01'), ('linear', (1.0,) * 7), ('close',),
-        ('linear', (0.0,) * 7), ('go_to', 'drop'), ('open',),
-        ('go_to', 'grab_02'), ('linear', (6.0,) * 7), ('close',),
-        ('linear', (5.0,) * 7), ('go_to', 'drop'), ('open',),
-        ('go_to', 'inter'),
-    ]
-
-
-def _go_to_recording_empty(arm, name, gripper_empty=False, **_kwargs):
-    arm.calls.append(('go_to', name, gripper_empty))
-    return True
-
-
-def test_after_a_confirmed_open_drop_is_left_as_empty():
-    arm = _Arm()
-
-    assert retrieve_grid.run(
-        arm, _Gripper(arm), [_grab('grab_01', 0.0), _grab('grab_02', 5.0)],
-        _go_to_recording_empty,
-    )
-
-    leaving = [c for c in arm.calls if c[0] == 'go_to' and c[1] != 'drop']
-    assert leaving == [
-        ('go_to', 'grab_01', True), ('go_to', 'grab_02', True),
+        ('check', 'grab_01', ((1.0,) * 7,), True), ('opened',),
+        ('move', 'grab_01'),
+        ('close',), ('check', 'drop', ((0.0,) * 7,), False), ('closed',),
+        ('move', 'drop'),
+        ('open',),
+        ('check', 'grab_02', ((6.0,) * 7,), True), ('opened',),
+        ('move', 'grab_02'),
+        ('close',), ('check', 'drop', ((5.0,) * 7,), False), ('closed',),
+        ('move', 'drop'),
+        ('open',), ('opened',),
         ('go_to', 'inter', True),
     ]
 
@@ -122,22 +138,45 @@ def test_an_unconfirmed_open_at_drop_never_leaves_as_empty():
     # Open 1 is before the first grab; open 2 is at DROP.
     assert not retrieve_grid.run(
         arm, _Gripper(arm, fail_open_at=2), [_grab('grab_01', 0.0)],
-        _go_to_recording_empty,
+        _go_to, _prepare(),
     )
 
-    assert arm.calls[-1] == ('go_to', 'inter', False)
+    assert arm.calls[-2:] == [('opened',), ('go_to', 'inter', False)]
+
+
+def test_an_unconfirmed_first_open_does_not_move():
+    arm = _Arm()
+
+    assert not retrieve_grid.run(
+        arm, _Gripper(arm, fail_open_at=1), [_grab('grab_01', 0.0)],
+        _go_to, _prepare(),
+    )
+
+    assert not [c for c in arm.calls if c[0] in ('move', 'go_to', 'linear')]
 
 
 def test_a_failed_close_still_lifts_out_then_stops():
     arm = _Arm()
 
     assert not retrieve_grid.run(
-        arm, _Gripper(arm, fail_close=True), [_grab('grab_01', 0.0)], _go_to
+        arm, _Gripper(arm, fail_close=True), [_grab('grab_01', 0.0)],
+        _go_to, _prepare(),
     )
 
     assert arm.calls[-3:] == [
-        ('close',), ('linear', (0.0,) * 7), ('go_to', 'inter'),
+        ('closed',), ('linear', (0.0,) * 7), ('go_to', 'inter', False),
     ]
+
+
+def test_a_refused_route_to_drop_still_lifts_out_then_stops():
+    arm = _Arm()
+
+    assert not retrieve_grid.run(
+        arm, _Gripper(arm), [_grab('grab_01', 0.0)], _go_to,
+        _prepare(refuse=('drop',)),
+    )
+
+    assert arm.calls[-2:] == [('closed',), ('linear', (0.0,) * 7)]
 
 
 def test_saved_grabs_become_named_poses(tmp_path, monkeypatch):
