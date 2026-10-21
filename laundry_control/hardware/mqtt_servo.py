@@ -18,7 +18,8 @@ import threading
 import time
 
 from . import esp32_protocol
-from .servo import SETTLE_SEC, validate_angle
+from .servo import validate_angle
+from ..config import ESP32_GRIPPER_SETTLE_SEC
 
 # Seconds past settle_sec to wait for the ack: the WiFi round trip,
 # plus slack for a reconnect in progress.
@@ -36,7 +37,7 @@ class MqttServoDriver:
     link: a started mqtt_link.MqttLink (or a stand-in, for tests).
     """
 
-    def __init__(self, link, topics, settle_sec=SETTLE_SEC,
+    def __init__(self, link, topics, settle_sec=ESP32_GRIPPER_SETTLE_SEC,
                  ack_margin_sec=ACK_MARGIN_SEC):
         self._link = link
         self._topics = topics

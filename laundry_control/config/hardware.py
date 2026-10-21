@@ -122,6 +122,14 @@ GRIPPER_BACKEND = 'mqtt'
 # override it.
 GRIPPER_HOLD_PULSES = True
 
+# Seconds a claw move waits before it counts as done (the ESP32 acks
+# when this has passed; there is no position feedback). The Pi's own
+# GPIO servo uses servo.SETTLE_SEC (1.5 s). 0.75 s for the ESP32,
+# which holds its pulses on: half the time per open or close, so about
+# 1.5 s less per grab. Watch the claw reach 55 and 100 deg at this
+# value; if it stops short, raise it, or set gripper_node's settle_sec.
+ESP32_GRIPPER_SETTLE_SEC = 0.75
+
 # The broker runs on this Pi, so the nodes reach it on localhost;
 # the ESP32 is given the Pi's LAN address in its own config.
 MQTT_HOST = 'localhost'

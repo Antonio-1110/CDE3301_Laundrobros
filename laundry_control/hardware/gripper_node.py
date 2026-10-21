@@ -45,6 +45,7 @@ from std_srvs.srv import Trigger
 from .gripper_client import CLOSE_SERVICE, OPEN_SERVICE
 from .servo import SETTLE_SEC
 from ..config import (
+    ESP32_GRIPPER_SETTLE_SEC,
     GRIPPER_BACKEND,
     GRIPPER_BACKENDS,
     GRIPPER_CLOSE_ANGLE_DEG,
@@ -118,7 +119,11 @@ class GripperNode(Node):
         self.declare_parameter('hold_closed', hold_default)
         # Seconds each move keeps sending pulses before they stop (see
         # servo.SETTLE_SEC); longer if the claw does not finish moving.
-        self.declare_parameter('settle_sec', SETTLE_SEC)
+        self.declare_parameter(
+            'settle_sec',
+            ESP32_GRIPPER_SETTLE_SEC
+            if self.get_parameter('backend').value == 'mqtt' else SETTLE_SEC,
+        )
         # Real-time (SCHED_FIFO) priority for lgpio's pulse thread, so
         # the busy Pi does not delay its pulses (servo.py, REAL-TIME
         # PRIORITY); 0 turns it off. Above ros2_control's 50: it only
