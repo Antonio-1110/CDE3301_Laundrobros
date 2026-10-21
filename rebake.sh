@@ -46,14 +46,18 @@ stop_fake() {
         echo
         echo "Stopping the fake bring-up..."
         # The launch is its own process group (setsid): stop all of it.
-        kill -INT -- "-$LAUNCH_PID" 2> /dev/null || true
+        # SIGKILL, not SIGINT: the stock move_group segfaults while
+        # shutting down (MoveItCpp's destructor, MoveIt 2.12.4 with
+        # rclcpp 28.1.21), and apport then writes a 0.2-1.3 GB dump to
+        # /var/crash and pops up a window. Everything the bake makes is
+        # saved before this, and the fake controller is throwaway. Never
+        # do this to the real bring-up.
+        kill -KILL -- "-$LAUNCH_PID" 2> /dev/null || true
 
-        for _ in $(seq 20); do
+        for _ in $(seq 10); do
             kill -0 "$LAUNCH_PID" 2> /dev/null || break
             sleep 1
         done
-
-        kill -TERM -- "-$LAUNCH_PID" 2> /dev/null || true
     fi
 }
 
