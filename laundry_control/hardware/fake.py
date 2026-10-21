@@ -42,6 +42,20 @@ class FakeGripper:
         self.node.get_logger().info('[fake gripper] close')
         return True
 
+    def start_open(self, timeout_sec=5.0):
+        """Pretend to open the gripper (already done when wait() is called)."""
+        from .gripper_client import Pending
+
+        done = self.open_blocking(timeout_sec)
+        return Pending(lambda: done)
+
+    def start_close(self, timeout_sec=5.0):
+        """Pretend to close the gripper (already done when wait() is called)."""
+        from .gripper_client import Pending
+
+        done = self.close_blocking(timeout_sec)
+        return Pending(lambda: done)
+
 
 class FakeRecorder:
     """
