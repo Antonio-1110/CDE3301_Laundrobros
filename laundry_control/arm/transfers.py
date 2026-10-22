@@ -168,6 +168,16 @@ def _retreat(arm, distance_m):
     return None if solution is None else np.array(solution)
 
 
+def entry_joints(arm, depth_m):
+    """
+    Return the joint state depth_m straight in from INTER, or None.
+
+    Where a scan's straight entry ends (scan/pattern.py), from INTER's
+    recorded joints like _retreat, so it is the same every time.
+    """
+    return _retreat(arm, -depth_m)
+
+
 def _refine(arm, path, first_free=2):
     """
     Pull via poses toward monotone joint values, then drop spare vias.

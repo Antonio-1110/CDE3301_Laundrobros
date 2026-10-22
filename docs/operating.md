@@ -75,6 +75,7 @@ The detector models the empty bucket from every `*.csv` directly in `baseline_sc
 
 - **New set** (e.g. after moving the bucket): `laundry baseline collect --archive`. The scans are named `baseline_<session>_NN.csv` and go to `baseline_scans/incoming_<session>/`. Only when all of them succeed does the old set move to `baseline_scans/archive/<its session>/` and the new one take its place. A failed run leaves the old set active, so scans of two different scenes are never mixed.
 - **Top up** the current set: `laundry baseline collect` (no `--archive`).
+- **Between scans the arm stays in the bucket.** Each scan but the last ends at the entry pose (6 cm in, J7 turned back; `laundry scan --stay-inside`), and the next starts there (`--start-inside`). That skips the trip out to INTER and back in, about 14 s per scan. Neither move is recorded, so the scans are the same as stand-alone ones. `--start-inside` refuses to move unless the flange is within 5 mm / 2° of that pose. If a run stops with the arm still inside, it moves out to INTER. If a scan fails, it tells you to run `laundry move inter`.
 - **Adopt scans taken earlier:** `laundry baseline promote scan_records/scan_X.csv ... [--move] [--archive]` names them `baseline_<when taken>_NN.csv`.
 - `laundry baseline list` shows the current set and the archive. `laundry baseline restore <label>` brings an archived set back and archives the current one. Nothing is ever deleted.
 

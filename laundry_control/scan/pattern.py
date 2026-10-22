@@ -19,12 +19,14 @@ import argparse
 import math
 import os
 
+import numpy as np
 import rclpy
+from scipy.spatial.transform import Rotation
 
 from . import segments
 from .strokes import MAX_STEP_M, stroke_plan
 from .. import config
-from ..arm.transfers import go_to
+from ..arm.transfers import entry_joints, go_to
 
 # Defaults for every scan parameter, shared by scan() and the CLI so
 # the two can never drift apart. Baselines and detection scans must
@@ -42,6 +44,11 @@ DEFAULT_DEPTH_M = 0.42
 # (re-collect baselines), but needs no re-bake: the strokes are
 # planned live and the end scan pivots at `depth` regardless.
 DEFAULT_ENTRY_DEPTH_M = 0.06
+# Speed scaling for the straight moves into and out of the bucket that
+# nothing is recorded on: a scan's entry and exit (entry_depth) and the
+# end-scan-only pass. Faster than the strokes (DEFAULT_VELOCITY), which
+# are slow only so each J7 sweep gets enough readings.
+STRAIGHT_IN_OUT_VELOCITY = 0.1
 # The LARGEST spacing between strokes (scan/strokes.py spreads them
 # evenly over depth - entry depth); at most strokes.MAX_STEP_M.
 DEFAULT_STEP_M = 0.03
@@ -114,6 +121,8 @@ def scan(
     end_scan='precession',
     end_plan=None,
     end_scan_time_scale=1.0,
+    start_inside=False,
+    stay_inside=False,
 ):
     """
     Perform the complete xArm7 scanning sequence.
@@ -209,6 +218,14 @@ def scan(
         slower than baked, in (0, 1] - for cautious first runs on
         the real arm. Does not change the path.
 
+    start_inside, stay_inside:
+        For back-to-back scans (baseline collect). stay_inside ends
+        the scan with J7 turned back but still entry_depth in, instead
+        of going out to INTER; start_inside then starts the next scan
+        right there, skipping INTER and the straight entry. Neither is
+        recorded, so the recorded path is unchanged. start_inside
+        refuses (moves nothing) unless the flange is at that pose.
+
 
     Notes
     -----
@@ -294,6 +311,8 @@ def scan(
         cartesian_step=cartesian_step,
         pause=pause,
         save_interval=save_interval,
+        start_inside=start_inside,
+        stay_inside=stay_inside,
     )
 
     run.log_configuration(depth, max_step=step)
@@ -362,7 +381,8 @@ class _ScanRun:
     def __init__(
         self, arm, recorder, number_of_steps, step, sweep_deg, entry_depth,
         velocity, acceleration, rotation_velocity, rotation_acceleration,
-        cartesian_step, pause, save_interval,
+        cartesian_step, pause, save_interval, start_inside=False,
+        stay_inside=False,
     ):
         self.arm = arm
         self.log = arm.get_logger()
@@ -381,6 +401,8 @@ class _ScanRun:
         self.cartesian_step = cartesian_step
         self.pause = pause
         self.save_interval = save_interval
+        self.start_inside = start_inside
+        self.stay_inside = stay_inside
 
         # Nominal insertion depth, for the log only.
         self.current_depth = 0.0
@@ -463,12 +485,12 @@ class _ScanRun:
             self.last_save_time = now
 
     def _tool_z(self, distance):
-        """Move straight along tool Z at the stroke speed, without twist."""
+        """Move straight along tool Z, unrecorded and without twist."""
         return self.arm.move_tool_z(
             distance,
             max_step=self.cartesian_step,
-            velocity=self.velocity,
-            acceleration=self.acceleration,
+            velocity=STRAIGHT_IN_OUT_VELOCITY,
+            acceleration=STRAIGHT_IN_OUT_VELOCITY,
         )
 
     # ---------------------------------------------------------
@@ -480,23 +502,67 @@ class _ScanRun:
     # recorded until the sensor is inside the bucket.
     # ---------------------------------------------------------
 
+    def at_entry_pose(self):
+        """
+        Return True if the flange is entry_depth straight in from INTER.
+
+        Where enter() would have put it (and leave(stay_inside) left
+        it): INTER's orientation, J7 included, within 2 deg, and
+        within 5 mm of INTER moved entry_depth along its tool Z.
+        """
+        current = self.arm.get_current_joints()
+        here = None if current is None else self.arm.compute_fk(current)
+        inter = self.arm.compute_fk(config.get_named_pose('inter'))
+
+        if here is None or inter is None:
+            self.log.error('Could not compute FK to check the start pose.')
+            return False
+
+        rotation = Rotation.from_quat(inter[1])
+        expected = inter[0] + self.entry_depth * rotation.as_matrix()[:, 2]
+        off_mm = float(np.linalg.norm(here[0] - expected)) * 1000.0
+        off_deg = math.degrees(
+            (Rotation.from_quat(here[1]) * rotation.inv()).magnitude()
+        )
+
+        if off_mm > 5.0 or off_deg > 2.0:
+            self.log.error(
+                f'--start-inside: the flange is {off_mm:.1f} mm / '
+                f'{off_deg:.1f} deg from the entry pose (INTER, '
+                f'{self.entry_depth * 100:.0f} cm in); not scanning from '
+                'here.'
+            )
+            return False
+
+        return True
+
     def enter(self):
         """Go to INTER, move straight in by entry_depth, start recording."""
-        self.log.info('========== MOVE TO INTER ==========')
-
         if not self.set_recording(False):
             return False
 
-        # Baked transfer from HOME/DROP, else a straight checked joint
-        # move, else the planner (arm/transfers.go_to).
-        if not go_to(self.arm, 'inter'):
-            self.log.error('Move to INTER failed.')
-            return False
+        if self.start_inside:
+            # The previous scan stayed in (leave(), stay_inside).
+            self.log.info('========== START INSIDE (entry pose) ==========')
 
-        self.wait()
+            if not self.at_entry_pose():
+                return False
+
+            self.current_depth = self.entry_depth
+
+        else:
+            self.log.info('========== MOVE TO INTER ==========')
+
+            # Baked transfer from HOME/DROP, else a straight checked
+            # joint move, else the planner (arm/transfers.go_to).
+            if not go_to(self.arm, 'inter'):
+                self.log.error('Move to INTER failed.')
+                return False
+
+            self.wait()
 
         # 1b. Straight in along tool Z, J7 unchanged.
-        if self.entry_depth > 0.0:
+        if self.entry_depth > 0.0 and not self.start_inside:
             self.log.info(
                 f'========== ENTRY ({self.entry_depth:.3f} m) =========='
             )
@@ -737,6 +803,24 @@ class _ScanRun:
 
     def leave(self):
         """Turn J7 back, move straight out of the bucket, go to INTER."""
+        if self.stay_inside and self.entry_depth > 0.0:
+            # Back to the entry pose, where the next scan starts
+            # (start_inside): J7 turned back, still entry_depth in.
+            # Solved from INTER, not just J7 unwound: the strokes'
+            # Cartesian moves drift a few mm / deg (6 mm, 2 deg on
+            # the fake controller), which leaving via INTER hides.
+            self.log.info('========== STAY INSIDE (entry pose) ==========')
+
+            target = entry_joints(self.arm, self.entry_depth)
+
+            if target is None or not self.arm.move_joints_linear(
+                list(target)
+            ):
+                self.log.error('Could not move back to the entry pose.')
+                return False
+
+            return True
+
         self.log.info('========== RETURN TO INTER ==========')
 
         if self.entry_depth > 0.0:
@@ -786,11 +870,6 @@ class _ScanRun:
             self.log.info(line)
 
         return True
-
-
-# Speed scaling for the end-scan-only pass's straight moves in and
-# out: nothing is recorded or twisted on them.
-END_ONLY_VELOCITY = 0.1
 
 
 def end_scan_only(
@@ -845,8 +924,8 @@ def end_scan_only(
     if not arm.move_tool_z(
         depth,
         max_step=cartesian_step,
-        velocity=END_ONLY_VELOCITY,
-        acceleration=END_ONLY_VELOCITY,
+        velocity=STRAIGHT_IN_OUT_VELOCITY,
+        acceleration=STRAIGHT_IN_OUT_VELOCITY,
     ):
         log.error(f'Straight insertion to {depth:.3f} m failed.')
         return False
@@ -865,8 +944,8 @@ def end_scan_only(
     if not arm.move_tool_z(
         -depth,
         max_step=cartesian_step,
-        velocity=END_ONLY_VELOCITY,
-        acceleration=END_ONLY_VELOCITY,
+        velocity=STRAIGHT_IN_OUT_VELOCITY,
+        acceleration=STRAIGHT_IN_OUT_VELOCITY,
     ):
         log.error('Straight retraction from the end scan failed.')
         return False
