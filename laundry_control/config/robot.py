@@ -19,10 +19,16 @@ JOINT_STATE_TOPIC = '/joint_states'
 # laundry_bringup.launch.py hands these to xarm_moveit_config's own
 # launch arguments, so nothing in xarm_ros2 is edited:
 #
-#   - The gripper is the manufacturer's "other geometry": our STL,
+#   - The gripper is the manufacturer's "other geometry": our mesh,
 #     attached to link_eef (= link7, no offset), turned GRIPPER_MESH_RPY
 #     about link7. Its link is called other_geometry_link, and the
 #     stock SRDF already exempts it from colliding with link3/6/7.
+#     The mesh is the arm plate (bolted to the flange, its trays
+#     hanging 34 mm down beside the wrist) with the gripper plate
+#     stacked on its top face, 14 mm up. Both are CoACD convex
+#     decompositions (~11k triangles, was a 403k-triangle STL), so
+#     collision checks and padding are cheap; RViz shows the hulls.
+#     The full-detail CAD is FINAL ARM/GRIPPER PLATE OBJ.obj (mm).
 #   - XARM_LIMITED False gives the xArm7's true hardware joint ranges
 #     (the URDF defaults), including J7 +/-360 deg - the scan and grabs
 #     turn J7 past -180 deg (INTER is -155, grabs reach ~-197). The
@@ -32,7 +38,7 @@ JOINT_STATE_TOPIC = '/joint_states'
 # =============================================================
 
 GRIPPER_LINK = 'other_geometry_link'
-GRIPPER_MESH = 'xArm7_Gripper_2Plate_Assembled_RevH_ROS2_Meters.stl'
+GRIPPER_MESH = 'xArm7_ArmPlate_Gripper_CoACD.obj'
 GRIPPER_MESH_XYZ = (0.0, 0.0, 0.0)
 GRIPPER_MESH_RPY = (0.0, 0.0, 1.57)
 XARM_LIMITED = False

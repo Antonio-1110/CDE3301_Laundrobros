@@ -98,7 +98,7 @@ ros2 launch xarm_moveit_config xarm7_moveit_realmove.launch.py robot_ip:=<ARM_IP
 
 We use the manufacturer's `jazzy` branch as it is, pinned in `workspace.repos` to the commit it was tested with. Everything the rig needs from the robot description is passed through the package's own launch arguments, built by `config.xarm_description_arguments()`:
 
-- **The gripper:** `add_other_geometry:=true` with our STL (`config.GRIPPER_MESH`), turned `config.GRIPPER_MESH_RPY` about link7. Its link is `other_geometry_link` (`config.GRIPPER_LINK`), and the stock SRDF already exempts it from colliding with link3, link6 and link7.
+- **The gripper:** `add_other_geometry:=true` with our mesh (`config.GRIPPER_MESH`: the arm plate with the gripper plate stacked on it, as CoACD convex hulls), turned `config.GRIPPER_MESH_RPY` about link7. Its link is `other_geometry_link` (`config.GRIPPER_LINK`), and the stock SRDF already exempts it from colliding with link3, link6 and link7.
 - **Joint limits:** `limited:=false` gives the xArm7's true hardware ranges, J7 ±360° included. The scan and the grabs turn J7 past −180°. The manufacturer's default narrows J7 to ±178°.
 - **Fake controller only:** the mock hardware starts at all-zeros, where the modelled gripper is in the table. `laundry scene apply --fake-start-home`, run by bring-up with `fake:=true`, moves the fake arm to HOME.
 

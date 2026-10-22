@@ -167,6 +167,7 @@ def _grouped_checks(arm, jobs, what):
     """
     from .. import config
     from ..arm import scene
+    from ..arm.joint_path import densify
 
     failed = set()
 
@@ -183,9 +184,10 @@ def _grouped_checks(arm, jobs, what):
                 bad = arm.first_invalid_state(states)
 
                 if bad is not None:
+                    # bad indexes the densified states, not states.
                     print(
                         f'  {name:<20} {what} '
-                        f'({arm._why_invalid(states[bad])})'
+                        f'({arm._why_invalid(densify(states)[bad])})'
                     )
                     failed.add(name)
     finally:

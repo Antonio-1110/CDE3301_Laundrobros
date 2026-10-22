@@ -64,7 +64,9 @@ stop_fake() {
 trap stop_fake EXIT
 trap 'exit 130' INT TERM
 
-if timeout 10 ros2 node list 2> /dev/null | grep -q .; then
+# --no-daemon: the ros2 daemon's cache still lists the previous
+# rebake's nodes for a while after they were killed.
+if timeout 10 ros2 node list --no-daemon 2> /dev/null | grep -q .; then
     echo "ERROR: ROS domain $ROS_DOMAIN_ID already has nodes running (another"
     echo "       fake bring-up?). Stop them, or pick another domain:"
     echo "         LAUNDRY_BAKE_DOMAIN_ID=74 $0 $*"
