@@ -112,8 +112,10 @@ class _Args:
 def _fake_scans(monkeypatch, succeed):
     """Replace the real `laundry scan` subprocess with file writes."""
     results = iter(succeed)
+    calls = []
 
-    def run_one_scan(csv_path, _scan_args, _timeout):
+    def run_one_scan(csv_path, _scan_args, _timeout, **flags):
+        calls.append(flags)
         ok = next(results)
         if ok:
             os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -122,6 +124,9 @@ def _fake_scans(monkeypatch, succeed):
         return ok
 
     monkeypatch.setattr(baselines, 'run_one_scan', run_one_scan)
+    left = []
+    monkeypatch.setattr(baselines, 'leave_bucket', lambda: left.append(1) or True)
+    return calls, left
 
 
 def test_collect_archive_swaps_in_a_complete_set(tmp_path, monkeypatch):
@@ -151,3 +156,50 @@ def test_collect_archive_keeps_the_old_set_after_a_failure(tmp_path, monkeypatch
     staging = [d for d in os.listdir(tmp_path) if d.startswith('incoming_')]
     assert len(staging) == 1
     assert len(baselines.active_scans(str(tmp_path / staging[0]))) == 1
+
+
+def test_collect_stays_inside_between_scans(tmp_path, monkeypatch):
+    calls, left = _fake_scans(monkeypatch, [True, True, True])
+    args = _Args()
+    args.count = 3
+    args.dest = str(tmp_path)
+
+    assert baselines.run_collect(args, []) == 0
+
+    assert calls == [
+        {'start_inside': False, 'stay_inside': True},
+        {'start_inside': True, 'stay_inside': True},
+        {'start_inside': True, 'stay_inside': False},
+    ]
+    assert left == []  # the last scan goes out to INTER itself
+
+
+def test_collect_after_a_failed_scan_starts_from_inter_again(
+    tmp_path, monkeypatch,
+):
+    calls, left = _fake_scans(monkeypatch, [False, True])
+    args = _Args()
+    args.keep_going = True
+    args.archive = False
+    args.dest = str(tmp_path)
+
+    baselines.run_collect(args, [])
+
+    assert calls[1]['start_inside'] is False
+    assert left == []
+
+
+def test_collect_moves_out_when_it_stops_with_the_arm_inside(
+    tmp_path, monkeypatch,
+):
+    # The scan succeeds but has too few points: rejected, stop, and
+    # the arm is still at the entry pose (it stayed inside).
+    calls, left = _fake_scans(monkeypatch, [True, True])
+    args = _Args()
+    args.min_points = 5
+    args.dest = str(tmp_path)
+
+    assert baselines.run_collect(args, []) == 1
+
+    assert len(calls) == 1
+    assert left == [1]

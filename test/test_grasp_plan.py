@@ -5,6 +5,7 @@ from laundry_control.config import GRIPPER_OFFSET_Z
 from laundry_control.grasp.plan import (
     compute_grasp_target,
     DEFAULT_MAX_SINK_M,
+    DEFAULT_WALL_CLEARANCE_M,
     estimate_surface_depth_below,
     look_at_quaternion,
 )
@@ -296,18 +297,22 @@ def test_compute_grasp_target_reachable_at_first_fraction(surface):
 
     result = compute_grasp_target(cluster, surface, arm)
 
+    # Nothing in the way: it digs all the room there is, down to the
+    # wall less the clearance.
+    sink = 0.06 - DEFAULT_WALL_CLEARANCE_M
+
     assert result is not None
-    assert result.sink_fraction_used == 0.5
+    assert result.sink_fraction_used == 1.0
     assert len(arm.probed) == 1
     # Within the depth search's own 0.5mm bisection tolerance: the
     # planner re-queries from the cluster's top rather than from the
     # axis, so its bracket lands slightly differently. Still an
     # order below the sensor's 2mm noise.
     assert result.gap_m == pytest.approx(0.06, abs=1e-3)
-    assert result.sink_amount_m == pytest.approx(0.03, abs=1e-3)
-    assert result.grasp_point[2] == pytest.approx(top_z - 0.03, abs=1e-3)
+    assert result.sink_amount_m == pytest.approx(sink, abs=1e-3)
+    assert result.grasp_point[2] == pytest.approx(top_z - sink, abs=1e-3)
     assert result.tcp_position[2] == pytest.approx(
-        top_z - 0.03 + GRIPPER_OFFSET_Z, abs=1e-3
+        top_z - sink + GRIPPER_OFFSET_Z, abs=1e-3
     )
     assert result.tcp_position[:2] == pytest.approx(result.grasp_point[:2])
     assert floor_z < result.grasp_point[2]
@@ -380,9 +385,31 @@ def test_compute_grasp_target_max_sink_cap(surface):
     result = compute_grasp_target(cluster, surface, arm)
 
     assert result is not None
-    assert result.gap_m > 2 * DEFAULT_MAX_SINK_M
-    assert result.sink_fraction_used == 0.5
+    assert result.gap_m > DEFAULT_MAX_SINK_M + DEFAULT_WALL_CLEARANCE_M
+    assert result.sink_fraction_used == 1.0
     assert result.sink_amount_m == pytest.approx(DEFAULT_MAX_SINK_M)
+
+
+def test_compute_grasp_target_digs_as_deep_as_is_reachable(surface):
+    cluster, floor_z = _cluster_above_floor(surface, gap_m=0.10)
+    top_z = float(cluster.centroid[2])
+    room = 0.10 - DEFAULT_WALL_CLEARANCE_M
+
+    # Something blocks the grasp point lower than 5 cm below the top:
+    # the full room (8 cm) and 3/4 of it (6 cm) are unreachable, half
+    # of it (4 cm) is the deepest that is.
+    arm = _StubArm(
+        reachable_at_or_above=top_z - 0.05 + GRIPPER_OFFSET_Z,
+        current_position=(cluster.centroid[0], cluster.centroid[1], 0.9),
+    )
+
+    result = compute_grasp_target(cluster, surface, arm)
+
+    assert result is not None
+    assert result.sink_fraction_used == 0.5
+    assert result.sink_amount_m == pytest.approx(0.5 * room, abs=1e-3)
+    assert len(arm.probed) == 3
+    assert result.grasp_point[2] > floor_z + DEFAULT_WALL_CLEARANCE_M
 
 
 def test_compute_grasp_target_offset_arithmetic_directly_above(surface):

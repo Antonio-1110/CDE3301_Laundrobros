@@ -1,28 +1,60 @@
 #!/usr/bin/env python3
 
-"""Where the grabs go: the grid the detected-item search uses, and its limits."""
+"""Where the grabs go: the pile-aware sweep layers and the detected-item grid."""
+
+import os
 
 # =============================================================
 # GRABS
 #
 # The sensorless sweep (`laundry preplanned`, the start of `laundry
-# clear`) visits the grabs placed by hand in scan_plans/grab_targets.
-# yaml, in order (grasp/grab_targets.py): each is a depth, floor
-# angle, height, tilt and approach distance relative to the bucket.
-# Edit them by dragging in RViz (`laundry plan edit-grabs`), then
-# `laundry plan bake retrieve` solves each EXACTLY as placed and
-# stores it as two joint states in scan_plans/retrieve.yaml:
+# clear`) visits the grabs in scan_plans/grab_targets.yaml, in order
+# (grasp/grab_targets.py): each is a depth, floor angle, height, tilt
+# and approach distance relative to the bucket. `laundry plan bake
+# retrieve` solves each EXACTLY as placed and stores it as two joint
+# states in scan_plans/retrieve.yaml:
 #
 #   approach (named pose grab_NN): the gripper approach_m back along
 #       its own axis - reached from INTER on a baked route;
 #   grab: straight down onto the laundry from there, with a straight,
 #       collision-checked joint move, then straight back up.
 #
-# The sweep runs on a drum expected ~2/3 full (the pile's top ~25 cm
-# above the floor), so its grabs sit well up in the pile; the old
-# grid's grabs, 1.5-4 cm off the floor, drove the claw ~20 cm through
-# it. A vertical grab needs the 15 cm gripper plus its approach
-# between the contact point and the drum's ceiling.
+# The sweep runs on a drum that is already full, so what it needs
+# depends on how full: PILE below. The bake GENERATES the grab list
+# from it (grasp/pile_layers.py) whenever PILE changed since the list
+# was generated:
+#
+#   top_height_m:  where the pile's top is, above the floor's lowest
+#                  line. 2/3 of a ~37 cm drum = 0.25. Override per
+#                  run with LAUNDRY_PILE_TOP_M (bake AND run: a plan
+#                  baked for another level is reported as stale).
+#   sink_m:        how far below the pile's surface the first layer's
+#                  contact points go
+#   layer_step_m:  how much lower each further layer goes than the one
+#                  before ACTUALLY reached (the gripper cannot reach
+#                  the top of a full drum, so layers step down from
+#                  what is reachable, not from the pile's top)
+#   min_height_m:  the lowest sweep grab; laundry below it is the
+#                  scan-then-grasp stage's, so a pile this low gets no
+#                  sweep grabs at all
+#   depths_m, angles_deg: the spots, from the CLOSED end, in visiting
+#                  order (the mouth first: the claw passes through the
+#                  laundry there to get deeper)
+#   tilts_deg:     tried smallest first; each spot takes the highest
+#                  height that some tilt reaches. The 15 cm gripper
+#                  plus its approach meet the drum's ceiling, so
+#                  higher costs tilt (vertical to ~5-8 cm, 14 cm up
+#                  needs 45-60 deg: fake controller, 2026-10-06)
+#   approach_m:    the approach pose's distance back along the tool
+#
+# A layer is one pass over every spot; the sweep runs layer 1 (the
+# pile's top) over all spots, then layer 2 a step lower, and so on,
+# since taking laundry lowers the pile. A spot's layers stop at
+# min_height_m.
+#
+# Edit them by dragging in RViz instead (`laundry plan edit-grabs`)
+# and the bake keeps your list until PILE changes or you pass
+# --regenerate.
 #
 # RETRIEVE_GRID is the search for DETECTED items (grasp/
 # retrieve_grid.plan_floor_grab), which sinks into the sensed item:
@@ -43,6 +75,17 @@
 # is (`laundry scene fit`): settle OBSTACLES first, then bake.
 # =============================================================
 
+PILE = {
+    'top_height_m': float(os.environ.get('LAUNDRY_PILE_TOP_M', 0.25)),
+    'sink_m': 0.06,
+    'layer_step_m': 0.06,
+    'min_height_m': 0.10,
+    'depths_m': (0.40, 0.30, 0.20, 0.10),
+    'angles_deg': (0.0, -20.0, 20.0),
+    'tilts_deg': (0.0, 15.0, 30.0, 45.0, 60.0),
+    'approach_m': 0.05,
+}
+
 RETRIEVE_GRID = {
     'max_depth_m': 0.55,
     'min_height_m': 0.01,
@@ -50,6 +93,30 @@ RETRIEVE_GRID = {
     'approach_m': 0.08,
     # 0.5 cm (was 1 cm): the rig confirmed grabs by ruler (2026-09-29).
     'clearance_m': 0.005,
+}
+
+# How deep the grab of a DETECTED item digs into it. The sensed top is
+# only the pile's surface; the claw closes on what is below it, down
+# toward the bucket wall underneath (the fitted bucket model says how
+# far that is). The grab goes to the DEEPEST height whose grab pose,
+# approach pose and straight descent are all collision-free (IK +
+# MoveIt's checks, the gripper padded by RETRIEVE_GRID's clearance_m),
+# searched to resolution_m - so how close it gets to the bucket is set
+# by the collision check, not by a fixed fraction of the pile.
+#
+#   max_sink_m:        never more than this below the sensed top
+#   wall_clearance_m:  the contact point stays at least this far in
+#                      from the bucket wall (the model is only as good
+#                      as `laundry scene fit`; the claw mesh itself is
+#                      kept clear by the padding)
+#   resolution_m:      how finely the deepest clear height is found
+#
+# Until 2026-10-22 the sink was half the pile's height, at most 5 cm:
+# on a 20 cm pile the claw closed 15 cm above the floor.
+DETECTED_GRAB_DIG = {
+    'max_sink_m': 0.15,
+    'wall_clearance_m': 0.02,
+    'resolution_m': 0.01,
 }
 
 # DETECTED items are grabbed the same way (IK over the item, straight

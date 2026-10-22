@@ -20,13 +20,15 @@
 #   full      laundry scan --full (adds the end scan)
 #   step06    quick scan with --step 0.06
 #   step12    quick scan with --step 0.12
-#   sweep     laundry preplanned: all 12 grabs of the generated grid
+#   sweep     laundry preplanned: every grab of the generated sweep
 #   run       laundry run on a scan with an item in it (needs
 #             LAUNDRY_SCAN=<a scan csv that detects something>)
 #
 # The fake controller runs the planned trajectories in real time, so
 # the motion times match the rig's. What it leaves out: the gripper
-# (open or close is 1.5 s on the rig, SETTLE_SEC, plus the ESP32 ack)
+# (open or close is 0.5 s on the rig with the ESP32,
+# ESP32_GRIPPER_SETTLE_SEC, plus its ack; the sweep checks its next
+# move during it)
 # and the real arm's tracking. Results: docs/performance.md.
 #
 # Environment: SIM_DOMAIN_ID (default 77), SIM_OUT (log directory,

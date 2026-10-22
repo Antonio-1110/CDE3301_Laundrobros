@@ -25,10 +25,15 @@ def cmd_scan(args):
 
     csv_path = args.save or timestamped_scan_path('scan')
 
+    scan_kwargs = scan_kwargs_from_args(args)
+    scan_kwargs.update(
+        start_inside=args.start_inside, stay_inside=args.stay_inside
+    )
+
     with RosSession(args=args) as arm:
         recorder = make_recorder(arm, args)
 
-        ok = run_scan(arm, recorder, csv_path, scan_kwargs_from_args(args))
+        ok = run_scan(arm, recorder, csv_path, scan_kwargs)
 
     if ok:
         print(f'Scan saved: {csv_path}')
@@ -141,6 +146,22 @@ def add_scan_parser(subparsers):
         help='Where to save the scan (default: scan_records/scan_<time>.csv).',
     )
     add_scan_arguments(scan)
+    scan.add_argument(
+        '--start-inside', action='store_true',
+        help=(
+            'Start at the entry pose (INTER, --entry-depth in), where a '
+            '--stay-inside scan ended, instead of going to INTER and in. '
+            'Refuses unless the arm is there. Used by baseline collect.'
+        ),
+    )
+    scan.add_argument(
+        '--stay-inside', action='store_true',
+        help=(
+            'End at the entry pose (J7 turned back, still --entry-depth '
+            'in) instead of going out to INTER, for a --start-inside '
+            'scan next. Used by baseline collect.'
+        ),
+    )
     add_fake_arguments(scan, with_scan_from=True)
     scan.set_defaults(func=cmd_scan)
 

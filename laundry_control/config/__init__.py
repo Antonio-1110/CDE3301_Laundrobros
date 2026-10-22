@@ -91,13 +91,45 @@ def get_named_pose(name):
 
 def _read_plan(path):
     """Return a baked plan file's document, or None if it is missing."""
-    if not os.path.isfile(path):
+    document = read_yaml(path)
+
+    return None if document is None else (document or {})
+
+
+# {path: ((mtime_ns, size), document)} - see read_yaml.
+_YAML_CACHE = {}
+
+
+def read_yaml(path):
+    """
+    Return a YAML file's document (a fresh copy), or None if it is missing.
+
+    Parsed once per version of the file: a move looks up named poses
+    and baked routes several times, and parsing retrieve.yaml and
+    transfers.yaml each time cost ~0.5 s per move on the Pi
+    (2026-10-21). A rewritten file (new mtime or size) is read again.
+    """
+    import copy
+
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
         return None
 
-    import yaml
+    version = (stat.st_mtime_ns, stat.st_size)
+    cached = _YAML_CACHE.get(path)
 
-    with open(path) as handle:
-        return yaml.safe_load(handle) or {}
+    if cached is None or cached[0] != version:
+        import yaml
+
+        loader = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
+
+        with open(path) as handle:
+            cached = (version, yaml.load(handle, Loader=loader))
+
+        _YAML_CACHE[path] = cached
+
+    return copy.deepcopy(cached[1])
 
 
 def generated_grab_poses():

@@ -46,7 +46,7 @@ from scipy.spatial.transform import Rotation
 
 from ..arm.geometry import look_at_quaternion
 from ..bucket import to_cylindrical
-from ..config import GRIPPER_OFFSET_Z
+from ..config import DETECTED_GRAB_DIG, GRIPPER_OFFSET_Z
 
 __all__ = [
     'GraspTarget',
@@ -55,19 +55,20 @@ __all__ = [
     'look_at_quaternion',
 ]
 
-# Walked largest to smallest: starts at the midpoint of a
-# reasonable 40-60% range, halves on failure (fast convergence),
-# then snaps straight to the guaranteed-safe floor (sink=0, i.e.
-# grab right at the sensed surface - the same depth the ToF sensor
-# itself already proved reachable) rather than continuing to halve
-# into sub-centimetre differences.
-DEFAULT_SINK_FRACTIONS = (0.5, 0.25, 0.1, 0.0)
+# Fractions of the room below the sensed top (down to the bucket wall,
+# less config.DETECTED_GRAB_DIG['wall_clearance_m']), walked deepest
+# first: the first one MoveIt can reach collision-free wins, so how
+# close to the wall the claw gets is decided by the collision check.
+# The last, sink=0, grabs at the sensed surface itself - the depth the
+# ToF sensor already proved reachable. Until 2026-10-22 this started
+# at half the room, at most 5 cm, and the claw barely dug in.
+DEFAULT_SINK_FRACTIONS = (1.0, 0.75, 0.5, 0.25, 0.0)
 
-# Never sink drastically further than the sensing resolution that
-# produced the cluster in the first place: roughly one scan step
-# (0.03m) plus margin, so a noisy depth estimate can't justify an
-# unreasonably deep sink.
-DEFAULT_MAX_SINK_M = 0.05
+# Never sink further than this below the sensed top
+# (config.DETECTED_GRAB_DIG; the floor grab, retrieve_grid.
+# deepest_grab, uses the same).
+DEFAULT_MAX_SINK_M = DETECTED_GRAB_DIG['max_sink_m']
+DEFAULT_WALL_CLEARANCE_M = DETECTED_GRAB_DIG['wall_clearance_m']
 
 # Matches the threshold _plan_to_pose/_plan_tool_z already use to
 # decide a Cartesian path is "complete".
@@ -217,6 +218,7 @@ def compute_grasp_target(
     gripper_offset_z=GRIPPER_OFFSET_Z,
     sink_fractions: Sequence[float] = DEFAULT_SINK_FRACTIONS,
     max_sink_m: float = DEFAULT_MAX_SINK_M,
+    wall_clearance_m: float = DEFAULT_WALL_CLEARANCE_M,
     max_step: float = 0.005,
     velocity: float = 0.1,
     acceleration: float = 0.1,
@@ -227,8 +229,10 @@ def compute_grasp_target(
 
     Compute where to place the flange/TCP, and how to orient it, so
     the gripper's contact point lands on a graspable point of
-    `cluster`, sunk below the sensed top by a dynamic amount,
-    verified reachable via a plan-only dry-run against `arm`.
+    `cluster`, sunk below the sensed top as deep as is reachable
+    collision-free (sink_fractions of the room down to the bucket
+    wall less wall_clearance_m, at most max_sink_m), verified via a
+    plan-only dry-run against `arm`.
 
     x, y, and the sensed-top z all come from cluster.target_point -
     the mean of its top-quartile-intrusion points, falling back to
@@ -310,9 +314,12 @@ def compute_grasp_target(
 
     current_x_axis = current_rotation.apply([1.0, 0.0, 0.0])
 
+    # The room to dig: down to the wall, short of wall_clearance_m.
+    room = max(0.0, gap - wall_clearance_m)
+
     for fraction in sink_fractions:
 
-        sink_amount = min(fraction * gap, max_sink_m)
+        sink_amount = min(fraction * room, max_sink_m)
         grasp_z = sensed_top_z - sink_amount
         grasp_point = np.array([x, y, grasp_z])
 

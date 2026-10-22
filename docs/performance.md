@@ -2,7 +2,7 @@
 
 How long the scan and retrieve motions take, and how well the detector does, measured without the arm. Measured 2026-10-19 on the Pi 5, at the default settings. To redo it: [`benchmarks/sim_timing.sh`](../benchmarks/sim_timing.sh) (motion times, on an isolated fake controller) and [`benchmarks/sim_metrics.sh`](../benchmarks/sim_metrics.sh) (detection and coverage, plain files).
 
-**What these numbers are.** The fake controller runs MoveIt's planned trajectories in real time, so the arm's motion times match what the rig is given. They leave out the gripper (open or close is 1.5 s on the rig, `SETTLE_SEC`, plus the ESP32's ack) and the real arm's tracking, so the rig is a few seconds slower per grasp. **They say nothing about whether a grasp picks the laundry up**: simulation has no cloth, and a grasp counts as done when the motions finish. That needs the rig.
+**What these numbers are.** The fake controller runs MoveIt's planned trajectories in real time, so the arm's motion times match what the rig is given. They leave out the gripper (open or close is 0.5 s on the rig with the ESP32, `ESP32_GRIPPER_SETTLE_SEC`, plus its ack) and the real arm's tracking, so the rig is a few seconds slower per grasp. **They say nothing about whether a grasp picks the laundry up**: simulation has no cloth, and a grasp counts as done when the motions finish. That needs the rig.
 
 ## Scan time
 
@@ -21,11 +21,11 @@ Where the quick scan's 97 s goes: 7 s from INTER to the mouth, 35 s inward strok
 
 | What | Time (simulation) | On the rig |
 |---|---|---|
-| Sensorless sweep, all 12 grabs (`laundry preplanned`) | 196 s | about 3.8 min |
-| One grab of the sweep, INTER to INTER via DROP | 11-22 s, mean 15.7 s | mean about 18.7 s |
+| Sensorless sweep, all 24 grabs of the full-drum plan (`laundry preplanned`) | 346 s | about 7 min |
+| One grab of the sweep, INTER to INTER via DROP | 12-17 s, mean 14.4 s | mean about 17.4 s |
 | `laundry run`, one item in the bucket | **125 s** | about 130 s |
 
-- **Per grab:** deeper grabs take longer: 11-16 s at 40 and 30 cm from the closed end, 16-22 s at 10 cm. The rig adds about 3 s per grab, for the claw to close and to open at DROP.
+- **The sweep** is 2 layers of 12 grabs (about 19 and 13 cm above the floor, for a pile top at 25 cm, `config.PILE`): 163 s for the first layer, 173 s for the second. Deeper grabs take longer (13-16 s at 10 cm from the closed end, 13-14 s elsewhere). The rig adds about 3 s per grab, for the claw to close and to open at DROP. A fuller or emptier drum changes the heights and the number of layers; see `docs/operating.md`. (An earlier version of these numbers, 196 s for 12 grabs, was measured on the old plan that aimed 2 cm above the floor.) **2026-10-21, at 60 deg/s:** 213 s for all 24 grabs (8.9 s per grab), with the sweep's moves checked while the claw moves, the route in and the descent (and the lift and the route to DROP) as one trajectory each, and direct grab <-> DROP routes that skip INTER (`arm/direct.py`); 242-246 s without the direct routes. The rig adds the claw's 0.5 s twice per grab, minus the checks that overlap it; today's rig log, before these changes, took about 14 s per grab.
 - **`laundry run`, one item (125 s):** scan 93 s (75%), detection 0.4 s, grasp 28 s. The grasp is about 10 s of reachability probing and 18 s of moving, including the drop. The rig adds about 4.5 s for the three gripper moves (open before the scan, close, release).
 - **`laundry clear` is an estimate, not a measurement.** Each further item costs a rescan: about 97 s scan, 30 s grasp and 4.5 s of gripper, so **about 2.2 min per item**, plus about 1.6 min for the final scan that finds nothing (about 2.5 min if the end scan runs on its own). With the grab grid first (`--no-grabs` skips it), add the sweep's 3.8 min.
 
@@ -60,10 +60,21 @@ The upper wall and ceiling are outside the scan's design: 418 of 1200 items plac
 
 ## Reachability
 
-`laundry scene check` on the fake controller: all 12 generated grab spots, their approach routes, HOME, DROP, BOTTOM and `drop_return` are collision-free under the 3 cm arm padding. One problem is reported: `scan_plans/retrieve.yaml` was solved for other settings (`grab_targets.yaml` and `clearance_m` changed). Re-bake it (`./rebake.sh retrieve`) before treating the sweep times as final, since they were measured with that plan.
+`laundry scene check` on the fake controller, with the generated plan for a pile top at 25 cm: all 24 sweep grabs and their approach routes, HOME, DROP, BOTTOM and `drop_return` are collision-free under the 3 cm arm padding. Generating the plan, which tries heights and tilts for each of 12 spots, takes seconds; baking the routes and timing them takes the rest of the 2.5 minutes of `./rebake.sh retrieve`. The reachable heights, from the generator on the fake controller (a pile top at 25 cm): about 19 cm above the floor at 45° tilt near the mouth and 60° deeper, then 13 cm at 45°. Those come from collision checks against the modelled bucket, so confirm the clearance on the rig (HARDWARE_TESTS 17b).
 
 ## What only the rig can tell
 
 - **Grasp success.** Nothing here senses whether the claw closed on laundry. Count it by eye or with a camera, and split the failures into motion failed, claw closed on nothing, and item dropped on the way.
 - **Detection with real fabric, the new ToF mount and the ESP32 sensor.** Re-measure the mounting offsets and re-collect the baselines first.
 - **The gripper's real time per move,** and the ESP32 link under a long run.
+
+## Rig log
+
+- **2026-10-22 18:57: C24 "Speed Exceeds Limit" on the transfer DROP → HOME at 7.0 rad/s².** `TRANSFER_MAX_ACCELERATION_RAD_S2` was raised from 5.0 to 7.0 (jerk 42 → 59) and the routes were re-timed, but not yet run on the arm. On the first real DROP → HOME (via INTER), 3.23 s in (0.87 s into the INTER → HOME leg), the xArm rejected the streamed targets (`set_servo_angle_j ret=1`, 13 times in 130 ms), raised C24 and stopped. The driver deactivated `xarm7_traj_controller`, which cancelled the goal, and MoveIt reported error -4 (CONTROL_FAILED). No joint was too fast: the planned peak is 59°/s against the 60°/s cap, and acceleration stays within 7.0. The **gripper tip** was too fast. FK of the baked timing, with the tip 0.142 m along link7 z, shows:
+
+  | INTER → HOME | Duration | Flange peak | Gripper-tip peak |
+  |---|---|---|---|
+  | 5.0 rad/s² (ran on the rig) | 3.80 s | 780 mm/s | 975 mm/s |
+  | 7.0 rad/s² (C24) | 3.60 s | 841 mm/s | **1050 mm/s** |
+
+  The xArm7's maximum TCP speed is 1000 mm/s. With the higher acceleration, J1, J3 and J7 reach about 59°/s together, 0.8 s into the leg, and their speeds add up at the tool, about 0.6 m from the base. DROP → INTER peaks at about 350 mm/s, so it was fine. **Even the 5.0 timing was only 2.5% under the limit.** Fix: cap the gripper-tip speed when the routes are timed (about 900 mm/s), or go back to 5.0 / 42 and re-time. The arm must have C24 cleared (restart the bring-up, or use UFACTORY Studio) before it will move again. Logs: `~/.ros/log/ros2_control_node_22677_1792666590164.log`, `move_group_22675_*.log`.

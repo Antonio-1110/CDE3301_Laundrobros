@@ -198,8 +198,8 @@ def test_the_way_back_runs_the_timing_backwards():
 
 
 def test_colliding_corners_fall_back_to_stopping_at_the_vias():
-    # 1st check (the straight route) clear; 2nd (the rounded curve) hits.
-    arm = _Arm(INTER, verdicts=[None, 5])
+    # 1st check (the rounded curve) hits; 2nd (the straight route) clear.
+    arm = _Arm(INTER, verdicts=[5, None])
 
     assert _go(arm, 'drop', {'drop': _timed([INTER, VIA, DROP])})
 
@@ -259,3 +259,102 @@ def test_a_stored_timing_is_loaded_at_rest_at_both_ends():
     _t, _q, loaded = pass_through.from_document(document)
 
     assert np.all(loaded[-1] == 0.0)
+
+
+GRAB = np.array(config.get_named_pose('grab_01'))
+CHAIN_ROUTES = dict(ROUTES, grab_01=np.array([INTER, GRAB]))
+
+
+def test_the_sweep_chains_are_grab_to_drop_and_back_when_empty(monkeypatch):
+    monkeypatch.setattr(
+        config, 'generated_grab_poses', lambda: {'grab_01': list(GRAB)}
+    )
+    routes = dict(CHAIN_ROUTES, drop_return=np.array([INTER, VIA, DROP]))
+
+    assert transfers.chain_pairs(routes) == {
+        'grab_01..drop': ('grab_01', 'drop'),
+        'drop_return..grab_01': ('drop_return', 'grab_01'),
+    }
+
+
+def test_a_chain_timing_passes_through_inter():
+    chain = _timed(transfers.chain_waypoints(CHAIN_ROUTES, 'grab_01', 'drop'))
+    arm = _Arm(GRAB)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={'grab_01..drop': chain, 'drop': _timed([INTER, VIA, DROP])},
+    )
+
+    (positions, times), = arm.executed
+    assert times[-1] == pytest.approx(chain[0][-1])
+    assert np.allclose(positions[-1], DROP)
+    assert any('INTER included' in line for line in arm.logger.lines)
+
+
+def test_without_a_chain_timing_the_arm_stops_at_inter():
+    arm = _Arm(GRAB)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={'drop': _timed([INTER, VIA, DROP])},
+    )
+
+    assert any('stopping at INTER' in line for line in arm.logger.lines)
+
+
+def test_a_stored_chain_is_used_only_for_the_routes_it_was_timed_on(tmp_path):
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(path, CHAIN_ROUTES, 0.785)
+    t, q, qd = _timed(
+        transfers.chain_waypoints(CHAIN_ROUTES, 'grab_01', 'drop')
+    )
+    chain = {
+        'back': 'grab_01', 'out': 'drop',
+        'timed': pass_through.to_document(
+            t, q, qd, pass_through.current_limits(), {}
+        ),
+    }
+    transfers.save_timings(path, {}, chains={'grab_01..drop': chain})
+
+    assert set(transfers.load_timings(path)) == {'grab_01..drop'}
+
+    # DROP's route re-baked with another via: the chain is stale.
+    transfers.save(
+        path, dict(CHAIN_ROUTES, drop=np.array([INTER, VIA + 0.05, DROP])),
+        0.785,
+    )
+    document = transfers._read(path)
+    document['chains'] = {'grab_01..drop': dict(chain, digest='0' * 16)}
+    transfers._write(path, document)
+
+    assert transfers.load_timings(path) == {}
+
+
+def test_straight_moves_before_and_after_are_one_trajectory():
+    below = GRAB + 0.05
+    arm = _Arm(below)
+
+    move = transfers.prepare_go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={}, before=[GRAB], after=[DROP + 0.05],
+    )
+
+    assert arm.executed == []  # checked, not moved yet
+    assert move()
+
+    (positions, _times), = arm.executed
+    assert np.allclose(positions[0], below)
+    assert np.any(np.all(np.isclose(positions, GRAB), axis=1))
+    assert np.any(np.all(np.isclose(positions, DROP), axis=1))
+    assert np.allclose(positions[-1], DROP + 0.05)
+
+
+def test_a_colliding_straight_move_refuses_the_whole_move():
+    arm = _Arm(GRAB + 0.05, verdicts=[2])
+    arm._why_invalid = lambda *_a: 'collision'
+
+    assert transfers.prepare_go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={}, before=[GRAB],
+    ) is None

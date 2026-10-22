@@ -39,11 +39,12 @@ run() replays them: baked route to grab_NN, straight down, close,
 straight up, DROP, open.
 
 plan_floor_grab() does a search for a DETECTED item (the
-sensor-guided grasp), over config.RETRIEVE_GRID's heights and tilts:
-the grab is placed over the item, sunk into it,
-and reached by a straight, collision-checked joint move from INTER
-(or, when that line collides, from the nearest baked grab_NN) - so
-the whole approach is as repeatable as the grid's.
+sensor-guided grasp), over config.RETRIEVE_GRID's tilts: the grab is
+placed over the item and dug as deep into it as is collision-free
+(deepest_grab, config.DETECTED_GRAB_DIG), and reached by a straight,
+collision-checked joint move from INTER (or, when that line collides,
+from the nearest baked grab_NN) - so the whole approach is as
+repeatable as the grid's.
 """
 
 import contextlib
@@ -61,10 +62,11 @@ from ..bucket import axis_basis, seed_cone, to_cylindrical
 
 PLAN_VERSION = 1
 
-# How far into a detected pile to sink the grab, as in grasp/plan.py:
-# half the pile's sensed height above the floor, at most 5 cm.
-FLOOR_GRAB_SINK_FRACTION = 0.5
-FLOOR_GRAB_MAX_SINK_M = 0.05
+# The approach pose of a detected item's grab starts at least this far
+# above the pile's sensed top (along the tool axis), so the move to it
+# never drags the claw sideways through the laundry: all the digging
+# is the straight descent.
+ABOVE_PILE_M = 0.03
 
 
 def plan_path():
@@ -319,16 +321,120 @@ def floor_position(point, cone=None):
     return float(s[0]), float(angle), float(cone.radius_at(s[0]) - r[0])
 
 
+def deepest_grab(arm, depth, angle, top_height, grid, seeds, dig=None):
+    """
+    Return the deepest collision-free grab into a pile, or None.
+
+    top_height: the pile's sensed top, in from the bucket wall at
+    (depth, angle) - the physical room there is to dig. For each tilt
+    of grid['tilts_deg'], heights are tried from the deepest allowed,
+    max(dig['wall_clearance_m'], top - dig['max_sink_m']), up to the
+    sensed top, 2 x resolution_m apart; the first whose grab pose,
+    approach pose and straight descent are all clear (_try_pose: IK
+    inside the task ranges, MoveIt's collision checks with the
+    caller's gripper padding) is then refined one resolution_m step
+    down. The deepest over all tilts wins, the smaller tilt on a tie;
+    a later tilt is only tried below the best so far.
+
+    Scanned from the bottom up, not bisected: clear heights need not
+    be one interval. Near the mouth a grab high in a tall pile puts
+    the arm against the top of the bucket, while lower ones are clear
+    (fake controller, 2026-10-22).
+
+    The approach pose starts ABOVE_PILE_M above the sensed top, so the
+    dig is the straight descent and the move to the approach never
+    drags the claw through the pile; where that does not fit,
+    grid['approach_m'] back along the tool (the grab then starts
+    inside the pile, as before 2026-10-22).
+
+    Returns solve_one()'s dict plus 'sink_m' (how far below the sensed
+    top the claw closes) and 'approach_m'.
+    """
+    dig = dig or config.DETECTED_GRAB_DIG
+    inter = np.array(config.get_named_pose('inter'))
+    resolution = dig['resolution_m']
+    coarse = 2.0 * resolution
+
+    top = top_height
+    lowest = min(top, max(dig['wall_clearance_m'], top - dig['max_sink_m']))
+
+    def probe(height, tilt):
+        contact, tool_z, claw_x = grab_geometry(depth, angle, height, tilt)
+        # Along the tilted tool axis, the pile's top is further back.
+        above = (top - height + ABOVE_PILE_M) / max(
+            np.cos(np.radians(tilt)), 0.2
+        )
+
+        for approach in dict.fromkeys(
+            [max(grid['approach_m'], above), grid['approach_m']]
+        ):
+            found, _ = _try_pose(
+                arm, contact, tool_z, claw_x, approach, seeds, inter
+            )
+
+            if found is not None:
+                return dict(
+                    found, height_m=float(height), tilt_deg=float(tilt),
+                    approach_m=float(approach),
+                )
+
+        return None
+
+    best = None
+
+    for tilt in grid['tilts_deg']:
+        # Only worth trying below the best so far.
+        ceiling = top if best is None else best['height_m'] - resolution
+        height = lowest
+        blocked = None
+        clear = None
+
+        while height <= ceiling + 1e-9:
+            clear = probe(height, tilt)
+
+            if clear is not None:
+                break
+
+            blocked = height
+            height = min(height + coarse, ceiling) if height < ceiling else (
+                ceiling + 1.0
+            )
+
+        if clear is None:
+            continue
+
+        # One step finer between the last blocked height and this one.
+        if blocked is not None and clear['height_m'] - blocked > resolution:
+            finer = probe(clear['height_m'] - resolution, tilt)
+
+            if finer is not None:
+                clear = finer
+
+        best = clear
+
+        if best['height_m'] <= lowest + 1e-9:
+            break
+
+    if best is None:
+        return None
+
+    return dict(
+        best,
+        depth_m=float(depth),
+        floor_angle_deg=float(angle),
+        sink_m=float(top - best['height_m']),
+    )
+
+
 def plan_floor_grab(arm, point, grabs, grid=None):
     """
     Plan a grid-style grab at a detected item's sensed top, or None.
 
-    Returns the solve_one() dict plus 'via': the baked grab_NN (or
+    Returns the deepest_grab() dict plus 'via': the baked grab_NN (or
     INTER, as a last resort) it is reached from by a straight joint
-    move. The grab sinks FLOOR_GRAB_SINK_FRACTION of the pile's sensed
-    height into it (at most FLOOR_GRAB_MAX_SINK_M, never lower than
-    the grid's lowest height); on a wall, "height" is the distance in
-    from the wall. None if the item is beyond
+    move. The grab digs as deep into the pile as is collision-free
+    (deepest_grab, config.DETECTED_GRAB_DIG); on a wall, "height" is
+    the distance in from the wall. None if the item is beyond
     config.DETECTED_GRAB_MAX_ANGLE_DEG, out of the bucket, or nothing
     reachable was found.
     """
@@ -344,9 +450,6 @@ def plan_floor_grab(arm, point, grabs, grid=None):
         return None
 
     top_height = max(0.0, top_height)
-    sink = min(FLOOR_GRAB_SINK_FRACTION * top_height, FLOOR_GRAB_MAX_SINK_M)
-    lowest = max(grid['min_height_m'], top_height - sink)
-    grid['heights_m'] = [lowest + 0.01 * k for k in range(4)]
 
     # Seed IK from the grabs nearest this spot: same elbow, same wrist.
     nearby = sorted(
@@ -364,7 +467,7 @@ def plan_floor_grab(arm, point, grabs, grid=None):
     )
 
     try:
-        plan = solve_one(arm, depth, angle, grid, seeds=seeds)
+        plan = deepest_grab(arm, depth, angle, top_height, grid, seeds)
     finally:
         scene.set_padding(
             arm,
@@ -410,7 +513,8 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print):
     log(
         f'Floor grab via {via}: {plan["depth_m"] * 100:.0f} cm deep, '
         f'{plan["floor_angle_deg"]:+.0f} deg, {plan["height_m"] * 100:.1f} cm '
-        f'from the wall, tilt {plan["tilt_deg"]:.0f} deg'
+        f'from the wall, tilt {plan["tilt_deg"]:.0f} deg, '
+        f'{plan.get("sink_m", 0.0) * 100:.1f} cm into the pile'
     )
 
     if not gripper.open_blocking():
@@ -501,14 +605,20 @@ def save(grabs, path=None, baked_on='', targets=None):
         yaml.safe_dump(document, handle, sort_keys=False, width=100)
 
 
-def grid_mismatch(path=None, targets=None):
+def grid_mismatch(path=None, targets=None, generated=None):
     """
     Return why retrieve.yaml no longer matches what it was baked for, or None.
 
     The grab targets (scan_plans/grab_targets.yaml), the gripper
-    clearance and the gripper offset, against now.
+    clearance and the gripper offset, against now; and, when the
+    targets were generated from config.PILE (pile_layers), whether
+    PILE has changed since (`generated`: what they were generated
+    from, default: read from the targets file).
     """
+    from . import pile_layers
+
     path = path or plan_path()
+    generated = grab_targets.generated_for() if targets is None else generated
 
     if not os.path.isfile(path):
         return None
@@ -531,6 +641,9 @@ def grid_mismatch(path=None, targets=None):
         baked and not same(values(baked), values(targets))
     ):
         changed.append('grab_targets.yaml')
+
+    if pile_layers.pile_changed(generated):
+        changed.append('config.PILE')
 
     if not same(
         document.get('clearance_m', -1.0), config.RETRIEVE_GRID['clearance_m']
@@ -568,20 +681,25 @@ def load(path=None):
     return list(document.get('grabs', [])), str(document.get('scene', ''))
 
 
-def run(arm, gripper, grabs, go_to, time_scale=1.0, log=print):
+def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
     """
-    Visit each grab: route in, down, close, up, DROP, open.
+    Visit each grab: route in and down, close, up and to DROP, open.
+
+    go_to / prepare: transfers.go_to and transfers.prepare_go_to (or
+    stand-ins, for tests). "Route in and down" and "up and to DROP"
+    are one trajectory each (prepare_go_to's after / before), and
+    each is collision-checked while the gripper is still opening or
+    closing, so the arm does not stand still for its checks
+    (2026-10-21: ~1.5 s before every move, twice per grab).
 
     Returns True if every motion succeeded. Stops at the first failure
     after getting the arm back to INTER where it can.
     """
     log('Opening gripper...')
 
-    if not gripper.open_blocking():
-        log('Gripper did not confirm it opened; aborting before any grab.')
-        return False
+    opening = gripper.start_open()
 
-    for grab in grabs:
+    for index, grab in enumerate(grabs):
         name = grab['name']
 
         log(
@@ -590,40 +708,75 @@ def run(arm, gripper, grabs, go_to, time_scale=1.0, log=print):
             f'{grab["height_m"] * 100:.0f} cm above the floor'
         )
 
-        # The gripper confirmed it opened (before the first grab, else
-        # at DROP below), so DROP is left by the empty-gripper route.
-        if not go_to(arm, name, time_scale=time_scale, gripper_empty=True):
-            log(f'Failed to reach {name}; aborting.')
+        # Checked while the gripper opens; used only once it confirms
+        # it did, so DROP is left by the empty-gripper route.
+        descend = prepare(
+            arm, name, after=[grab['grab']], time_scale=time_scale,
+            gripper_empty=True,
+        )
+
+        if not opening.wait():
+            if index == 0:
+                log('Gripper did not confirm it opened; aborting before any '
+                    'grab.')
+            else:
+                log('Gripper did not confirm it opened at DROP; returning '
+                    'to INTER and aborting.')
+                go_to(arm, 'inter', time_scale=time_scale)
+
+            return False
+
+        if descend is None:
+            log(f'No collision-free way to {name} and down; aborting.')
             go_to(arm, 'inter', time_scale=time_scale)
             return False
 
-        if not arm.move_joints_linear(grab['grab'], time_scale=time_scale):
-            log(f'Descent at {name} would collide; aborting.')
-            go_to(arm, 'inter', time_scale=time_scale)
-            return False
-
-        closed = gripper.close_blocking()
-
-        # Always lift back out, even with nothing held.
-        if not arm.move_joints_linear(grab['approach'], time_scale=time_scale):
-            log(f'Could not lift back out at {name}; stopping here.')
-            return False
-
-        if not closed:
-            log('Gripper did not confirm it closed; returning to INTER and '
+        if not descend():
+            log(f'The move to {name} and down failed; lifting out and '
                 'aborting.')
-            go_to(arm, 'inter', time_scale=time_scale)
+
+            if arm.move_joints_linear(grab['approach'], time_scale=time_scale):
+                go_to(arm, 'inter', time_scale=time_scale)
+
             return False
 
-        if not go_to(arm, 'drop', time_scale=time_scale):
-            log('Failed to reach DROP; aborting.')
+        closing = gripper.start_close()
+
+        # Checked while the gripper closes.
+        lift = prepare(
+            arm, 'drop', before=[grab['approach']], time_scale=time_scale
+        )
+
+        closed = closing.wait()
+
+        if not closed or lift is None:
+            # Always lift back out, even with nothing held.
+            if not arm.move_joints_linear(
+                grab['approach'], time_scale=time_scale
+            ):
+                log(f'Could not lift back out at {name}; stopping here.')
+                return False
+
+            if not closed:
+                log('Gripper did not confirm it closed; returning to INTER '
+                    'and aborting.')
+                go_to(arm, 'inter', time_scale=time_scale)
+            else:
+                log('No collision-free route to DROP; aborting.')
+
             return False
 
-        if not gripper.open_blocking():
-            log('Gripper did not confirm it opened at DROP; returning to '
-                'INTER and aborting.')
-            go_to(arm, 'inter', time_scale=time_scale)
+        if not lift():
+            log('Failed to lift out and reach DROP; aborting.')
             return False
+
+        opening = gripper.start_open()
+
+    if not opening.wait():
+        log('Gripper did not confirm it opened at DROP; returning to INTER '
+            'and aborting.')
+        go_to(arm, 'inter', time_scale=time_scale)
+        return False
 
     log('Returning to INTER...')
 

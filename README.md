@@ -82,7 +82,8 @@ laundry_control/
     execute.py         pick a reachable target and grab it
     plan.py            where the gripper goes for a cluster
     retrieve_grid.py   solving grabs: the sweep's, and detected items'
-    grab_targets.py    the sweep's grabs as placed by hand
+    grab_targets.py    the sweep's grabs: the list file, hand-placed or generated
+    pile_layers.py     generating them from how full the drum is (config.PILE)
     grab_editor.py     placing them in RViz (`laundry plan edit-grabs`)
     targets_io.py      the targets JSON between detect and grasp
 

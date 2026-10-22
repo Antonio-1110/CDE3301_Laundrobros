@@ -100,7 +100,29 @@ def _fake_start_at_home(arm):
         [current, config.HOME], config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S
     )
 
-    ok = arm.execute_joint_path(waypoints, times, velocities)
+    # Bring-up starts this alongside the trajectory controller's
+    # spawner, and with a light gripper mesh the scene is applied
+    # before the controller is up: move_group then aborts the move
+    # ("Action client not connected"). Wait for the controller (its
+    # cancel service), then retry while move_group connects to it.
+    import time
+
+    deadline = time.monotonic() + 60.0
+
+    while (
+        not arm._controller_cancel_client.wait_for_service(timeout_sec=1.0)
+        and time.monotonic() < deadline
+    ):
+        print('--fake-start-home: waiting for the trajectory controller...')
+
+    for attempt in range(5):
+        ok = arm.execute_joint_path(waypoints, times, velocities)
+
+        if ok:
+            break
+
+        time.sleep(1.0)
+
     print('Fake arm moved to HOME.' if ok else 'Could not move the fake arm.')
 
     return ok

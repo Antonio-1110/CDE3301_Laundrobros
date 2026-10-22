@@ -278,7 +278,7 @@ def test_go_to_refuses_a_baked_route_that_collides_now():
     assert arm.calls == []
 
 
-def test_go_to_replays_under_the_routes_padding_then_restores_it():
+def test_go_to_checks_under_the_routes_padding_then_restores_it():
     routes = dict(ROUTES, bottom=np.array([INTER, BOTTOM]))
     arm = _StubArm(DROP)
 
@@ -287,10 +287,11 @@ def test_go_to_replays_under_the_routes_padding_then_restores_it():
         arm_paddings={'drop': 0.03, 'bottom': 0.02},
     )
 
+    # The padding matters to the checks only: restored before moving.
     kinds = [call[0] for call in arm.calls]
-    assert kinds == ['padding', 'baked', 'padding']
+    assert kinds == ['padding', 'padding', 'baked']
     assert arm.calls[0][1] == 0.02
-    assert arm.calls[2][1] == config.OBSTACLE_PADDING_M
+    assert arm.calls[1][1] == config.OBSTACLE_PADDING_M
 
 
 def test_go_to_leaves_drop_by_the_empty_gripper_route_when_told_so():

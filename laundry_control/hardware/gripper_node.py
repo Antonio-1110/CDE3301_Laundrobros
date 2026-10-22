@@ -45,9 +45,11 @@ from std_srvs.srv import Trigger
 from .gripper_client import CLOSE_SERVICE, OPEN_SERVICE
 from .servo import SETTLE_SEC
 from ..config import (
+    ESP32_GRIPPER_SETTLE_SEC,
     GRIPPER_BACKEND,
     GRIPPER_BACKENDS,
     GRIPPER_CLOSE_ANGLE_DEG,
+    GRIPPER_HOLD_PULSES,
     GRIPPER_OPEN_ANGLE_DEG,
     MQTT_HOST,
     MQTT_PORT,
@@ -104,13 +106,24 @@ class GripperNode(Node):
         self.declare_parameter('mqtt_prefix', MQTT_TOPIC_PREFIX)
         self.declare_parameter('open_angle_deg', GRIPPER_OPEN_ANGLE_DEG)
         self.declare_parameter('close_angle_deg', GRIPPER_CLOSE_ANGLE_DEG)
-        # Off: on the rig, holding with the Pi's software-timed PWM
-        # made the closed claw shake and grip worse (2026-09-29) than
-        # stopping the pulses, which it holds without.
-        self.declare_parameter('hold_closed', False)
+        # Keep the pulses on after a move. On for the ESP32, whose
+        # hardware PWM holds steadily (config.GRIPPER_HOLD_PULSES);
+        # off for the Pi's GPIO: there, holding with the software-
+        # timed PWM made the closed claw shake and grip worse
+        # (2026-09-29) than stopping the pulses, which it holds without.
+        hold_default = (
+            GRIPPER_HOLD_PULSES
+            and self.get_parameter('backend').value == 'mqtt'
+        )
+        self.declare_parameter('hold_open', hold_default)
+        self.declare_parameter('hold_closed', hold_default)
         # Seconds each move keeps sending pulses before they stop (see
         # servo.SETTLE_SEC); longer if the claw does not finish moving.
-        self.declare_parameter('settle_sec', SETTLE_SEC)
+        self.declare_parameter(
+            'settle_sec',
+            ESP32_GRIPPER_SETTLE_SEC
+            if self.get_parameter('backend').value == 'mqtt' else SETTLE_SEC,
+        )
         # Real-time (SCHED_FIFO) priority for lgpio's pulse thread, so
         # the busy Pi does not delay its pulses (servo.py, REAL-TIME
         # PRIORITY); 0 turns it off. Above ros2_control's 50: it only
@@ -152,7 +165,9 @@ class GripperNode(Node):
 
     def _open_callback(self, request, response):
         return self._move_to(
-            self.get_parameter('open_angle_deg').value, response, hold=False
+            self.get_parameter('open_angle_deg').value,
+            response,
+            hold=bool(self.get_parameter('hold_open').value),
         )
 
     def _close_callback(self, request, response):

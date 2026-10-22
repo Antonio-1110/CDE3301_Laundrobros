@@ -276,13 +276,13 @@ laundry run --save scan_records/hw_towel_run.csv 2>&1 | grep -vE "joint[0-9]:|Jo
 
 ---
 
-**17b. The generated grab grid, slowly, empty bucket first.** Hand on the e-stop. It visits 12 spots on the floor, from the mouth inward: centre, then −20° and +20° across the floor. At each spot it descends 8 cm, closes the claw, lifts back up, and drops at DROP.
+**17b. The generated sweep, slowly, empty bucket first.** Hand on the e-stop. It visits 24 grabs in two layers, from the mouth inward: centre, then −20° and +20° across the floor. The first layer is about 19 cm above the floor (45° tilt near the mouth, 60° deeper), the second about 13 cm. At each grab it descends 5 cm along the tilted tool axis, closes the claw, lifts back up, and drops at DROP. The heights follow `config.PILE` (the pile's top, default 25 cm).
 
 ```bash
 laundry scene check && laundry preplanned --limit 3 --speed 0.3
 ```
 
-- **Watch:** the claw's height above the floor at each grab (the target is 2–3 cm), and the side grabs against the walls. Those two depend most on where the bucket really is (tests 2c and 13).
+- **Watch:** the claw's height above the floor at each grab (layer 1 about 19 cm, layer 2 about 13 cm), the tilted wrist's clearance to the drum's ceiling and the far wall, and the side grabs against the walls. These depend most on where the bucket really is (tests 2c and 13).
 - **Paste back:** the `scene check` output, and the claw-to-floor gap at each of the 3 grabs (a rough ruler estimate is fine).
 - **Then:** the full sweep, `laundry preplanned --speed 0.5`, with some laundry in the bucket. Say how many items came out, and which grabs came up empty.
 - **If the bucket pose changes** (`config.OBSTACLES`): run `laundry plan bake retrieve` and commit `scan_plans/`.
