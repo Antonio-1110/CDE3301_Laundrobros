@@ -95,6 +95,30 @@ RETRIEVE_GRID = {
     'clearance_m': 0.005,
 }
 
+# How deep the grab of a DETECTED item digs into it. The sensed top is
+# only the pile's surface; the claw closes on what is below it, down
+# toward the bucket wall underneath (the fitted bucket model says how
+# far that is). The grab goes to the DEEPEST height whose grab pose,
+# approach pose and straight descent are all collision-free (IK +
+# MoveIt's checks, the gripper padded by RETRIEVE_GRID's clearance_m),
+# searched to resolution_m - so how close it gets to the bucket is set
+# by the collision check, not by a fixed fraction of the pile.
+#
+#   max_sink_m:        never more than this below the sensed top
+#   wall_clearance_m:  the contact point stays at least this far in
+#                      from the bucket wall (the model is only as good
+#                      as `laundry scene fit`; the claw mesh itself is
+#                      kept clear by the padding)
+#   resolution_m:      how finely the deepest clear height is found
+#
+# Until 2026-10-22 the sink was half the pile's height, at most 5 cm:
+# on a 20 cm pile the claw closed 15 cm above the floor.
+DETECTED_GRAB_DIG = {
+    'max_sink_m': 0.15,
+    'wall_clearance_m': 0.02,
+    'resolution_m': 0.01,
+}
+
 # DETECTED items are grabbed the same way (IK over the item, straight
 # descent, reached from the nearest grab_NN - grasp/retrieve_grid.
 # plan_floor_grab) anywhere up to this angle from the floor's lowest

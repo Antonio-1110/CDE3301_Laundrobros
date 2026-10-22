@@ -244,6 +244,140 @@ def test_detected_grabs_search_heights_then_tilts(monkeypatch):
     assert arm.seen == [(0.02, 0.0), (0.02, 30.0), (0.03, 0.0), (0.03, 30.0)]
 
 
+class _DigArm:
+    """Clear at a tilt only from a given height up: {tilt: lowest clear}."""
+
+    def __init__(self, clear_from):
+        self.clear_from = clear_from
+        self.current = None
+        self.seen = []
+
+    def compute_ik(self, pose, seed, limits=None):
+        height, tilt = self.current
+
+        if height < self.clear_from.get(tilt, np.inf) - 1e-9:
+            return None
+
+        return list(np.array(config.get_named_pose('inter')) + 0.1)
+
+    def first_invalid_state(self, waypoints, limits=None):
+        return None
+
+
+DIG = {'max_sink_m': 0.15, 'wall_clearance_m': 0.02, 'resolution_m': 0.01}
+
+
+def _dig(monkeypatch, clear_from, top, tilts=(0.0, 30.0)):
+    arm = _DigArm(clear_from)
+    _recording_geometry(monkeypatch, arm)
+    grid = dict(config.RETRIEVE_GRID, tilts_deg=list(tilts))
+    grab = retrieve_grid.deepest_grab(
+        arm, 0.30, 0.0, top, grid, [[0.0] * 7], dig=DIG
+    )
+    return arm, grab
+
+
+def test_with_nothing_in_the_way_the_grab_digs_down_to_the_wall(monkeypatch):
+    _arm, grab = _dig(monkeypatch, {0.0: 0.0}, top=0.10)
+
+    assert grab['height_m'] == pytest.approx(DIG['wall_clearance_m'])
+    assert grab['sink_m'] == pytest.approx(0.08)
+
+
+def test_a_tall_pile_is_dug_at_most_max_sink(monkeypatch):
+    _arm, grab = _dig(monkeypatch, {0.0: 0.0}, top=0.25)
+
+    assert grab['sink_m'] == pytest.approx(DIG['max_sink_m'])
+    assert grab['height_m'] == pytest.approx(0.10)
+
+
+def test_the_grab_stops_where_it_would_collide(monkeypatch):
+    # Below 6.3 cm the claw would hit the bucket at tilt 0.
+    arm, grab = _dig(monkeypatch, {0.0: 0.063}, top=0.12, tilts=(0.0,))
+
+    assert grab['height_m'] >= 0.063
+    assert grab['height_m'] - 0.063 <= DIG['resolution_m']
+    # Bisection, not a probe per centimetre.
+    assert len(arm.seen) <= 6
+
+
+def test_a_tilt_that_digs_deeper_wins(monkeypatch):
+    _arm, grab = _dig(monkeypatch, {0.0: 0.08, 30.0: 0.04}, top=0.12)
+
+    assert grab['tilt_deg'] == 30.0
+    assert grab['height_m'] - 0.04 <= DIG['resolution_m']
+
+
+def test_a_tilt_that_cannot_beat_the_best_is_not_searched(monkeypatch):
+    arm, grab = _dig(monkeypatch, {0.0: 0.02, 30.0: 0.0}, top=0.10)
+
+    # Tilt 0 already reached the wall clearance: tilt 30 is not tried.
+    assert grab['tilt_deg'] == 0.0
+    assert all(tilt == 0.0 for _height, tilt in arm.seen)
+
+
+def test_a_blocked_top_does_not_stop_the_search_lower_down(monkeypatch):
+    # Near the mouth, high in a tall pile the arm meets the top of the
+    # bucket: clear only between 5 and 10 cm from the wall.
+    class Band(_DigArm):
+        def compute_ik(self, pose, seed, limits=None):
+            height, _tilt = self.current
+            if not 0.05 - 1e-9 <= height <= 0.10 + 1e-9:
+                return None
+            return list(np.array(config.get_named_pose('inter')) + 0.1)
+
+    arm = Band({})
+    _recording_geometry(monkeypatch, arm)
+    grid = dict(config.RETRIEVE_GRID, tilts_deg=[0.0])
+    grab = retrieve_grid.deepest_grab(
+        arm, 0.15, 0.0, 0.20, grid, [[0.0] * 7], dig=DIG
+    )
+
+    assert grab is not None
+    assert grab['height_m'] - 0.05 <= DIG['resolution_m'] + 1e-9
+
+
+def test_a_long_approach_that_collides_falls_back_to_the_short_one(
+    monkeypatch,
+):
+    real = retrieve_grid._try_pose
+
+    def try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
+        if approach_m > config.RETRIEVE_GRID['approach_m'] + 1e-9:
+            return None, 'the approach pose collides'
+        return real(arm, contact, tool_z, claw_x, approach_m, seeds, inter)
+
+    monkeypatch.setattr(retrieve_grid, '_try_pose', try_pose)
+    _arm, grab = _dig(monkeypatch, {0.0: 0.0}, top=0.10, tilts=(0.0,))
+
+    assert grab['height_m'] == pytest.approx(DIG['wall_clearance_m'])
+    assert grab['approach_m'] == pytest.approx(
+        config.RETRIEVE_GRID['approach_m']
+    )
+
+
+def test_nothing_clear_even_at_the_top_gives_none(monkeypatch):
+    _arm, grab = _dig(monkeypatch, {}, top=0.10)
+
+    assert grab is None
+
+
+def test_the_approach_starts_above_the_pile(monkeypatch):
+    seen = []
+    real = retrieve_grid._try_pose
+
+    def try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
+        seen.append(approach_m)
+        return real(arm, contact, tool_z, claw_x, approach_m, seeds, inter)
+
+    monkeypatch.setattr(retrieve_grid, '_try_pose', try_pose)
+    _arm, grab = _dig(monkeypatch, {0.0: 0.0}, top=0.20, tilts=(0.0,))
+
+    # Dug 15 cm in: the approach is at least that plus 3 cm back.
+    assert grab['sink_m'] == pytest.approx(0.15)
+    assert max(seen) >= 0.15 + retrieve_grid.ABOVE_PILE_M - 1e-9
+
+
 def test_detected_grabs_may_go_down_to_the_floor():
     # A flat item must not be grabbed above itself.
     assert config.RETRIEVE_GRID['min_height_m'] <= 0.02

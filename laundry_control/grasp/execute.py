@@ -245,7 +245,8 @@ def describe_plan(plan):
         f'Floor grab via {grab["via"]}: contact={grab["contact"]}, '
         f'{grab["floor_angle_deg"]:+.0f} deg, '
         f'{grab["height_m"] * 100:.1f} cm from the wall, '
-        f'tilt {grab["tilt_deg"]:.0f} deg'
+        f'tilt {grab["tilt_deg"]:.0f} deg, '
+        f'{grab.get("sink_m", 0.0) * 100:.1f} cm into the pile'
     )
 
 
