@@ -46,7 +46,7 @@ Main Python modules (package `laundry_control/`):
 | `cli/` | The `laundry` subcommands |
 | `pipeline.py` | The stages chained together (`run_full`, `run_preplanned`, `run_clear`) |
 
-Other top-level items: `launch/laundry_bringup.launch.py`; `meshes/` (`bucket.obj`, `table.obj`, the claw STL); `scan_plans/` (baked motions, YAML); `baseline_scans/` (empty-bucket scans); `esp32/tof_gripper_bridge/` (ESP32 firmware); `mqtt_broker/` (mosquitto config); `test/` (pytest, 33 files); `benchmarks/` (simulation timing scripts).
+Other top-level items: `launch/laundry_bringup.launch.py`; `meshes/` (`bucket.obj`, `table.obj`, the claw mesh `xArm7_ArmPlate_Gripper_CoACD.obj`); `scan_plans/` (baked motions, YAML); `baseline_scans/` (empty-bucket scans); `esp32/tof_gripper_bridge/` (ESP32 firmware); `mqtt_broker/` (mosquitto config); `test/` (pytest, 33 files); `benchmarks/` (simulation timing scripts).
 
 ### 1.2 Headless launch of the arm and MoveIt
 
@@ -88,7 +88,7 @@ return IncludeLaunchDescription(
     'add_other_geometry': 'true',             # the claw
     'geometry_type': 'mesh',
     'geometry_mesh_filename':
-        'package://laundry_control/meshes/xArm7_Gripper_2Plate_Assembled_RevH_ROS2_Meters.stl',
+        'package://laundry_control/meshes/xArm7_ArmPlate_Gripper_CoACD.obj',
     'geometry_mesh_origin_xyz': '"0 0 0"',
     'geometry_mesh_origin_rpy': '"0 0 1.57"',
 }
@@ -168,7 +168,7 @@ obj.operation = CollisionObject.ADD
 
 Every baked plan records a fingerprint of the obstacle geometry (`scene.signature()`, SHA-1 of poses and mesh files). Replaying a plan baked against a different scene prints a warning, and a plan that now collides is refused.
 
-**Meshes and paths:** `meshes/bucket.obj`, `meshes/table.obj` (loaded by `scene.load_obj_mesh` straight from the package's `meshes/` folder, not through `package://`), and the claw STL, given to the URDF as `package://laundry_control/meshes/xArm7_Gripper_2Plate_Assembled_RevH_ROS2_Meters.stl`. The collision geometry is the full mesh, with no simplified primitives.
+**Meshes and paths:** `meshes/bucket.obj`, `meshes/table.obj` (loaded by `scene.load_obj_mesh` straight from the package's `meshes/` folder, not through `package://`), and the claw mesh, given to the URDF as `package://laundry_control/meshes/xArm7_ArmPlate_Gripper_CoACD.obj`. **Collision simplification:** the claw is the arm plate (bolted to the flange) with the gripper plate stacked on its top face, each decomposed into convex hulls with CoACD: 189 hulls, about 11,000 triangles, in place of a 403,000-triangle STL (2026-10-22). The full-detail CAD is kept outside the package. The bucket and table are used as full meshes.
 
 ### 2.2 End effector and tool frames
 
@@ -190,7 +190,7 @@ The claw is the manufacturer's **"other geometry"** option (`xarm_description/ur
   <origin xyz="0 0 0" rpy="0 0 0"/>
 </joint>
 <link name="other_geometry_link">
-  <visual>    <origin xyz="0 0 0" rpy="0 0 1.57"/> <geometry><mesh filename="package://laundry_control/meshes/xArm7_Gripper_2Plate_Assembled_RevH_ROS2_Meters.stl"/></geometry></visual>
+  <visual>    <origin xyz="0 0 0" rpy="0 0 1.57"/> <geometry><mesh filename="package://laundry_control/meshes/xArm7_ArmPlate_Gripper_CoACD.obj"/></geometry></visual>
   <collision> <origin xyz="0 0 0" rpy="0 0 1.57"/> <geometry><mesh filename="(same)"/></geometry></collision>
 </link>
 <link name="link_tcp"/>

@@ -67,3 +67,14 @@ The upper wall and ceiling are outside the scan's design: 418 of 1200 items plac
 - **Grasp success.** Nothing here senses whether the claw closed on laundry. Count it by eye or with a camera, and split the failures into motion failed, claw closed on nothing, and item dropped on the way.
 - **Detection with real fabric, the new ToF mount and the ESP32 sensor.** Re-measure the mounting offsets and re-collect the baselines first.
 - **The gripper's real time per move,** and the ESP32 link under a long run.
+
+## Rig log
+
+- **2026-10-22 18:57: C24 "Speed Exceeds Limit" on the transfer DROP → HOME at 7.0 rad/s².** `TRANSFER_MAX_ACCELERATION_RAD_S2` was raised from 5.0 to 7.0 (jerk 42 → 59) and the routes were re-timed, but not yet run on the arm. On the first real DROP → HOME (via INTER), 3.23 s in (0.87 s into the INTER → HOME leg), the xArm rejected the streamed targets (`set_servo_angle_j ret=1`, 13 times in 130 ms), raised C24 and stopped. The driver deactivated `xarm7_traj_controller`, which cancelled the goal, and MoveIt reported error -4 (CONTROL_FAILED). No joint was too fast: the planned peak is 59°/s against the 60°/s cap, and acceleration stays within 7.0. The **gripper tip** was too fast. FK of the baked timing, with the tip 0.142 m along link7 z, shows:
+
+  | INTER → HOME | Duration | Flange peak | Gripper-tip peak |
+  |---|---|---|---|
+  | 5.0 rad/s² (ran on the rig) | 3.80 s | 780 mm/s | 975 mm/s |
+  | 7.0 rad/s² (C24) | 3.60 s | 841 mm/s | **1050 mm/s** |
+
+  The xArm7's maximum TCP speed is 1000 mm/s. With the higher acceleration, J1, J3 and J7 reach about 59°/s together, 0.8 s into the leg, and their speeds add up at the tool, about 0.6 m from the base. DROP → INTER peaks at about 350 mm/s, so it was fine. **Even the 5.0 timing was only 2.5% under the limit.** Fix: cap the gripper-tip speed when the routes are timed (about 900 mm/s), or go back to 5.0 / 42 and re-time. The arm must have C24 cleared (restart the bring-up, or use UFACTORY Studio) before it will move again. Logs: `~/.ros/log/ros2_control_node_22677_1792666590164.log`, `move_group_22675_*.log`.
