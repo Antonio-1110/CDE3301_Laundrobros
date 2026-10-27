@@ -1,6 +1,6 @@
 # Technical summary for the design report (Sections 3 and 4)
 
-Source material for **Section 3 (Development of Functional Prototype)** and **Section 4 (Testing & Evaluation)** of the CDE3301 report. Everything here is taken from the code on branch `full-drum-sweep-60dps` as of 2026-10-21. File paths are relative to the repository root, and line references point at the definitions so they can be cited.
+Source material for **Section 3 (Development of Functional Prototype)** and **Section 4 (Testing & Evaluation)** of the CDE3301 report. Everything here is taken from the code on branch `full-drum-sweep-60dps` (including uncommitted work in its working tree) as of 2026-10-27. File paths are relative to the repository root, and line references point at the definitions so they can be cited.
 
 > **Read this first: corrections to the original brief.** The brief that asked for this summary assumed some things this system does not have. Do not put these into the report:
 >
@@ -237,13 +237,19 @@ The three top-level tasks:
 
 ```text
 laundry run     (pipeline.run_full)
-  open claw -> SCAN -> DETECT -> [nothing found: done]
+  open claw -> SCAN, coarse first (12 cm pass, then 3 cm, then the end scan
+               alone, detecting after each and stopping at the first find;
+               the arm stays inside the bucket between passes)
+            -> [nothing found: done]
             -> go to INTER -> PLAN GRASP (best reachable cluster)
-            -> approach + close claw -> back to INTER -> DROP -> open claw -> INTER
+            -> approach + close claw -> carry to DROP with the claw turned
+               +90 deg -> open claw -> INTER
 
 laundry preplanned   (pipeline.run_preplanned -> grasp/retrieve_grid.run)
   go to INTER -> open claw
-  for each baked grab_NN:  route in + descend -> close -> lift + route to DROP -> open
+  for each baked grab_NN:  route in + descend (one trajectory) -> close
+                           -> lift + route to DROP (one trajectory, claw
+                              turned on the way and back) -> open
   -> INTER
 
 laundry clear   (pipeline.run_clear)
@@ -274,7 +280,11 @@ for index in range(1, max_rounds + 1):
     ...
 ```
 
-**Quick-then-full scanning** (`pipeline.scan_and_detect`): a quick scan is judged against the strokes-only model. If it finds nothing, the end scan runs on its own and the combined readings are judged against the full model, so laundry against the closed end is not missed.
+**Coarse-first scanning** (`pipeline.scan_and_detect`, `scan.pattern.DEFAULT_COARSE_STEPS_M = (0.12,)`): a quick 12 cm pass first, then the 3 cm one only if that found nothing, then the end scan alone. Each pass is detected while the arm is still in the bucket, at the entry pose, and the arm goes for the laundry as soon as one pass finds it. The 3 cm pass is also checked at the deepest point of its inward strokes, and laundry found there ends the scan with a straight exit. The bucket is only called empty after the 3 cm pass and the end scan: a coarse pass that finds nothing proves nothing. `laundry run --coarse none --no-bottom-check` gives a single 3 cm quick scan.
+
+**Overlapping checks and claw commands** (`grasp/retrieve_grid.run`, `grasp/carry.py`): each move is collision-checked while the claw is still opening or closing, and the claw is commanded as the arm arrives (`move(before_end=...)`), so the arm doesn't stand still for either.
+
+**Fill levels** (`config.FILL_LEVELS` 0.5 / 0.6 / 0.75 / 0.9): the sweep is baked per level into `scan_plans/fill_<percent>/` (`./rebake_fills.sh`), and chosen at run time with `laundry preplanned --fill 0.75` or `LAUNDRY_FILL`.
 
 If the report needs a state diagram, these are descriptive names (they do not exist in the code): `OPEN_GRIPPER -> SCAN_QUICK -> DETECT -> (EMPTY? END_SCAN -> DETECT_FULL) -> GO_INTER -> PLAN_GRASP -> APPROACH -> CLOSE -> RETRACT_INTER -> GO_DROP -> RELEASE -> GO_INTER`.
 
@@ -322,6 +332,12 @@ goal.planning_options.replan_attempts = replan_attempts   # 5
 
 **In normal operation the planner is rarely used.** Moves between named poses replay **baked routes** (`arm/transfers.go_to`). These are straight joint-space segments through a few via poses, found once on the simulator (`laundry plan bake`), saved to `scan_plans/transfers.yaml`, re-checked against the live scene, and sent as a fixed trajectory through `/execute_trajectory`. The fallback order is: baked route -> straight collision-checked joint move -> planner (with a warning). This exists because OMPL's random routes once turned J7 through 536° for a 12° change (`transfers.py` docstring).
 
+**How baked routes are timed and shortened** (`arm/pass_through.py`, `arm/direct.py`, `arm/fast_route.py`):
+- each route is timed by MoveIt's time-optimal parameterisation (TOTG) to pass through its vias without stopping, within the transfer limits (§5.1), checked on the cubic the controller actually draws;
+- the sweep's grab <-> DROP moves are timed in one piece through INTER (`chains`), or replaced by **direct routes** that skip INTER where that is faster;
+- HOME's route was re-searched for replay time rather than least joint travel: 5.2 s -> 3.1 s (2026-10-26), at the cost of more wrist travel;
+- every timing keeps **every point of the claw under 0.9 m/s** (`TRANSFER_MAX_TIP_SPEED_M_S`): forward kinematics along the path, at the corners of a prism around link7's axis that holds the claw at any J7 angle. A route that would exceed it when stopping at its vias is slowed by a stored factor. This cap exists because the xArm stopped with C24 "Speed Exceeds Limit" on 2026-10-22 when the acceleration was raised without it.
+
 **Cartesian paths** (`_plan_to_pose`), used for scan strokes and grasp approaches:
 
 ```python
@@ -368,6 +384,10 @@ Other named poses (deg): HOME (90, 0, 0, 0, 0, 0, 0); DROP (5.8, 85.9, −177.2,
 
 The aim point is the mean of the cluster's top-quartile-intrusion points (`GRASP_POINT_QUANTILE = 75.0`, `perception/detect.py`), which is closer to the item's apex than the centroid (median 1.5 cm vs 2.6 cm in simulation).
 
+**How deep the claw digs** (`retrieve_grid.deepest_grab`, `config.DETECTED_GRAB_DIG`). The ToF sees only the pile's top, so the grab is sunk into it as deep as is **collision-free**. For each claw tilt, heights are tried from the deepest allowed upward: at least `wall_clearance_m` (2 cm) off the bucket wall and at most `max_sink_m` (15 cm) below the sensed top. The first height whose grab, approach and descent pass IK and MoveIt's collision checks wins. The approach starts 3 cm above the pile where it fits, so the digging is a straight descent. On the fake controller (36 spots) the claw went 9.5 cm into the pile on average, against 4.3 cm with the earlier rule (half the pile's height, at most 5 cm).
+
+**Carrying with the claw turned** (`grasp/carry.py`, `config.CARRY_J7_TURN_DEG` = 90): after closing, J7 turns +90° during the move to DROP and back before opening, so the claw hooks the item instead of relying on grip force alone (issue #21). The turn is superimposed on the baked move without stopping (S-curve ramps of 1.3–1.7 s, J7 within 0.9 × its limits). The turned states are collision-checked, and the claw is carried unturned if they collide.
+
 ### 3.5 The scan trajectory (quick and full scans)
 
 The ToF beam is fixed at 90° to the wrist axis, so the scan inserts the tool **straight along its own axis** in short strokes while turning J7, which sweeps the beam around the wall: a helix (`scan/pattern.py`, `scan/strokes.py`, `arm/trajectory.add_joint7_twist`).
@@ -406,6 +426,10 @@ q7(t) = q7_moveit(t) + twist * p(t),   p(t) in [0, 1] = normalised joint-space a
 | `DEFAULT_VELOCITY` / `DEFAULT_ACCELERATION` (MoveIt scaling) | 0.03 / 0.03, scaled with the step: `min(1, 0.03 * step / 0.03)` |
 | `DEFAULT_CARTESIAN_STEP_M` | 0.005 m |
 | `DEFAULT_END_SCAN` | `none` (quick scan) |
+
+**One trajectory per pass** (`arm/controller.move_tool_z_strokes`, `arm/trajectory.join_trajectories`): the 12 strokes of a pass are still planned and collision-checked one by one, then sent as a single trajectory. The arm therefore doesn't wait ~0.45 s at each end of the J7 sweep for each stroke to be confirmed. `--pause 0.01` restores stroke-at-a-time.
+
+**Baselines without leaving the bucket** (`laundry scan --stay-inside` / `--start-inside`, used by `laundry baseline collect`): consecutive scans hand over at the entry pose, 6 cm inside, instead of going out to INTER: about 3.4 s per handoff instead of ~17 s in simulation.
 
 **Quick vs full, and coarse vs fine.** The closest match to "loose vs dense":
 
@@ -481,6 +505,7 @@ threshold = np.maximum(k_sigma * sigma, abs_floor_m)   # k_sigma = 4.0, abs_floo
 | `DEFAULT_MIN_EXTENT_M` | 0.025 m | footprint on the wall |
 | `DEFAULT_MIN_VOLUME_M3` | 1.0e-5 m³ (10 cm³) | integrated intrusion volume |
 | `DEFAULT_LOW_CONFIDENCE_MIN_PEAK_SIGMA` | 7.0 | clusters in thinly sampled cells must peak this high |
+| `DEFAULT_MIN_PEAK_SIGMA` / `DEFAULT_LARGE_VOLUME_M3` | 5.5 σ / 70 cm³ | **strong or large**: every cluster must peak at 5.5 σ OR reach 70 cm³. Real laundry is one or the other (bulky items stand proud of the wall; a flat cloth covers a wide area); noise is neither (issue #22) |
 
 4. **Decision:** "laundry present" means at least one cluster survives the gates. `laundry clear` stops when a scan returns **no** clusters.
 
@@ -526,8 +551,9 @@ In the sweep, the arm's next motion is collision-checked while the claw is still
 | Stationary J7 turns (`rotate_joint7`) | velocity / acceleration scaling | 0.5 / 0.5 |
 | Grasp approaches (`move_to_pose`) | velocity / acceleration scaling | 0.1 / 0.1 |
 | Baked transfers (`config/robot.py`) | `TRANSFER_MAX_VELOCITY_RAD_S` | 60°/s (1.047 rad/s) |
-| | `TRANSFER_MAX_ACCELERATION_RAD_S2` | 5.0 rad/s² (50% of MoveIt's xArm7 limit) |
-| | `TRANSFER_MAX_JERK_RAD_S3` | 42 rad/s³ |
+| | `TRANSFER_MAX_ACCELERATION_RAD_S2` | 7.0 rad/s² (70% of MoveIt's xArm7 limit; 5.0 until 2026-10-26) |
+| | `TRANSFER_MAX_JERK_RAD_S3` | 59 rad/s³ (42 until 2026-10-26) |
+| | `TRANSFER_MAX_TIP_SPEED_M_S` | 0.9 m/s: no point of the claw faster (checked by forward kinematics at bake time; the xArm stops with C24 over 1 m/s at the tool, seen on 2026-10-22 at 7.0 without this cap) |
 | Straight joint moves and the end scan | `LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S` | 45°/s |
 | J7 during scan twists | `JOINT7_MAX_VELOCITY_RAD_S` / `..._ACCELERATION_RAD_S2` | 2.14 rad/s / 10 rad/s² |
 | Any command | `--speed` (`time_scale`) | e.g. 0.3 for cautious first runs |
@@ -570,7 +596,7 @@ if not retryable:
 
 | Layer | What | Where |
 |---|---|---|
-| Unit tests | 492 pytest tests (geometry, scan pattern, detection, baked-plan sanity, routing, gripper protocol, ESP32 clock sync, flake8/pep257) | `test/` (`python3 -m pytest test`); also run in GitHub Actions on every PR |
+| Unit tests | 556 pytest tests (geometry, scan pattern, detection, baked-plan sanity, routing, gripper protocol, ESP32 clock sync, flake8/pep257) | `test/` (`python3 -m pytest test`); also run in GitHub Actions on every PR |
 | Simulation | Real-time MoveIt fake controller, isolated ROS domain: motion times, collision-free plans | `benchmarks/sim_timing.sh`, `rebake.sh`, `laundry scene check` |
 | Offline detection | Leave-one-out on empty baselines, synthetic items injected into real empty scans with a ToF model | `laundry evaluate`, `benchmarks/sim_metrics.sh` |
 | Rig | Step-by-step hardware checklist, hand on the e-stop | `HARDWARE_TESTS.md` |
@@ -579,7 +605,7 @@ if not retryable:
 
 **Scan time** (from INTER to INTER): quick 97 s, full 140 s, quick at 6 cm spacing 57 s, at 12 cm 37 s. The J7 sweep dominates (about 3 s per stroke).
 
-**Detection** (8 empty baselines from 2026-09-30):
+**Detection** (8 empty baselines from 2026-09-30; the false-cluster row is updated below for the 2026-10-22 baselines):
 
 | Measure | Quick scan | Full scan |
 |---|---|---|
@@ -592,6 +618,8 @@ if not retryable:
 
 Surface coverage (8 scans pooled): floor 100%, lower wall 99%, lower closed end 74%, upper wall 6%, ceiling 0% (the upper wall and ceiling are outside the scan's design).
 
+**False clusters against the new baselines** (2026-10-22, new ToF mount; leave-one-out): **6 over 8 folds** without a further gate, all shallow (4.0–5.0 σ, 8.5–12 mm, 12–61 cm³) → **0** with the strong-or-large gate, quick and full. Synthetic quick scan, floor and lower wall: 476/480 → 474/480 found (the two lost are flat cloths on the lower wall); stray clusters 0.19 → 0.00 per trial. A real rig scan with laundry (2026-10-21) still returns its one cluster at 44.8 σ.
+
 **Retrieve time:**
 
 | | Simulation | Rig |
@@ -599,6 +627,7 @@ Surface coverage (8 scans pooled): floor 100%, lower wall 99%, lower closed end 
 | `laundry run`, one item | 125 s (scan 93 s, detect 0.4 s, grasp 28 s) | about 130 s |
 | Sensorless sweep, 24 grabs, 45°/s (2026-10-19) | 346 s | about 7 min |
 | Same, 60°/s with the 2026-10-21 optimisations | **213 s** (8.9 s per grab) | not yet run |
+| Same plan, 60°/s and 7 rad/s², claw cap (2026-10-27) | 178 s of motion + ~65–75 s of checks (CPU-loaded sim) | not yet run |
 | One sweep grab, rig log before the optimisations (2026-10-21) | | about 14 s |
 
 **Where the 2026-10-21 speed-up came from** (measured on the rig log, then verified in simulation):
@@ -607,11 +636,24 @@ Surface coverage (8 scans pooled): floor 100%, lower wall 99%, lower closed end 
 - Direct grab <-> DROP routes that skip INTER save 0.3 s per move on average. The straight line collides for all 24 grabs.
 - The claw wait went from 0.75 s to 0.5 s.
 
+**Sweep time as a function of the transfer limits** (2026-10-27, the same 24-grab plan, re-timed at each setting with the claw cap, motion time from the planned durations of every trajectory the sweep sends; 2 settings also run in real time, matching move for move):
+
+| deg/s \ rad/s² | 3 | 5 | 7 |
+|---|---|---|---|
+| 45 | 242 s | 226 s | 226 s |
+| 60 | 217 s | 193 s | 178 s (current) |
+| 90 | 217 s | 168 s | 149 s |
+
+Fit: **M(v, a) ≈ 15.8 + 140.5 / v + 202.6 · v / a** s (v in rad/s, a in rad/s²; each move ≈ distance / v + v / a), rms 4.2 s. At 45°/s the top speed limits it (more acceleration buys nothing); at 90°/s and 3 rad/s² the DROP routes lose their rounded timing. Per grab: 7.3 s of motion on average at 60 / 7 (6.4 s near the mouth, 8.9 s deepest), plus ~3 s of checks, so adding or removing a grab changes the sweep by about 10 s.
+
+**Safety finding on the rig (2026-10-22):** raising the transfer acceleration to 7.0 rad/s² without a claw-speed limit stopped the arm with C24 "Speed Exceeds Limit" on INTER → HOME. No joint was over its limit, but J1, J3 and J7 near 60°/s together took the claw to ~1050 mm/s against the xArm's 1000 mm/s (975 mm/s at 5.0). That led to the 0.9 m/s claw cap (§3.2).
+
 ### 6.3 Known limitations and open issues (for the evaluation discussion)
 
 - **Grasp success is not sensed.** Nothing detects whether the claw closed on laundry; simulation counts a grasp as done when the motions finish.
-- **Mouth false positives (issue #20).** On the rig (2026-10-21), shallow anomalies at the bucket mouth (16–104 points, 6–7 mm intrusion) were ranked ahead of real laundry. Likely cause: the baselines predate the new ToF mount (2026-09-30 vs 2026-10-19). Example scan in `validation_scans/mouth_false_positive_20261021/`.
+- **Mouth false positives (issue #20, resolved).** On the rig (2026-10-21), shallow anomalies at the bucket mouth (16–104 points, 6–7 mm intrusion) were ranked ahead of real laundry. Cause: the baselines predated the new ToF mount. Against the re-collected baselines, only the laundry cluster remains. Example scan in `validation_scans/mouth_false_positive_20261021/`.
+- **Most of the last week's work is untested on the rig:** the claw cap at 7.0 rad/s², the fast HOME route, one-trajectory scans, coarse-first `run`/`clear`, stay-inside baselines, deeper detected grabs, the claw turn, the fill levels and the new gripper mesh. The staged tests are in `HARDWARE_TESTS.md` section G.
+- **The detector gate was tuned on the 6 false clusters it now rejects,** with thin margins (5.0 vs 5.5 σ, 61 vs 70 cm³). New empty scans with the current mount are needed to test it independently.
 - **The detection figures are an upper bound:** synthetic items, a simple ToF model, and baselines from the old mount.
 - **The claw contact offset** (`GRIPPER_OFFSET_Z` = 0.15 m) is user-measured and marked unverified in the code.
-- **The sweep is baked for one fill level** (pile top 25 cm). Choosing between several at run time is issue #18.
-- **Shorter scans** (coarse first, fine only when needed): issue #10, not started.
+- **Fill levels** (issue #18) and **shorter scans** (issue #10) are built but not yet run on the rig; the scan times in §6.2 predate the one-trajectory and coarse-first changes and need re-measuring.

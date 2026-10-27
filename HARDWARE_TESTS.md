@@ -296,6 +296,78 @@ laundry clear --grab-limit 3 --speed 0.3 --max-rounds 5
 - **Watch:** detected items anywhere in the lower half (floor and lower walls) are grabbed like the grid: "Floor grab via grab_NN" in the log, with a straight descent onto the item. Put one item partway up a lower wall to check that case.
 - **Paste back:** the log from "ROUND 1" on, how many items came out, and whether it stopped with "The bucket is clear".
 
+## G. Built 2026-10-21 to 2026-10-27, not yet on the rig
+
+Everything here is tested on the fake controller only. **Restart the bring-up first** so every node loads the current code and config, and run these in order: each one assumes the previous one passed. Hand on the e-stop throughout. A bring-up started from a separate terminal (not VS Code's) survives VS Code being OOM-killed.
+
+**18. New gripper mesh: clearance on the way to DROP.** The claw's collision model is now the arm plate plus the gripper plate (CoACD hulls). The plate's trays hang 34 mm below the wrist.
+
+```bash
+laundry scene check
+laundry move inter --speed 0.3
+laundry move drop --speed 0.3
+laundry move inter --speed 0.3
+```
+
+- **Watch:** the trays and the claw against the bucket rim on the way out of the bucket.
+- **Paste back:** the `scene check` output, and the smallest gap you saw (a guess is fine).
+
+**19. Transfers at 7.0 rad/s² with the claw-speed cap; the new HOME route.** 7.0 rad/s² without the cap stopped the arm with C24 on INTER → HOME (2026-10-22). Now every baked route keeps every point of the claw under 0.9 m/s (`config.TRANSFER_MAX_TIP_SPEED_M_S`). HOME also has a new, faster route (3.1 s, was 5.2 s) that swings the wrist more: J6 goes out to about −62° and back.
+
+```bash
+laundry move home --speed 0.3
+laundry move inter --speed 0.3
+laundry move home
+laundry move inter
+laundry move drop
+laundry move inter
+```
+
+- **Watch:** the wrist cables on the HOME route; the rim and the table; and in the bring-up terminal, any `C24` or `set_servo_angle_j` error.
+- **If C24 appears:** lower `TRANSFER_MAX_TIP_SPEED_M_S` (e.g. 0.8) and re-time (`./rebake.sh timing`). If the arm shivers or overruns, go back to 5.0 / 42 in `config/robot.py` and re-time.
+- **Paste back:** "ok", or the error lines.
+
+**20. One trajectory per scan pass.** Each pass's 12 strokes now go as one trajectory, so the arm no longer waits at each end of the J7 sweep. Empty bucket:
+
+```bash
+time laundry scan --save /tmp/scan_one_pass.csv
+time laundry scan --pause 0.01 --save /tmp/scan_old_loop.csv
+laundry detect /tmp/scan_one_pass.csv
+```
+
+- **Watch:** J7 turning round at ±75° without jerks, and the start of each pass.
+- **Paste back:** both `real` times, and the `detect` result (it should find nothing).
+
+**21. `laundry run` with coarse-first scans, deeper grabs and the claw turn.** Put one towel on the floor, mid-depth. The run scans at 12 cm, then 3 cm, then the end scan only if needed, handing over 6 cm inside the bucket. The grab now digs as deep as is collision-free (to 2 cm off the wall, at most 15 cm below the pile's top). After closing, the claw turns +90° while it carries the item to DROP, and turns back before opening.
+
+```bash
+laundry run --dry-run
+laundry run
+```
+
+- **Watch:** the straight 42 cm exit from full depth (clearance at the mouth); how close the claw gets to the floor; whether the turned claw hooks the towel and clears the rim.
+- **Turn things off if needed:** `laundry run --coarse none --no-bottom-check` (one 3 cm scan, no early exit); `config.CARRY_J7_TURN_DEG = 0` (no claw turn); a larger `wall_clearance_m` in `config.DETECTED_GRAB_DIG` (less digging).
+- **Paste back:** the log from "SCAN" on, including the `cm into the pile` line, and whether the towel came out.
+
+**22. Fill levels.** Plans for several fill levels (`config.FILL_LEVELS`: 0.5, 0.6, 0.75, 0.9) are baked into `scan_plans/fill_<percent>/` by `./rebake_fills.sh`. Run one:
+
+```bash
+laundry preplanned --fill 0.75 --limit 3 --speed 0.3
+```
+
+- **Paste back:** the claw-to-floor gap at each of the 3 grabs.
+
+**23. Baselines that stay inside the bucket.** `laundry baseline collect` now hands over between scans at the entry pose (6 cm in) instead of going out to INTER. Try a short set first (into a scratch directory, so the real baselines are untouched):
+
+```bash
+laundry baseline collect --count 2 --dest /tmp/baseline_try
+```
+
+- **Watch:** the handoff between the two scans.
+- **Paste back:** "ok", or the error. If a run stops early, the arm is left inside: `laundry move inter --speed 0.3`.
+
+---
+
 ## F. Real-cloth validation scans I need
 
 Everything detection-related is currently tuned on synthetic items injected into real empty scans. These scans check it against real cloth. Take them **after test 13**, at the default speed (0.03), so they match the new baselines.
