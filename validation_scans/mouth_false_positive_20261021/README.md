@@ -37,6 +37,12 @@ laundry detect validation_scans/mouth_false_positive_20261021/run_20261021_17302
 The 730-point cluster first, and the shallow mouth clusters either not
 reported or ranked after it.
 
+**Resolved by cause 1 (2026-10-26).** Against the baselines re-collected on
+2026-10-22 with the new mount, this scan returns only the laundry
+cluster (707 points, 44.8σ), even with the strong-or-large gate of
+issue #22 switched off (`--min-peak-sigma 0`). The ranking (2.) is
+unchanged.
+
 Likely causes to check, in this order:
 
 1. **Stale baselines.** They were recorded on 2026-09-30, but the ToF
