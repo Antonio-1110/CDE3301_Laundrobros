@@ -149,7 +149,13 @@ def _stroke_beams(path):
 
             sign = 1.0 if index % 2 == 0 else -1.0
             if leg == 'out':
-                sign = -sign
+                # The inward stroke over the same depths (index
+                # strokes - 1 - index) run backwards, mirrored: its
+                # sign, so the passes cross at every depth - as
+                # scan.pattern's turnaround makes them, whatever the
+                # parity of the stroke count. (-sign retraced the
+                # inward pass when the count is odd: 12 cm, 3 strokes.)
+                sign = 1.0 if (strokes - 1 - index) % 2 == 0 else -1.0
 
             depth = np.clip(
                 start + (end - start) * progress, path.entry_m, path.depth_m

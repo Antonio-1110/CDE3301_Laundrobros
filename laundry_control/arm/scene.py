@@ -355,8 +355,9 @@ def _wait_until_answering(arm, timeout_sec=60.0):
     Block until move_group answers collision checks again.
 
     Changing a link's padding makes MoveIt rebuild that link's padded
-    mesh; for the gripper's large STL that takes seconds, during which
-    validity checks go unanswered.
+    mesh, during which validity checks go unanswered: seconds for the
+    old 403k-triangle gripper STL, far less for the CoACD hulls in use
+    since 2026-10-22.
     """
     import time
 

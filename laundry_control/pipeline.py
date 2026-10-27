@@ -10,6 +10,12 @@ here in one process and one arm connection instead:
     open gripper -> scan -> detect -> INTER -> approach + close
     (grasp) -> retract to INTER -> DROP -> open (release) -> INTER
 
+The scan searches coarse first (scan_and_detect): a quick 12 cm
+pass, then the 3 cm one only if that found nothing, then the end scan
+alone - detecting while the arm is still in the bucket, at the end
+of each pass (and, on the 3 cm pass, already at the bottom of its
+inward strokes), and going for the laundry as soon as one finds it.
+
 The gripper is open for the whole run except while carrying the
 item. Scanning open (not just idling open) is deliberate: the end
 effector occludes part of the bucket, so the scan has to be taken in
@@ -22,6 +28,7 @@ clear`, which empties the bucket with both (run_clear).
 
 from datetime import datetime
 import os
+import time
 
 from . import config
 from .arm.transfers import go_to, prepare_go_to
@@ -30,7 +37,7 @@ from .perception.bucket_model import build_baseline_surface
 from .perception.detect import detect_on_points, load_baseline_scans
 from .perception.detect import load_points_xyz
 from .perception.report import print_model_report, print_report
-from .scan.pattern import scan
+from .scan.pattern import DEFAULT_COARSE_STEPS_M, DEFAULT_STEP_M, scan
 from .scan.segments import STROKES
 
 
@@ -42,9 +49,12 @@ def timestamped_scan_path(prefix='scan'):
     )
 
 
-def run_scan(arm, recorder, csv_path, scan_kwargs):
+def run_scan(arm, recorder, csv_path, scan_kwargs, check=None):
     """
     Scan the bucket into exactly csv_path; True on success.
+
+    check: scan()'s, called at the deepest point with the inward
+    strokes already saved to csv_path.
 
     scan_recorder_node normally auto-generates a timestamped
     filename, which the caller would have no way to know in advance -
@@ -72,7 +82,7 @@ def run_scan(arm, recorder, csv_path, scan_kwargs):
     try:
         recorder.clear_blocking()
 
-        return scan(arm=arm, recorder=recorder, **scan_kwargs)
+        return scan(arm=arm, recorder=recorder, check=check, **scan_kwargs)
 
     finally:
         if not recorder.set_csv_path(''):
@@ -187,13 +197,15 @@ def bucket_models(baseline):
     return model
 
 
-def run_end_scan_only(arm, recorder, csv_path, scan_kwargs):
+def run_end_scan_only(arm, recorder, csv_path, scan_kwargs,
+                      start_inside=False):
     """
     Run the end scan alone into exactly csv_path; True on success.
 
     Unlike run_scan, the recorder is NOT cleared: the quick scan just
     recorded is kept, so csv_path gets its strokes plus the end scan -
-    a full scan's readings (scan.pattern.end_scan_only).
+    a full scan's readings (scan.pattern.end_scan_only). start_inside:
+    from the entry pose that quick scan stayed at.
     """
     from .scan.pattern import end_scan_only
 
@@ -204,7 +216,10 @@ def run_end_scan_only(arm, recorder, csv_path, scan_kwargs):
         return False
 
     try:
-        if not end_scan_only(arm=arm, recorder=recorder, **scan_kwargs):
+        if not end_scan_only(
+            arm=arm, recorder=recorder, start_inside=start_inside,
+            **scan_kwargs
+        ):
             return False
 
         return recorder.save_blocking()
@@ -214,49 +229,169 @@ def run_end_scan_only(arm, recorder, csv_path, scan_kwargs):
         recorder.set_recording(False)
 
 
+def coarse_pass_kwargs(scan_kwargs, step):
+    """
+    Return scan_kwargs for a pass at a coarser step.
+
+    The stroke velocity/acceleration scale with the step from the
+    scan's own (as scan.pattern.scaled_stroke_speed does from the
+    default), so every stroke takes about as long and J7 sweeps at the
+    baselines' speed.
+    """
+    base = scan_kwargs.get('step', DEFAULT_STEP_M)
+    kwargs = dict(scan_kwargs, step=step)
+
+    for key in ('velocity', 'acceleration'):
+        if key in scan_kwargs:
+            kwargs[key] = min(1.0, scan_kwargs[key] * step / base)
+
+    return kwargs
+
+
+def coarse_pass_path(csv_path, step):
+    """Return <csv_path>_<step>cm.csv, a coarse pass's own scan CSV."""
+    root, ext = os.path.splitext(csv_path)
+    return f'{root}_{step * 100:g}cm{ext}'
+
+
+def _out_of_bucket(arm, result):
+    """Leave the entry pose for INTER; result, or None if that failed."""
+    print('========== OUT OF THE BUCKET ==========')
+
+    if not go_to(arm, 'inter'):
+        print('Could not move out to INTER (the arm is still in the '
+              'bucket, at the entry pose): laundry move inter')
+        return None
+
+    return result
+
+
 def scan_and_detect(
-    arm, recorder, csv_path, baseline, scan_kwargs, detect_params, model
+    arm, recorder, csv_path, baseline, scan_kwargs, detect_params, model,
+    coarse_steps=DEFAULT_COARSE_STEPS_M, bottom_check=True,
 ):
     """
     Scan and detect; returns (clusters, surface, scan CSV), or None.
 
-    A full scan (end_scan 'precession') is detected against the full
-    model. A QUICK scan (end_scan 'none') against the strokes-only
-    model; if it finds nothing, the end scan runs on its own (no
-    second pass of strokes) and the quick scan plus that pass - a full
-    scan's readings, saved to <csv_path>_end.csv - is detected against
-    the full model, so laundry against the closed end is still found.
-    None if a motion failed.
+    The arm is back at INTER whenever this returns a result. None if
+    a motion failed.
+
+    A full scan (end_scan 'precession') is one pass, detected against
+    the full model. QUICK scans (end_scan 'none') search coarse first,
+    each pass detected against the strokes-only model:
+
+        1. a pass at each of coarse_steps, coarsest first (saved to
+           <csv_path>_<step>cm.csv), then one at the scan's own step
+           (csv_path). Each pass is checked once complete, at the
+           entry pose, and the arm stays in the bucket between
+           passes. With bottom_check, the LAST pass is also checked
+           at the deepest point on its inward strokes, and laundry
+           found there ends it (straight out, no outward strokes).
+           Coarse passes always run whole: their outward strokes are
+           few (~9 s at 12 cm, against ~15 s to leave from the
+           bottom), and they sharpen a coarse scan's poor aim.
+        2. If none finds anything, the end scan runs on its own (no
+           further strokes) and the last pass plus that - a full
+           scan's readings, saved to <csv_path>_end.csv - is detected
+           against the full model, so laundry against the closed end
+           is still found.
+
+    The bucket is only ever called empty after the scan's own step and
+    the end scan: a coarse pass that finds nothing proves nothing.
     """
-    quick = scan_kwargs.get('end_scan') == 'none'
+    if scan_kwargs.get('end_scan') != 'none':
+        if not run_scan(arm, recorder, csv_path, scan_kwargs):
+            print('Scan failed.')
+            return None
 
-    if not run_scan(arm, recorder, csv_path, scan_kwargs):
-        print('Scan failed.')
-        return None
+        print('========== DETECT ==========')
 
-    print('========== DETECT ==========')
+        clusters, surface = detect_scan(
+            csv_path, baseline, detect_params, surface=model('full')
+        )
 
-    clusters, surface = detect_scan(
-        csv_path, baseline, detect_params,
-        surface=model('strokes' if quick else 'full'),
-        segments=(STROKES,) if quick else None,
-    )
-
-    if clusters or not quick:
         return clusters, surface, csv_path
+
+    surface = model('strokes')
+    started = time.monotonic()
+
+    passes = [
+        (step, coarse_pass_kwargs(scan_kwargs, step),
+         coarse_pass_path(csv_path, step))
+        for step in coarse_steps
+    ] + [(scan_kwargs.get('step', DEFAULT_STEP_M), scan_kwargs, csv_path)]
+
+    inside = False
+
+    for index, (step, kwargs, path) in enumerate(passes):
+        label = f'{step * 100:g} cm'
+        last = index == len(passes) - 1
+        found = []
+
+        def check(path=path, found=found):
+            print('========== DETECT (inward strokes, at the bottom) '
+                  '==========')
+
+            clusters, _ = detect_scan(
+                path, baseline, detect_params, surface=surface,
+                segments=(STROKES,),
+            )
+            found.extend(clusters)
+
+            return bool(clusters)
+
+        print(f'========== QUICK SCAN, {label} ==========')
+
+        pass_started = time.monotonic()
+
+        if not run_scan(
+            arm, recorder, path,
+            dict(kwargs, start_inside=inside, stay_inside=True),
+            check=check if bottom_check and last else None,
+        ):
+            print('Scan failed.' + (
+                ' The arm may still be in the bucket: laundry move inter'
+                if inside else ''
+            ))
+            return None
+
+        print(f'{label} pass: {time.monotonic() - pass_started:.1f} s '
+              f'({time.monotonic() - started:.1f} s searching)')
+
+        if found:
+            # The scan stopped at the bottom and went out to INTER.
+            print(f'Laundry found at the bottom of the {label} pass.')
+            return found, surface, path
+
+        inside = True
+
+        print('========== DETECT ==========')
+
+        clusters, _ = detect_scan(
+            path, baseline, detect_params, surface=surface,
+            segments=(STROKES,),
+        )
+
+        if clusters:
+            return _out_of_bucket(arm, (clusters, surface, path))
 
     if scan_kwargs.get('end_plan') is None:
-        print('The quick scan found nothing; no baked end scan to check '
+        print('The quick scans found nothing; no baked end scan to check '
               'the closed end with.')
-        return clusters, surface, csv_path
+        return _out_of_bucket(arm, ([], surface, csv_path))
 
-    print('========== THE QUICK SCAN FOUND NOTHING: END SCAN ONLY ==========')
+    print('========== THE QUICK SCANS FOUND NOTHING: END SCAN ONLY '
+          '==========')
 
     end_csv = os.path.splitext(csv_path)[0] + '_end.csv'
 
-    if not run_end_scan_only(arm, recorder, end_csv, scan_kwargs):
+    if not run_end_scan_only(
+        arm, recorder, end_csv, scan_kwargs, start_inside=True
+    ):
         print('The end-scan pass failed.')
         return None
+
+    print(f'Searching took {time.monotonic() - started:.1f} s.')
 
     print('========== DETECT (quick scan + end scan) ==========')
 
@@ -276,12 +411,15 @@ def run_full(
     scan_kwargs,
     detect_params,
     dry_run=False,
+    coarse_steps=DEFAULT_COARSE_STEPS_M,
+    bottom_check=True,
 ):
     """
     Run scan -> detect -> grasp -> drop; True on success.
 
-    With a quick scan that finds nothing, the end scan runs on its own
-    before giving up (scan_and_detect).
+    Quick scans search coarse first, and the end scan runs on its own
+    before giving up (scan_and_detect, with coarse_steps and
+    bottom_check).
     """
     print('========== SCAN ==========')
 
@@ -290,7 +428,7 @@ def run_full(
 
     result = scan_and_detect(
         arm, recorder, csv_path, baseline, scan_kwargs, detect_params,
-        bucket_models(baseline),
+        bucket_models(baseline), coarse_steps, bottom_check,
     )
 
     if result is None:
@@ -385,6 +523,8 @@ def run_clear(
     max_failed=DEFAULT_CLEAR_MAX_FAILED,
     scan_path=None,
     time_scale=1.0,
+    coarse_steps=DEFAULT_COARSE_STEPS_M,
+    bottom_check=True,
 ):
     """
     Empty the bucket: the sensorless grab sweep, then scan until clear.
@@ -395,8 +535,10 @@ def run_clear(
            DROP, repeated until a scan finds nothing.
 
     With quick scans (end_scan 'none', the default for `laundry
-    clear`) each round is scan_and_detect's: a quick scan, and only
-    when that finds nothing the end scan on its own. So the bucket is
+    clear`) each round is scan_and_detect's: coarse quick passes first
+    (coarse_steps), then one at the scan's step (checked at the bottom
+    with bottom_check), and only when those find nothing the end scan
+    on its own. So the bucket is
     emptied with quick scans - which never swing the arm low - and the
     tilting end scan runs only once they find nothing, when little is
     left for it to disturb; the bucket is clear when that finds
@@ -439,7 +581,7 @@ def run_clear(
 
         result = scan_and_detect(
             arm, recorder, csv_path, baseline, scan_kwargs, detect_params,
-            model,
+            model, coarse_steps, bottom_check,
         )
 
         if result is None:

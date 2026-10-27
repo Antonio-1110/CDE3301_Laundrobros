@@ -103,6 +103,41 @@ DEFAULT_SAVE_INTERVAL_SEC = 5.0
 END_SCANS = ('precession', 'none', 'bottom')
 DEFAULT_END_SCAN = 'none'
 
+# Coarse first (`laundry run` / `clear`, quick scans - pipeline.
+# scan_and_detect): a pass at each of these steps, coarsest first,
+# before the scan's own --step, which alone (with the end scan) may
+# say the bucket is empty. Each pass hands over inside the bucket
+# (stay_inside/start_inside), and laundry found stops the search.
+#
+# Measured offline 2026-10-26 (issue #10; leave-one-out on the
+# 2026-10-22 baselines, synthetic items, each simulated 12 cm beam
+# replaced by the held-out scan's nearest real reading - pessimistic
+# for flat cloth, which needs many readings: the same method gives
+# 75% at 3 cm against the real scan's 95%):
+#
+#   pass          false alarms  bundle towel shirt  sock  flat  grasp err
+#   3 cm (real)      0/8         100   100   100    99    95   0.5-0.9 cm
+#   12 cm            0/40        100   100   100    81    19   1.2-1.6 cm
+#   12 cm, inward    0/40        100    98    85    48    13   2.6-2.8 cm
+#
+# On real laundry (the 10 rig quick scans of 2026-10-22, resampled
+# the same way but matched by ray, not by wall point): the 12 cm pass
+# found 6 of the 7 items the 3 cm scan found (not the smallest, 353
+# cm^3, which the 3 cm inward strokes alone miss too), and nothing in
+# the 3 empty ones. But it splits a big pile into several clusters:
+# the biggest lay 2-7 cm from the 3 cm scan's (1-9 cm on the inward
+# strokes alone) - on the pile for the 3000-7000 cm^3 heaps, maybe
+# not for a ~900 cm^3 item. So coarse passes always run whole: no check
+# at the bottom, whose early exit would save only ~8 s at 12 cm (fake
+# controller: leaving from the bottom ~16 s, against ~24 s to finish
+# the pass and leave from the entry pose) and lose the outward
+# strokes' aim. On the 3 cm pass it saves ~33 s for little aim.
+#
+# A 12 cm pass takes ~38 s on the rig against ~97 s at 3 cm, so the
+# bigger items are found in about a third of the time; what it misses
+# the 3 cm pass still finds, for ~30 s more than scanning dense only.
+DEFAULT_COARSE_STEPS_M = (0.12,)
+
 
 def scan(
     arm,
@@ -123,6 +158,7 @@ def scan(
     end_scan_time_scale=1.0,
     start_inside=False,
     stay_inside=False,
+    check=None,
 ):
     """
     Perform the complete xArm7 scanning sequence.
@@ -226,6 +262,14 @@ def scan(
         recorded, so the recorded path is unchanged. start_inside
         refuses (moves nothing) unless the flange is at that pose.
 
+    check:
+        Called with no arguments at the deepest point, after the
+        inward strokes, once the readings so far are saved to the
+        recorder's CSV - for the pipeline to detect on the inward
+        pass while the arm stands there. If it returns True the scan
+        stops: no end scan, no outward strokes, straight out to INTER
+        (even with stay_inside). None never stops.
+
 
     Notes
     -----
@@ -325,6 +369,19 @@ def scan(
     ):
         return False
 
+    if check is not None:
+        stop = run.check_at_bottom(check)               # 3b
+
+        if stop is None:
+            return False
+
+        if stop:
+            return (
+                run.stop_and_save()
+                and run.leave(stay_inside=False)
+                and run.report()
+            )
+
     phase_twist = run.end_scan(
         end_scan, end_plan, depth, end_scan_time_scale
     )                                                   # 4
@@ -336,6 +393,42 @@ def scan(
         and run.leave()                                 # 7
         and run.report()                                # 8
     )
+
+
+def at_entry_pose(arm, entry_depth):
+    """
+    Return True if the flange is entry_depth straight in from INTER.
+
+    Where a scan's entry would have put it (and its leave(stay_inside)
+    left it): INTER's orientation, J7 included, within 2 deg, and
+    within 5 mm of INTER moved entry_depth along its tool Z. Logs why
+    not.
+    """
+    log = arm.get_logger()
+    current = arm.get_current_joints()
+    here = None if current is None else arm.compute_fk(current)
+    inter = arm.compute_fk(config.get_named_pose('inter'))
+
+    if here is None or inter is None:
+        log.error('Could not compute FK to check the start pose.')
+        return False
+
+    rotation = Rotation.from_quat(inter[1])
+    expected = inter[0] + entry_depth * rotation.as_matrix()[:, 2]
+    off_mm = float(np.linalg.norm(here[0] - expected)) * 1000.0
+    off_deg = math.degrees(
+        (Rotation.from_quat(here[1]) * rotation.inv()).magnitude()
+    )
+
+    if off_mm > 5.0 or off_deg > 2.0:
+        log.error(
+            f'Start inside: the flange is {off_mm:.1f} mm / '
+            f'{off_deg:.1f} deg from the entry pose (INTER, '
+            f'{entry_depth * 100:.0f} cm in); not scanning from here.'
+        )
+        return False
+
+    return True
 
 
 def _invalid_option(
@@ -503,38 +596,8 @@ class _ScanRun:
     # ---------------------------------------------------------
 
     def at_entry_pose(self):
-        """
-        Return True if the flange is entry_depth straight in from INTER.
-
-        Where enter() would have put it (and leave(stay_inside) left
-        it): INTER's orientation, J7 included, within 2 deg, and
-        within 5 mm of INTER moved entry_depth along its tool Z.
-        """
-        current = self.arm.get_current_joints()
-        here = None if current is None else self.arm.compute_fk(current)
-        inter = self.arm.compute_fk(config.get_named_pose('inter'))
-
-        if here is None or inter is None:
-            self.log.error('Could not compute FK to check the start pose.')
-            return False
-
-        rotation = Rotation.from_quat(inter[1])
-        expected = inter[0] + self.entry_depth * rotation.as_matrix()[:, 2]
-        off_mm = float(np.linalg.norm(here[0] - expected)) * 1000.0
-        off_deg = math.degrees(
-            (Rotation.from_quat(here[1]) * rotation.inv()).magnitude()
-        )
-
-        if off_mm > 5.0 or off_deg > 2.0:
-            self.log.error(
-                f'--start-inside: the flange is {off_mm:.1f} mm / '
-                f'{off_deg:.1f} deg from the entry pose (INTER, '
-                f'{self.entry_depth * 100:.0f} cm in); not scanning from '
-                'here.'
-            )
-            return False
-
-        return True
+        """Return True if the flange is entry_depth straight in from INTER."""
+        return at_entry_pose(self.arm, self.entry_depth)
 
     def enter(self):
         """Go to INTER, move straight in by entry_depth, start recording."""
@@ -621,7 +684,8 @@ class _ScanRun:
     # Outward, after the end scan's phase shift (9 strokes: inward
     # ends at +75, the phase shift turns +75 -> -75), start the
     # other way: -75 -> +75 (+150), then +75 -> -75, ... There are
-    # NO stationary resets between strokes.
+    # NO stationary resets between strokes, and (without --pause) a
+    # pass is one trajectory, so the arm never stands at a turnaround.
     # ---------------------------------------------------------
 
     def strokes(self, inward, after_phase_twist=0.0):
@@ -634,6 +698,9 @@ class _ScanRun:
             label, name, sign = 'OUT', 'Outward', -1.0
             self.log.info('========== OUTWARD SCAN ==========')
             direction = 1.0 if after_phase_twist < 0.0 else -1.0
+
+        if self.pause <= 0.0:
+            return self._strokes_in_one(label, name, sign, direction, inward)
 
         for i in range(self.number_of_steps):
             twist = direction * self.sweep_deg
@@ -671,6 +738,73 @@ class _ScanRun:
             )
 
         return True
+
+    def _strokes_in_one(self, label, name, sign, direction, inward):
+        """
+        Run the strokes() pass as one trajectory (no --pause).
+
+        Same strokes, but planned up front and executed together
+        (arm.move_tool_z_strokes), so the arm does not stand at each
+        J7 turnaround between them (~0.5 s each on the rig). The
+        recorder checkpoints only after the pass.
+        """
+        strokes = []
+        depth = self.current_depth
+
+        for i in range(self.number_of_steps):
+            twist = direction * self.sweep_deg
+            next_depth = depth + sign * self.step
+
+            # Avoid ugly floating-point logging near zero.
+            if abs(next_depth) < 1e-9:
+                next_depth = 0.0
+
+            self.log.info(
+                f'[{label} {i + 1}/{self.number_of_steps}] '
+                f'{depth:.3f} -> {next_depth:.3f} m | J7 {twist:+.1f} deg'
+            )
+
+            strokes.append((sign * self.step, twist))
+            depth = next_depth
+            direction *= -1.0
+
+        if not self.arm.move_tool_z_strokes(
+            strokes,
+            max_step=self.cartesian_step,
+            velocity=self.velocity,
+            acceleration=self.acceleration,
+        ):
+            self.log.error(f'{name} strokes failed.')
+            return False
+
+        self.current_depth = depth
+        self.checkpoint()
+
+        if inward:
+            self.log.info(
+                f'Maximum scan depth reached: {self.current_depth:.3f} m'
+            )
+
+        return True
+
+    # ---------------------------------------------------------
+    # 3b. CHECK AT THE BOTTOM (only with scan(check=...))
+    #
+    # The inward pass alone has seen the whole depth range once, so
+    # the pipeline can detect on it before the turnaround and the
+    # outward pass spend their half of the scan. The arm stands still
+    # while the readings are saved, and detection takes milliseconds.
+    # ---------------------------------------------------------
+
+    def check_at_bottom(self, check):
+        """Save the readings so far and ask check(); None on failure."""
+        self.log.info('========== CHECK AT THE BOTTOM ==========')
+
+        if self.recorder is not None and not self.recorder.save_blocking():
+            self.log.error('Could not save the inward pass to check it.')
+            return None
+
+        return bool(check())
 
     # ---------------------------------------------------------
     # 4. END SCAN (also performs the turnaround phase shift)
@@ -801,9 +935,18 @@ class _ScanRun:
     # 7. LEAVE: J7 back to INTER's (inside), straight out, INTER
     # ---------------------------------------------------------
 
-    def leave(self):
-        """Turn J7 back, move straight out of the bucket, go to INTER."""
-        if self.stay_inside and self.entry_depth > 0.0:
+    def leave(self, stay_inside=None):
+        """
+        Turn J7 back, move straight out of the bucket, go to INTER.
+
+        From wherever the strokes got to: entry_depth after the
+        outward pass, the full depth after a check at the bottom.
+        stay_inside: override the scan's own (None keeps it).
+        """
+        if stay_inside is None:
+            stay_inside = self.stay_inside
+
+        if stay_inside and self.entry_depth > 0.0:
             # Back to the entry pose, where the next scan starts
             # (start_inside): J7 turned back, still entry_depth in.
             # Solved from INTER, not just J7 unwound: the strokes'
@@ -823,7 +966,8 @@ class _ScanRun:
 
         self.log.info('========== RETURN TO INTER ==========')
 
-        if self.entry_depth > 0.0:
+        # (Not > 0: the strokes' sums leave ~1e-17 with no entry depth.)
+        if self.current_depth > 1e-6:
             current = self.arm.get_current_joints()
 
             if current is None:
@@ -838,11 +982,11 @@ class _ScanRun:
                 )
                 return False
 
-            if not self._tool_z(-self.entry_depth):
+            if not self._tool_z(-self.current_depth):
                 self.log.error('Straight exit from the bucket failed.')
                 return False
 
-            self.current_depth -= self.entry_depth
+            self.current_depth = 0.0
 
         if not go_to(self.arm, 'inter'):
             self.log.error('Return to INTER failed.')
@@ -879,6 +1023,8 @@ def end_scan_only(
     end_plan=None,
     end_scan_time_scale=1.0,
     cartesian_step=DEFAULT_CARTESIAN_STEP_M,
+    entry_depth=DEFAULT_ENTRY_DEPTH_M,
+    start_inside=False,
     **_scan_options,
 ):
     """
@@ -890,6 +1036,10 @@ def end_scan_only(
     recorder is NOT cleared - its quick-scan points stay - and only the
     end scan's replay is recorded, labelled END; recording is off
     afterwards. The caller pins the CSV and saves (pipeline).
+
+    start_inside: the quick scan stayed in (scan(stay_inside=True)), so
+    start from its entry pose, entry_depth in, instead of INTER;
+    refuses, moving nothing, unless the flange is there.
 
     MOVES THE ARM. Returns True on success.
     """
@@ -917,12 +1067,21 @@ def end_scan_only(
 
     log.info('========== END SCAN ONLY: STRAIGHT IN ==========')
 
-    if not go_to(arm, 'inter'):
-        log.error('Move to INTER failed.')
-        return False
+    if start_inside:
+        if not at_entry_pose(arm, entry_depth):
+            return False
+
+        inserted = entry_depth
+
+    else:
+        if not go_to(arm, 'inter'):
+            log.error('Move to INTER failed.')
+            return False
+
+        inserted = 0.0
 
     if not arm.move_tool_z(
-        depth,
+        depth - inserted,
         max_step=cartesian_step,
         velocity=STRAIGHT_IN_OUT_VELOCITY,
         acceleration=STRAIGHT_IN_OUT_VELOCITY,
@@ -1138,6 +1297,54 @@ def add_quick_full_flags(parser):
         '--full', dest='end_scan', action='store_const', const='precession',
         help='The full scan: same as --end-scan precession.',
     )
+
+
+def _coarse_steps(text):
+    """Parse --coarse: comma-separated stroke spacings, or 'none'."""
+    if text.strip().lower() == 'none':
+        return ()
+
+    return tuple(_stroke_spacing(part) for part in text.split(','))
+
+
+def add_search_arguments(parser):
+    """Add --coarse and --no-bottom-check (`laundry run` / `clear`)."""
+    default = ','.join(f'{step:g}' for step in DEFAULT_COARSE_STEPS_M)
+
+    parser.add_argument(
+        '--coarse',
+        type=_coarse_steps,
+        default=DEFAULT_COARSE_STEPS_M,
+        help=(
+            'Quick scans: first scan at these stroke spacings in metres, '
+            'coarsest first and each over --step, and only scan at --step '
+            "if they find nothing; 'none' scans at --step only "
+            f'(default: {default}).'
+        ),
+    )
+
+    parser.add_argument(
+        '--no-bottom-check',
+        dest='bottom_check',
+        action='store_false',
+        help=(
+            "Quick scans: do not detect on the --step pass's inward "
+            'strokes at the deepest point (laundry found there skips the '
+            'turnaround and outward strokes, and the arm goes straight '
+            'out to grab it; coarse passes always run whole).'
+        ),
+    )
+
+
+def coarse_steps_from_args(args):
+    """Return --coarse checked against --step; ValueError if not coarser."""
+    for step in args.coarse:
+        if not step > args.step:
+            raise ValueError(
+                f'--coarse {step:g} is not coarser than --step {args.step:g}.'
+            )
+
+    return tuple(sorted(args.coarse, reverse=True))
 
 
 def add_scan_arguments(parser, end_scan_default=DEFAULT_END_SCAN):

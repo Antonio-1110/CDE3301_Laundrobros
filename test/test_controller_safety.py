@@ -5,7 +5,9 @@ import math
 from builtin_interfaces.msg import Duration
 from laundry_control import config
 from laundry_control.arm.controller import XArm7Controller
-from laundry_control.arm.trajectory import add_joint7_twist, duration_to_seconds
+from laundry_control.arm.trajectory import (
+    add_joint7_twist, duration_to_seconds, join_trajectories,
+)
 from moveit_msgs.msg import RobotTrajectory
 import numpy as np
 import pytest
@@ -288,3 +290,23 @@ def test_twist_too_fast_for_j7_slows_the_whole_stroke():
     assert q[-1, 6] - config.INTER_RECORDED[6] == pytest.approx(
         math.radians(150.0) + 0.001
     )
+
+
+def test_joined_strokes_run_back_to_back_without_a_stop_between():
+    first, second = _stroke(duration=2.0), _stroke(duration=1.5, count=5)
+    assert add_joint7_twist(first, 150.0, _Logger())
+    assert add_joint7_twist(second, -150.0, _Logger())
+    t1, q1, _v1 = _arrays(first)
+    t2, q2, _v2 = _arrays(second)
+
+    times, q, v = _arrays(join_trajectories([first, second]))
+
+    # The second stroke's first point (the first's end) is dropped and
+    # its times follow straight on: no time is added between them.
+    assert len(times) == 7 + 5 - 1
+    assert np.all(np.diff(times) > 0.0)
+    assert times[-1] == pytest.approx(t1[-1] + t2[-1])
+    assert np.allclose(q[:7], q1)
+    assert np.allclose(q[7:], q2[1:])
+    # The turnaround is at rest, as each stroke's own end was.
+    assert v[6, 6] == pytest.approx(0.0, abs=1e-9)

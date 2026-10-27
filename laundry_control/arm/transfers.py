@@ -49,6 +49,7 @@ only if that would collide, the planner (with a warning).
 """
 
 import datetime
+import math
 import os
 
 from geometry_msgs.msg import Pose
@@ -117,8 +118,13 @@ AT_POSE_TOLERANCE_RAD = np.deg2rad(2.0)
 
 
 def default_plan_path():
-    """Return <repo>/scan_plans/transfers.yaml."""
-    return os.path.join(config.repo_root(), 'scan_plans', 'transfers.yaml')
+    """
+    Return the plan set's transfers.yaml (config.plan_set_dir).
+
+    <repo>/scan_plans/transfers.yaml, or the chosen fill level's own:
+    its grab routes, direct routes and chains go with its grabs.
+    """
+    return os.path.join(config.plan_set_dir(), 'transfers.yaml')
 
 
 def weighted_travel_deg(path, weights=TRAVEL_WEIGHTS):
@@ -534,6 +540,34 @@ def load_timings(path=None):
     return timings
 
 
+def load_stop_scales(path=None):
+    """
+    Return {route: time scale} for replaying routes stopping at their vias.
+
+    Only scales recorded for the transfer limits config sets now (the
+    claw-speed cap included); a route left out has no claw check for
+    these limits (see _route_plans).
+    """
+    from . import pass_through
+
+    document = _read(path)
+
+    if document is None:
+        return {}
+
+    limits = pass_through.current_limits()
+    scales = {}
+
+    for section in ('routes', 'direct'):
+        for name, entry in (document.get(section) or {}).items():
+            stop = entry.get('stop')
+
+            if stop and stop.get('limits') == limits:
+                scales[name] = float(stop['time_scale'])
+
+    return scales
+
+
 def load_direct(path=None):
     """
     Return {direct route: waypoints} (arm/direct.py), or {}.
@@ -587,7 +621,7 @@ def save_direct(path, entries):
     _write(path, document)
 
 
-def save_timings(path, timings, chains=None, direct=None):
+def save_timings(path, timings, chains=None, direct=None, stop_scales=None):
     """
     Store pass-through timings with their routes in transfers.yaml.
 
@@ -598,7 +632,12 @@ def save_timings(path, timings, chains=None, direct=None):
     direct: {direct route: pass_through.to_document(...) or None (no
     timing)}, the direct routes to keep; the others are removed. None
     keeps them all as they are.
+    stop_scales: {route or direct route: (time scale, claw peak m/s)}
+    for replaying it stopping at its vias (pass_through.Retimer.
+    stop_time_scale), stored as its 'stop' with the limits it is for.
     """
+    from . import pass_through
+
     document = _read(path)
 
     if direct is not None:
@@ -641,6 +680,21 @@ def save_timings(path, timings, chains=None, direct=None):
             }
             for name, chain in chains.items()
         }
+
+    if stop_scales is not None:
+        limits = pass_through.current_limits()
+
+        for section in ('routes', 'direct'):
+            for name, entry in (document.get(section) or {}).items():
+                entry.pop('stop', None)
+
+                if name in stop_scales:
+                    scale, peak = stop_scales[name]
+                    entry['stop'] = {
+                        'time_scale': round(float(scale), 4),
+                        'tip_peak_m_s': round(float(peak), 4),
+                        'limits': limits,
+                    }
 
     _write(path, document)
 
@@ -865,6 +919,9 @@ def go_to(
     timings=None,
     before=(),
     after=(),
+    turn_rad=0.0,
+    before_end=None,
+    claw_peaks=None,
 ):
     """
     Move to a named pose along the most repeatable route available.
@@ -877,6 +934,9 @@ def go_to(
 
     before / after: straight moves to make first / afterwards, in the
     same trajectory; see prepare_go_to.
+
+    turn_rad / before_end: turn J7 on the way and back by the end; call
+    something just before the end - see prepare_go_to.
 
     1. A baked transfer (see route_for), re-checked against the
        current planning scene, then replayed exactly - under the
@@ -892,10 +952,11 @@ def go_to(
         arm, target_name, routes=routes,
         max_velocity_rad_s=max_velocity_rad_s, time_scale=time_scale,
         arm_paddings=arm_paddings, gripper_empty=gripper_empty,
-        timings=timings, before=before, after=after,
+        timings=timings, before=before, after=after, turn_rad=turn_rad,
+        claw_peaks=claw_peaks,
     )
 
-    return move is not None and move()
+    return move is not None and move(before_end=before_end)
 
 
 def prepare_go_to(
@@ -909,6 +970,9 @@ def prepare_go_to(
     timings=None,
     before=(),
     after=(),
+    turn_rad=0.0,
+    start=None,
+    claw_peaks=None,
 ):
     """
     Choose and collision-check go_to's move now; return it, to make later.
@@ -927,15 +991,42 @@ def prepare_go_to(
     a baked route the whole move is ONE trajectory - it comes to rest
     at each join, but does not wait there for a new goal and its
     checks. Otherwise the moves are made one after another.
+
+    turn_rad: carrying with the claw turned (grasp/carry.py). J7 turns
+    by this much (rad) as the move starts and back by the time it
+    ends, superimposed on the baked move without re-timing it
+    (joint_path.add_j7_turn), so the arm never stops to turn; the
+    turned states are checked too. If the move is too short to turn
+    within J7's limits, or turned it would collide, it is made
+    unturned. Only a baked route turns.
+
+    claw_peaks: {route: the claw's peak speed as baked} for the turn's
+    guard (load_claw_peaks; read from transfers.yaml when routes is).
+
+    start: the joints the move will start from, if not where the arm
+    is now - to prepare it during an earlier move or claw wait. The
+    move refuses to run unless the arm is there by then.
+
+    The returned move(before_end=None) takes (seconds, callback):
+    callback() is called that long before the move's planned end
+    (from a timer on the arm's node, which spins while the move
+    runs) - the claw commands, so the claw moves as the arm arrives
+    instead of after the controller reports it there (~0.45 s later
+    on the rig).
     """
     stamp = None
     mismatches = {}
+    stop_scales = None
 
     if routes is None:
         routes, _baked_velocity = load()
         stamp = baked_scene()
         mismatches = padding_mismatches()
         timings = load_timings()
+        stop_scales = load_stop_scales()
+
+        if turn_rad:
+            claw_peaks = load_claw_peaks()
 
     moved = from_other_inter(routes)
 
@@ -961,7 +1052,7 @@ def prepare_go_to(
     )
 
     target = config.get_named_pose(target_name)
-    current = arm.get_current_joints()
+    current = arm.get_current_joints() if start is None else list(start)
 
     if current is None:
         return None
@@ -1029,10 +1120,21 @@ def prepare_go_to(
     if changed:
         arm.set_arm_padding(padding)
 
+    turn = None
+
+    if turn_rad:
+        claw_peak = _move_claw_peak(pieces, claw_peaks or {})
+
+        def turned(plan):
+            return _turn_overlay(arm, target_name, plan, turn_rad, claw_peak)
+
+        turn = turned
+
     try:
         plan = _checked_plan(
             arm, target_name, current, origin, route, before, after,
             pieces, routes, timings or {}, max_velocity_rad_s, stamp,
+            stop_scales, turn=turn,
         )
     finally:
         if changed:
@@ -1043,23 +1145,246 @@ def prepare_go_to(
 
     message, times, positions, velocities = plan
 
-    def move():
-        arm.get_logger().info(message + note + ').')
+    return _timed_move(
+        arm, target_name, message + note + ').', times, positions,
+        velocities, time_scale, current if start is not None else None,
+    )
+
+
+def _timed_move(
+    arm, target_name, message, times, positions, velocities, time_scale,
+    start=None,
+):
+    """
+    Return move(before_end=None): one timed trajectory, as prepare_go_to's.
+
+    start: refuse to move unless the arm is there (within
+    AT_POSE_TOLERANCE_RAD).
+    """
+    duration = float(times[-1]) / time_scale
+
+    def execute():
         return arm.execute_joint_path(
             positions, times, velocities, time_scale=time_scale
         )
 
+    def move(before_end=None):
+        if start is not None:
+            now = arm.get_current_joints()
+
+            if now is None or not _at(now, start):
+                arm.get_logger().error(
+                    f'The move to {target_name.upper()} was prepared from '
+                    'another pose than the arm is at; not moving.'
+                )
+                return False
+
+        arm.get_logger().info(message)
+
+        if before_end is None:
+            return execute()
+
+        return _with_callback_before_end(arm, duration, before_end, execute)
+
     return move
+
+
+def _calling_at_end(move_now):
+    """Wrap a move with no timing of its own: before_end's callback after it."""
+    def move(before_end=None):
+        ok = move_now()
+
+        if ok and before_end is not None:
+            before_end[1]()
+
+        return ok
+
+    return move
+
+
+def load_claw_peaks(path=None):
+    """
+    Return {route, direct route or chain: the claw's peak speed (m/s)}.
+
+    As baked (pass_through's claw bound, any J7 angle): the higher of
+    its pass-through timing's and its stop-at-each timing's (at that
+    timing's time scale), whichever it may be run with. Routes with
+    neither are left out.
+    """
+    document = _read(path)
+
+    if document is None:
+        return {}
+
+    peaks = {}
+
+    for section in ('routes', 'direct', 'chains'):
+        for name, entry in (document.get(section) or {}).items():
+            found = []
+            timed = (entry.get('timed') or {}).get('totg') or {}
+            stop = entry.get('stop') or {}
+
+            if timed.get('tip_peak_m_s') is not None:
+                found.append(float(timed['tip_peak_m_s']))
+
+            if isinstance(stop, dict) and stop.get('tip_peak_m_s') is not None:
+                found.append(
+                    float(stop['tip_peak_m_s'])
+                    * float(stop.get('time_scale') or 1.0)
+                )
+
+            if found:
+                peaks[name] = max(found)
+
+    return peaks
+
+
+def _move_claw_peak(pieces, claw_peaks):
+    """Return the highest baked claw speed a move's pieces may run at, or None."""
+    names = [name for name, _backward in pieces]
+    chain = chain_name(pieces)
+
+    if chain is not None and chain in claw_peaks:
+        names.append(chain)
+
+    if any(name not in claw_peaks for name, _backward in pieces):
+        return None
+
+    return max(claw_peaks[name] for name in names)
+
+
+def _turn_overlay(arm, target_name, plan, turn_rad, claw_peak):
+    """
+    Return plan with the carry turn superimposed, or None, unchecked.
+
+    The turn spins the claw about link7's axis on top of the move, so
+    its own J7 speed is capped where the claw's corners (pass_through.
+    gripper_corners, any J7 angle) would pass TRANSFER_MAX_TIP_SPEED_M_S
+    on top of the move's baked claw peak. Without a baked peak the
+    move is not turned. The caller checks it (_checked_plan).
+    """
+    from . import pass_through
+    from .joint_path import add_j7_turn
+
+    message, times, positions, velocities = plan
+
+    if claw_peak is None:
+        arm.get_logger().info(
+            f'No baked claw speed for the move to {target_name.upper()} '
+            '(re-time: laundry plan bake timing); carrying it unturned.'
+        )
+        return None
+
+    radius = float(np.hypot(*pass_through.gripper_corners()[1, :2]))
+    added = (config.TRANSFER_MAX_TIP_SPEED_M_S - claw_peak) / radius
+
+    if added <= 0.0:
+        arm.get_logger().info(
+            f'The move to {target_name.upper()} already takes the claw to '
+            'its speed limit; carrying it unturned.'
+        )
+        return None
+
+    turned = add_j7_turn(
+        times, positions, velocities, turn_rad,
+        config.CARRY_TURN_MAX_VELOCITY_RAD_S,
+        config.CARRY_TURN_MAX_ACCELERATION_RAD_S2,
+        config.TRANSFER_MAX_JERK_RAD_S3,
+        max_added_rate_rad_s=added,
+    )
+
+    if turned is None:
+        arm.get_logger().info(
+            f'The move to {target_name.upper()} is too short to turn the '
+            "claw and back within J7's limits; carrying it unturned."
+        )
+        return None
+
+    grid, turned_positions, turned_velocities, ramp = turned
+
+    return (
+        message + f', claw turned {math.degrees(turn_rad):+.0f} deg on the '
+        f'way ({ramp:.1f} s each way)',
+        grid, turned_positions, turned_velocities,
+    )
+
+
+def _with_callback_before_end(arm, duration, before_end, execute):
+    """
+    Run execute(), calling callback() `lead` seconds before `duration`.
+
+    before_end is (lead, callback). The timer starts as the goal is
+    sent, so it also runs ahead by the goal's acceptance time. If the
+    move ends before the timer fires, callback() is called right
+    after it - but only if the move succeeded.
+    """
+    lead, callback = before_end
+    fired = []
+
+    def fire():
+        if not fired:
+            fired.append(True)
+            timer.cancel()
+            callback()
+
+    timer = arm.create_timer(max(duration - lead, 1e-3), fire)
+
+    try:
+        ok = execute()
+    finally:
+        timer.cancel()
+        arm.destroy_timer(timer)
+
+    if ok and not fired:
+        fired.append(True)
+        callback()
+
+    return ok
 
 
 def _prepare_unbaked(
     arm, target_name, current, target, before, after, max_velocity_rad_s,
     time_scale, go_to_options,
 ):
-    """prepare_go_to without a baked route: straight, else the planner."""
+    """
+    prepare_go_to without a baked route: straight, else the planner.
+
+    Already at the target, before / after are one trajectory of
+    straight moves, checked now; otherwise they and the move are made
+    one after another, each checked as it is made.
+    """
+    origin = before[-1] if before else current
+
+    if (before or after) and _at(origin, target):
+        legs = _straight_legs([current] + list(before) + list(after))
+
+        for start, leg in legs:
+            limits = task_limits(start=start)
+            bad = arm.first_invalid_state(leg[1], limits=limits)
+
+            if bad is not None:
+                arm.get_logger().error(
+                    f'Straight joint move at {target_name.upper()} refused '
+                    f'({arm._why_invalid(leg[1][bad], limits)}); not moving.'
+                )
+                return None
+
+        if not legs:
+            return _calling_at_end(lambda: True)
+
+        times, positions, velocities = _join(
+            [leg for _start, leg in legs], current
+        )
+
+        return _timed_move(
+            arm, target_name,
+            f'{len(legs)} straight move(s) at {target_name.upper()}.',
+            times, positions, velocities, time_scale,
+        )
+
     if before or after:
         # One move at a time, each checked as it is made.
-        def move():
+        def move_now():
             return (
                 all(
                     arm.move_joints_linear(q, time_scale=time_scale)
@@ -1075,18 +1400,18 @@ def _prepare_unbaked(
                 )
             )
 
-        return move
+        return _calling_at_end(move_now)
 
     # Widened to where the arm is, as move_joints_linear checks it: a
     # hand move may have left a joint outside the task ranges.
     if arm.first_invalid_state(
         [current, target], limits=task_limits(start=current)
     ) is None:
-        return lambda: arm.move_joints_linear(
+        return _calling_at_end(lambda: arm.move_joints_linear(
             target,
             max_velocity_rad_s=max_velocity_rad_s,
             time_scale=time_scale,
-        )
+        ))
 
     arm.get_logger().warning(
         f'No baked or straight collision-free route to {target_name.upper()} '
@@ -1094,12 +1419,12 @@ def _prepare_unbaked(
         'kept inside the task joint ranges).'
     )
 
-    return lambda: arm.move_joints(target)
+    return _calling_at_end(lambda: arm.move_joints(target))
 
 
 def _checked_plan(
     arm, target_name, current, origin, route, before, after, pieces, routes,
-    timings, max_velocity_rad_s, stamp,
+    timings, max_velocity_rad_s, stamp, stop_scales=None, turn=None,
 ):
     """
     Return (log message, times, positions, velocities), or None.
@@ -1108,7 +1433,15 @@ def _checked_plan(
     all collision-free in the live planning scene, with the straight
     moves before and after it. None if the straight moves, or every
     timing, collide.
+
+    turn(plan): the plan turned for the carry (_turn_overlay), or None.
+    Each timing is then tried turned first, the whole turned move
+    checked as it will run (joint_path.resample_by_step), and checked
+    unturned only if that is refused - the turned move is what runs,
+    so checking the unturned one too would only double the checks.
     """
+    from .joint_path import resample_by_step
+
     if stamp is not None:
         from . import scene
 
@@ -1145,22 +1478,36 @@ def _checked_plan(
     # moved since. A pass-through timing's rounded corners leave the
     # straight lines, so its own curve is what is checked.
     for how, legs, check in _route_plans(
-        origin, pieces, routes, timings, max_velocity_rad_s
+        origin, pieces, routes, timings, max_velocity_rad_s, stop_scales,
+        log=arm.get_logger(),
     ):
+        joined = _join(
+            [leg for _start, leg in straight_before]
+            + legs
+            + [leg for _start, leg in straight_after],
+            current,
+        )
+        plan = (
+            f'Baked transfer to {target_name.upper()} ({vias} via(s), '
+            + how,
+        ) + tuple(joined)
+
+        turned = turn(plan) if turn is not None else None
+
+        if turned is not None:
+            if arm.first_invalid_state(resample_by_step(turned[2])) is None:
+                return turned
+
+            arm.get_logger().warning(
+                f'Turned, the move to {target_name.upper()} would collide '
+                '(or leave the joint ranges); carrying the claw unturned.'
+            )
+            turn = None
+
         bad = arm.first_invalid_state(check)
 
         if bad is None:
-            times, positions, velocities = _join(
-                [leg for _start, leg in straight_before]
-                + legs
-                + [leg for _start, leg in straight_after],
-                current,
-            )
-            return (
-                f'Baked transfer to {target_name.upper()} ({vias} via(s), '
-                + how,
-                times, positions, velocities,
-            )
+            return plan
 
         if how.startswith('passing'):
             arm.get_logger().warning(
@@ -1263,7 +1610,10 @@ def route_digest(waypoints):
     return hashlib.sha1(rounded.tobytes()).hexdigest()[:16]
 
 
-def _route_plans(origin, pieces, routes, timings, max_velocity_rad_s):
+def _route_plans(
+    origin, pieces, routes, timings, max_velocity_rad_s, stop_scales=None,
+    log=None,
+):
     """
     Yield the ways to time a move, fastest first: (how, legs, check states).
 
@@ -1276,16 +1626,40 @@ def _route_plans(origin, pieces, routes, timings, max_velocity_rad_s):
     rest; the first starts at origin (bridged with a short straight
     move when the route starts more than _BRIDGE_TOLERANCE_RAD away).
     1 and 2 only when config.TRANSFER_PASS_THROUGH_VIAS.
+
+    stop_scales: {route: time scale} (load_stop_scales); a leg that
+    stops at its vias is slowed by the scale of the route(s) it runs,
+    so the claw stays under config.TRANSFER_MAX_TIP_SPEED_M_S. None
+    (tests) slows nothing; a route missing from it is replayed as is,
+    with a warning: its claw speed is unchecked for these limits.
     """
     from . import pass_through
 
-    def stop_at_each(waypoints):
+    def stop_at_each(waypoints, names=()):
         dense, times, velocities = time_stop_at_each(
             waypoints,
             max_velocity_rad_s,
             max_acceleration=config.TRANSFER_MAX_ACCELERATION_RAD_S2,
             max_jerk=config.TRANSFER_MAX_JERK_RAD_S3,
         )
+        scale = 1.0
+
+        if stop_scales is not None:
+            for name in names:
+                if name in stop_scales:
+                    scale = min(scale, stop_scales[name])
+                elif log is not None:
+                    log.warning(
+                        f'Route {name} has no claw-speed check for the '
+                        'current transfer limits; replaying it as timed. '
+                        'Re-time: laundry plan bake timing',
+                        throttle_duration_sec=60.0,
+                    )
+
+        if scale < 1.0:
+            times = np.asarray(times) / scale
+            velocities = np.asarray(velocities) * scale
+
         return (times, dense, velocities), dense
 
     def timed(name, backward):
@@ -1326,7 +1700,9 @@ def _route_plans(origin, pieces, routes, timings, max_velocity_rad_s):
                 ),
             ) + with_bridge([
                 timed(name, backward) if name in timings
-                else stop_at_each(_piece_waypoints(routes, name, backward))
+                else stop_at_each(
+                    _piece_waypoints(routes, name, backward), [name]
+                )
                 for name, backward in pieces
             ])
 
@@ -1334,7 +1710,9 @@ def _route_plans(origin, pieces, routes, timings, max_velocity_rad_s):
         _piece_waypoints(routes, name, backward)[0 if k == 0 else 1:]
         for k, (name, backward) in enumerate(pieces)
     ])
-    leg, check = stop_at_each([origin] + list(route))
+    leg, check = stop_at_each(
+        [origin] + list(route), [name for name, _backward in pieces]
+    )
 
     yield 'stopping at each', [leg], check
 

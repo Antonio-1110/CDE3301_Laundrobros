@@ -36,8 +36,8 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry scan [--save scan.csv] [--full \| --end-scan precession\|bottom] [--velocity 0.03 ...]` — the quick scan unless `--full` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` — quick or full is read from the CSV | nothing — plain files |
 | `laundry grasp targets.json [--drop] [--dry-run]` | rig, or `--fake-hardware` |
-| `laundry run [--dry-run]` — scan → detect → grasp → drop, one item | rig, or `--fake-hardware --scan-from X.csv` |
-| `laundry clear [--no-grabs] [--grab-limit N] [--max-rounds 15]` — empty the bucket: the sweep, then scan → grasp → drop until a scan finds nothing | rig, or `--fake-hardware --scan-from A.csv B.csv ...` |
+| `laundry run [--dry-run] [--coarse 0.12\|none] [--no-bottom-check]` — scan (12 cm first, then 3 cm) → detect → grasp → drop, one item | rig, or `--fake-hardware --scan-from X.csv` |
+| `laundry clear [--fill 0.25\|0.3\|...\|none] [--no-grabs] [--grab-limit N] [--max-rounds 15]` — empty the bucket: the sweep (the fill level's baked grabs, 0.25 unless `--fill` or `LAUNDRY_FILL` says otherwise), then scan → grasp → drop until a scan finds nothing | rig, or `--fake-hardware --scan-from A.csv B.csv ...` |
 | `laundry gripper open` / `close` / `ANGLE` | `gripper_node` (open/close); the servo on this Pi's GPIO (ANGLE) |
 | `laundry baseline collect [--count 8] [--archive] [-- <scan options>]` — straight into `baseline_scans/`; `--archive` replaces the set | rig, empty bucket |
 | `laundry baseline promote X.csv\|dir ... [--move] [--archive]`, `archive`, `list`, `restore LABEL` | nothing |
@@ -106,7 +106,7 @@ The sweep runs: route in → descend → close → lift → DROP → open, for e
 
 **Detected items are grabbed the same way.** When the grid is baked, a detected item anywhere in the lower half of the drum (within `config.DETECTED_GRAB_MAX_ANGLE_DEG` = 90° of the floor's lowest line, so the lower walls too) gets a grab placed over it. The grab digs as deep into the pile as is collision-free: for each tilt it tries heights from the deepest allowed upward and keeps the lowest whose grab, approach and descent all pass the collision checks, never closer than 2 cm to the bucket wall and never more than 15 cm below the sensed top (`config.DETECTED_GRAB_DIG`). The approach starts 3 cm above the pile where it fits, so the digging is the straight descent. On the fake controller (2026-10-22, 36 spots): 9.5 cm into the pile on average, against 4.3 cm with the old rule (half the pile, at most 5 cm), for about 0.8 s more planning. The arm takes the baked route to the nearest `grab_NN`, makes a short straight collision-checked move from there, then descends, closes and lifts. Items beyond that angle use the older Cartesian reach from INTER. On the fake controller, that reach couldn't get to a towel in the middle of the floor at any depth; the floor grab could.
 
-**`laundry clear`** chains it all. It fits the bucket model once and runs the sweep (`--no-grabs` skips it). Then it repeats open → scan → detect → grasp the best reachable item → DROP until a scan finds nothing. It stops early if nothing detected is reachable (a rescan would see the same pile), after 2 failed grasps in a row, or after `--max-rounds`.
+**`laundry clear`** chains it all. It fits the bucket model once and runs the sweep (`--no-grabs` skips it), from the grabs baked for `--fill` (default 0.25; `LAUNDRY_FILL` overrides the default, `--fill none` uses `scan_plans/` itself). Then it repeats open → scan → detect → grasp the best reachable item → DROP until a scan finds nothing. It stops early if nothing detected is reachable (a rescan would see the same pile), after 2 failed grasps in a row, or after `--max-rounds`.
 
 ## After moving the bucket (or table)
 

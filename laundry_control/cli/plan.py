@@ -77,8 +77,19 @@ def _bake_timing(arm):
             flush=True,
         )
 
-    timed = pass_through.time_routes(
-        dict(with_vias, **chain_waypoints, **directs), v_max, a_max, j_max
+    tip_speed = config.TRANSFER_MAX_TIP_SPEED_M_S
+    print(
+        f'... the claw kept under {tip_speed * 1000:.0f} mm/s on every '
+        'route (C24 on the xArm over 1000 mm/s).',
+        flush=True,
+    )
+
+    # Every route goes to the child, those without vias too: each gets
+    # its stop-at-each claw check; only the ones with vias keep a
+    # pass-through timing.
+    timed, stop_scales = pass_through.time_routes(
+        dict(routes, **chain_waypoints, **directs), v_max, a_max, j_max,
+        tip_speed=tip_speed, corners=pass_through.gripper_corners(),
     )
 
     def padding_of(name):
@@ -134,23 +145,40 @@ def _bake_timing(arm):
             f'  {name:<11} {len(waypoints) - 2} via(s): {stop:.2f} s '
             f'stopping -> {times[-1]:.2f} s passing through (peaks '
             f'{math.degrees(v):.0f} deg/s, {a:.2f} rad/s^2, {j:.1f} '
-            f'rad/s^3; checked with {padding_of(name)[1] * 100:g} cm '
+            f'rad/s^3, claw {settings.get("tip_peak_m_s", 0.0) * 1000:.0f} '
+            f'mm/s; checked with {padding_of(name)[1] * 100:g} cm '
             'gripper clearance)',
             flush=True,
         )
 
     chain_timings = _keep_chains(
         routes, chains, timed, limits, chain_states, failed,
-        v_max, a_max, j_max,
+        v_max, a_max, j_max, stop=stop_scales,
     )
     direct_timings = _keep_direct(
         routes, directs, timed, chain_timings, limits, failed,
-        v_max, a_max, j_max,
+        v_max, a_max, j_max, stop=stop_scales,
     )
+
+    slowed = {
+        name: value for name, value in sorted(stop_scales.items())
+        if value[0] < 1.0 and (name in routes or name in directs)
+    }
+    print(
+        f'Stopping at its vias, {len(slowed)} route(s) would take the claw '
+        f'over {tip_speed * 1000:.0f} mm/s and are slowed for it'
+        + (':' if slowed else '.')
+    )
+    for name, (scale, peak) in slowed.items():
+        print(f'  {name:<20} claw {peak * 1000:.0f} mm/s -> x{scale:.3f} speed')
 
     path = transfers.default_plan_path()
     transfers.save_timings(
-        path, timings, chains=chain_timings, direct=direct_timings
+        path, timings, chains=chain_timings, direct=direct_timings,
+        stop_scales={
+            name: value for name, value in stop_scales.items()
+            if name in routes or name in directs
+        },
     )
     print(f'Saved the timings in {path}')
 
@@ -200,8 +228,13 @@ def _grouped_checks(arm, jobs, what):
     return failed
 
 
-def _leg_time(routes, timed, name, v_max, a_max, j_max):
-    """Return a route's replay time: its pass-through timing, else stopping."""
+def _leg_time(routes, timed, name, v_max, a_max, j_max, stop=None):
+    """
+    Return a route's replay time: its pass-through timing, else stopping.
+
+    stop: {route: (time scale, claw peak)}; a route stopping at its
+    vias is replayed slower by its scale, to keep the claw's speed.
+    """
     from ..arm.joint_path import time_stop_at_each
 
     timing = timed.get(name) if len(routes[name]) > 2 else None
@@ -209,9 +242,11 @@ def _leg_time(routes, timed, name, v_max, a_max, j_max):
     if timing is not None:
         return float(timing[0][-1])
 
+    scale = (stop or {}).get(name, (1.0,))[0]
+
     return float(time_stop_at_each(
         routes[name], v_max, max_acceleration=a_max, max_jerk=j_max
-    )[1][-1])
+    )[1][-1]) / scale
 
 
 def _direct_jobs(directs, timed, padding_of, jobs):
@@ -251,6 +286,7 @@ def _direct_jobs(directs, timed, padding_of, jobs):
 
 def _keep_direct(
     routes, directs, timed, chain_timings, limits, failed, v_max, a_max, j_max,
+    stop=None,
 ):
     """
     Return the direct routes to keep: {name: timing document or None}.
@@ -275,7 +311,7 @@ def _keep_direct(
             via_inter = chain_timings[chain]['timed']['times'][-1]
         else:
             via_inter = sum(
-                _leg_time(routes, timed, leg, v_max, a_max, j_max)
+                _leg_time(routes, timed, leg, v_max, a_max, j_max, stop)
                 for leg in (grab, join)
             )
 
@@ -284,7 +320,7 @@ def _keep_direct(
             float(passing[0][-1]) if passing is not None
             else float(time_stop_at_each(
                 directs[name], v_max, max_acceleration=a_max, max_jerk=j_max
-            )[1][-1])
+            )[1][-1]) / (stop or {}).get(name, (1.0,))[0]
         )
 
         if seconds >= via_inter:
@@ -341,6 +377,7 @@ def _chain_jobs(routes, chains, timed, padding_of, jobs):
 
 def _keep_chains(
     routes, chains, timed, limits, checked, failed, v_max, a_max, j_max,
+    stop=None,
 ):
     """
     Return the chains to keep, {name: {'back', 'out', 'timed'}}.
@@ -350,7 +387,7 @@ def _keep_chains(
     from ..arm import pass_through
 
     def leg_time(name):
-        return _leg_time(routes, timed, name, v_max, a_max, j_max)
+        return _leg_time(routes, timed, name, v_max, a_max, j_max, stop)
 
     good = {}
 
@@ -527,11 +564,26 @@ def cmd_plan(args):
                 tuple(config.generated_grab_poses())
                 if args.which == 'retrieve' else None
             )
+
+            if args.only:
+                targets = tuple(name.lower() for name in args.only)
+
             routes, clearances, failures = transfers.bake(
                 arm, targets=targets, log=print
             )
 
+            # Routes re-baked for replay time, not least travel.
+            from ..arm import fast_route
+
+            for name in sorted(set(routes) & set(fast_route.TIME_ROUTES)):
+                routes[name], _seconds = fast_route.faster(
+                    arm, name, routes[name], log=print
+                )
+
             path = transfers.default_plan_path()
+            # A partial bake keeps the chains and direct routes; their
+            # digests drop any whose routes changed (load_timings).
+            before = transfers._read(path) if args.only else None
             transfers.save(
                 path,
                 routes,
@@ -540,6 +592,14 @@ def cmd_plan(args):
                 clearances=clearances,
                 keep=transfers.routes_to_keep(path, routes),
             )
+
+            if before:
+                document = transfers._read(path)
+                for section in ('chains', 'direct'):
+                    if before.get(section):
+                        document[section] = before[section]
+                transfers._write(path, document)
+
             print(f'Saved {path} ({", ".join(routes) or "no routes"})')
 
             if failures:
@@ -686,6 +746,14 @@ def add_plan_parser(subparsers):
     bake.add_argument(
         '--max-joint-speed', type=float, default=45.0,
         help='Peak joint speed along the plan, deg/s (default: 45).',
+    )
+    bake.add_argument(
+        '--only', action='append', metavar='NAME', default=None,
+        help=(
+            'With transfers: bake only this route (repeat for more), keeping '
+            'the others. HOME is searched for replay time '
+            '(arm/fast_route.py).'
+        ),
     )
     bake.add_argument(
         '--regenerate', action='store_true',

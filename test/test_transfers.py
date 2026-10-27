@@ -322,6 +322,202 @@ def test_go_to_falls_back_to_the_planner_only_when_blocked():
     assert arm.calls[0][0] == 'planner'
 
 
+TURN = math.radians(90.0)
+LONG = {'drop': np.array([INTER, INTER + 1.0, DROP])}
+# The claw's baked peak speed on it (transfers.load_claw_peaks).
+PEAKS = {'drop': 0.45}
+
+
+class _CheckedArm(_StubArm):
+    """Records the states of each collision check; refuses the Nth."""
+
+    def __init__(self, at, refuse_check=None):
+        super().__init__(at)
+        self.checked = []
+        self.refuse_check = refuse_check
+
+    def first_invalid_state(self, waypoints, limits=None):
+        self.checked.append(np.asarray(waypoints))
+        if len(self.checked) == self.refuse_check:
+            return 0
+        return None
+
+    def create_timer(self, _period, _callback):
+        return _Timer()
+
+    def destroy_timer(self, _timer):
+        pass
+
+
+class _Timer:
+
+    def cancel(self):
+        pass
+
+
+def _replayed(arm):
+    kind, waypoints = arm.calls[-1]
+    assert kind == 'baked'
+    return waypoints
+
+
+def test_a_turned_carry_turns_on_the_way_and_is_back_by_the_end():
+    plain, turned = _CheckedArm(INTER), _CheckedArm(INTER)
+
+    assert transfers.go_to(plain, 'drop', routes=LONG, max_velocity_rad_s=0.7)
+    assert transfers.go_to(
+        turned, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+        claw_peaks=PEAKS,
+    )
+
+    path = _replayed(turned)
+    assert np.allclose(path[0], INTER, atol=1e-6)
+    assert np.allclose(path[-1], DROP, atol=1e-6)
+    # Not re-timed: as long as unturned.
+    assert turned.duration == pytest.approx(plain.duration)
+    # Turned the whole 90 deg on the way, on J7 only.
+    plain_j7 = np.interp(
+        np.linspace(0, 1, len(path)), np.linspace(0, 1, len(_replayed(plain))),
+        _replayed(plain)[:, 6],
+    )
+    assert np.max(np.abs(path[:, 6] - plain_j7)) == pytest.approx(TURN, abs=0.05)
+
+
+def test_a_carry_too_short_to_turn_is_made_unturned(monkeypatch):
+    # So slow a turn that no carry is long enough for it and back.
+    monkeypatch.setattr(config, 'CARRY_TURN_MAX_VELOCITY_RAD_S', 0.1)
+    arm, plain = _CheckedArm(INTER), _CheckedArm(INTER)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+        claw_peaks=PEAKS,
+    )
+    transfers.go_to(plain, 'drop', routes=LONG, max_velocity_rad_s=0.7)
+    assert np.allclose(_replayed(arm), _replayed(plain))
+
+
+def test_without_a_baked_claw_speed_the_carry_is_not_turned():
+    arm, plain = _CheckedArm(INTER), _CheckedArm(INTER)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+    )
+    transfers.go_to(plain, 'drop', routes=LONG, max_velocity_rad_s=0.7)
+    assert np.allclose(_replayed(arm), _replayed(plain))
+
+
+def test_a_carry_at_the_claw_speed_limit_is_not_turned():
+    arm, plain = _CheckedArm(INTER), _CheckedArm(INTER)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+        claw_peaks={'drop': config.TRANSFER_MAX_TIP_SPEED_M_S},
+    )
+    transfers.go_to(plain, 'drop', routes=LONG, max_velocity_rad_s=0.7)
+    assert np.allclose(_replayed(arm), _replayed(plain))
+
+
+def test_the_turn_keeps_the_claw_under_its_speed_limit():
+    from laundry_control.arm import pass_through
+
+    arm = _CheckedArm(INTER)
+    peak = 0.8
+
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+        claw_peaks={'drop': peak},
+    )
+    radius = np.hypot(*pass_through.gripper_corners()[1, :2])
+    # The spin it added on top of the route's own J7 motion.
+    plain = _CheckedArm(INTER)
+    transfers.go_to(plain, 'drop', routes=LONG, max_velocity_rad_s=0.7)
+    times = np.linspace(0.0, arm.duration, len(_replayed(arm)))
+    spin = np.gradient(
+        _replayed(arm)[:, 6] - np.interp(
+            times, np.linspace(0.0, plain.duration, len(_replayed(plain))),
+            _replayed(plain)[:, 6],
+        ),
+        times,
+    )
+    assert np.abs(spin).max() * radius <= (
+        config.TRANSFER_MAX_TIP_SPEED_M_S - peak
+    ) * 1.05
+
+
+def test_a_turned_carry_is_checked_turned_and_only_turned():
+    arm = _CheckedArm(INTER)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+        claw_peaks=PEAKS,
+    )
+    # One check, of what runs: the turned move, at most 1 deg apart.
+    assert len(arm.checked) == 1
+    states = arm.checked[0]
+    assert np.abs(np.diff(states, axis=0)).max() <= np.radians(1.0) + 1e-9
+    assert np.allclose(states[[0, -1]], _replayed(arm)[[0, -1]], atol=1e-6)
+
+
+def test_a_turned_carry_that_would_collide_is_made_unturned():
+    # The turned states' check (the first) fails; the route's passes.
+    arm = _CheckedArm(INTER, refuse_check=1)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+        claw_peaks=PEAKS,
+    )
+    plain = _CheckedArm(INTER)
+    transfers.go_to(plain, 'drop', routes=LONG, max_velocity_rad_s=0.7)
+    assert np.allclose(_replayed(arm), _replayed(plain))
+
+
+def test_the_callback_before_the_end_runs_once_and_only_on_success():
+    called = []
+
+    arm = _CheckedArm(INTER)
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7,
+        before_end=(0.0, lambda: called.append('claw')),
+    )
+    assert called == ['claw']
+
+    failing = _CheckedArm(INTER)
+    failing.execute_joint_path = lambda *a, **k: False
+    assert not transfers.go_to(
+        failing, 'drop', routes=LONG, max_velocity_rad_s=0.7,
+        before_end=(0.0, lambda: called.append('again')),
+    )
+    assert called == ['claw']
+
+
+def test_a_move_prepared_from_start_runs_only_from_there():
+    arm = _CheckedArm(HOME)
+
+    move = transfers.prepare_go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, start=INTER,
+    )
+
+    # Prepared for later: the arm is not there yet.
+    assert move is not None
+    assert not move()
+    assert arm.calls == []
+
+    arm.at = list(INTER)
+    assert move()
+    assert np.allclose(arm.calls[0][1][-1], DROP)
+
+
+def test_straight_moves_at_the_target_are_one_trajectory():
+    arm = _CheckedArm(BOTTOM)
+
+    assert transfers.go_to(
+        arm, 'bottom', routes=ROUTES, max_velocity_rad_s=0.7,
+        after=[BOTTOM + 0.2, BOTTOM + 0.4],
+    )
+    assert [kind for kind, _ in arm.calls] == ['baked']
+    assert np.allclose(arm.calls[0][1][-1], BOTTOM + 0.4)
+
+
 def test_committed_transfers_are_sane():
     routes, speed = transfers.load()
 

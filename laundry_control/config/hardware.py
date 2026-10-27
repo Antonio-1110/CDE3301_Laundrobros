@@ -132,6 +132,16 @@ GRIPPER_HOLD_PULSES = True
 # not, raise it, or set gripper_node's settle_sec.
 ESP32_GRIPPER_SETTLE_SEC = 0.5
 
+# The claw is told to close (at a grab) or open (at DROP) this long
+# before the arm's move there is planned to end, not once the
+# controller reports it arrived: on the rig that report came ~0.45 s
+# after the planned end (the controller's goal tolerance and 10 Hz
+# monitoring), and the claw's command ~0.1 s after that (2026-10-22
+# `clear`: 1.04 s median from arrival to the claw's ack, of which 0.5
+# is the settle above). At 0 the jaws start moving about as the arm
+# gets there; the arm still waits for the ack before it lifts.
+CLAW_COMMAND_LEAD_SEC = 0.0
+
 # The broker runs on this Pi, so the nodes reach it on localhost;
 # the ESP32 is given the Pi's LAN address in its own config.
 MQTT_HOST = 'localhost'

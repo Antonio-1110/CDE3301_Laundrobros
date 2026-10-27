@@ -43,13 +43,25 @@ LIMITS = {
     'height_m': (0.01, 0.30),
     'tilt_deg': (-30.0, 75.0),
     'approach_m': (0.0, 0.15),
+    'lateral_m': (-0.20, 0.20),
 }
 
 # Stored to the millimetre and the half degree.
 _ROUNDING = {
-    'depth_m': 3, 'height_m': 3, 'approach_m': 3,
+    'depth_m': 3, 'height_m': 3, 'approach_m': 3, 'lateral_m': 3,
     'floor_angle_deg': 1, 'tilt_deg': 1,
 }
+
+# A target with lateral_m is a DOWN grab (the generated sweep, grasp/
+# pile_layers.py): its contact point is lateral_m sideways of the
+# drum's middle and height_m above the floor's lowest line, and the
+# claw points straight down, tilted toward the closed end - so grabs
+# can spread across the pile's surface, which radial grabs high in the
+# drum cannot (near the axis, +/-20 deg of floor angle moved them
+# under 1 cm). Its floor_angle_deg is then only where the contact point
+# lies around the axis. Without lateral_m (hand-placed in the editor,
+# and older lists) a grab is RADIAL: height_m in from the wall along
+# the radius at floor_angle_deg, the claw along that radius.
 
 # The starting layout for a ~2/3-full drum (pile top ~25 cm above the
 # floor): the old grid's 12 spots, 8 cm up rather than 1.5-4 cm, each
@@ -70,7 +82,9 @@ def clean(target):
     """Return target with every field clamped to LIMITS and rounded."""
     result = {}
 
-    for field in FIELDS:
+    fields = FIELDS + (('lateral_m',) if 'lateral_m' in target else ())
+
+    for field in fields:
         low, high = LIMITS[field]
         value = min(max(float(target[field]), low), high)
 
@@ -181,7 +195,13 @@ def _frame(floor_angle_deg, cone):
 
 def geometry(target, cone=None):
     """Return (contact point, tool +Z, claw +X) in link_base."""
-    from .retrieve_grid import grab_geometry
+    from .retrieve_grid import down_grab_geometry, grab_geometry
+
+    if 'lateral_m' in target:
+        return down_grab_geometry(
+            target['depth_m'], target['lateral_m'], target['height_m'],
+            target['tilt_deg'], cone,
+        )
 
     return grab_geometry(
         target['depth_m'], target['floor_angle_deg'],
@@ -373,9 +393,13 @@ def bucket_wireframe(cone=None, ring_every_m=0.1, line_every_deg=30.0):
 
 def describe(target):
     """One line for logs and the RViz label."""
+    where = (
+        f'{target["lateral_m"] * 100:+.0f} cm sideways, claw down'
+        if 'lateral_m' in target else f'{target["floor_angle_deg"]:+.0f} deg'
+    )
+
     return (
-        f'{target["depth_m"] * 100:.0f} cm deep, '
-        f'{target["floor_angle_deg"]:+.0f} deg, '
+        f'{target["depth_m"] * 100:.0f} cm deep, {where}, '
         f'{target["height_m"] * 100:.1f} cm up, '
         f'tilt {target["tilt_deg"]:.0f} deg, '
         f'approach {target["approach_m"] * 100:.0f} cm'

@@ -4,6 +4,8 @@
 
 import os
 
+from .robot import JOINT7_MAX_ACCELERATION_RAD_S2, JOINT7_MAX_VELOCITY_RAD_S
+
 # =============================================================
 # GRABS
 #
@@ -37,9 +39,10 @@ import os
 #   min_height_m:  the lowest sweep grab; laundry below it is the
 #                  scan-then-grasp stage's, so a pile this low gets no
 #                  sweep grabs at all
-#   depths_m, angles_deg: the spots, from the CLOSED end, in visiting
-#                  order (the mouth first: the claw passes through the
-#                  laundry there to get deeper)
+#   depths_m, lateral_m: the spots - depths from the CLOSED end, each
+#                  at these sideways offsets, the claw pointing down -
+#                  in visiting order (the mouth first: the claw passes
+#                  through the laundry there to get deeper)
 #   tilts_deg:     tried smallest first; each spot takes the highest
 #                  height that some tilt reaches. The 15 cm gripper
 #                  plus its approach meet the drum's ceiling, so
@@ -80,11 +83,40 @@ PILE = {
     'sink_m': 0.06,
     'layer_step_m': 0.06,
     'min_height_m': 0.10,
-    'depths_m': (0.40, 0.30, 0.20, 0.10),
-    'angles_deg': (0.0, -20.0, 20.0),
+    # Rows 7 cm apart from 32 cm, the mouth row's (40 until 2026-10-27:
+    # the user moved it 8 cm in and asked for the rest re-spaced).
+    'depths_m': (0.32, 0.25, 0.17, 0.10),
+    # Sideways of the drum's middle, the widest each spot is wanted at;
+    # one that does not fit tries 1 cm nearer the middle at a time. The
+    # claw points straight down (grab_targets: down grabs). Until
+    # 2026-10-27 the spots were floor angles 0/-20/+20 deg, which high
+    # in the drum lie within ~1 cm of each other.
+    'lateral_m': (0.0, -0.12, 0.12),
     'tilts_deg': (0.0, 15.0, 30.0, 45.0, 60.0),
     'approach_m': 0.05,
 }
+
+# Fill levels for the sweep, picked per run (`laundry preplanned
+# --fill 0.75`, `clear --fill`, or LAUNDRY_FILL=0.75 for any command,
+# bakes included): each is its own baked plan set in
+# scan_plans/fill_<percent>/ - its grab_targets.yaml, retrieve.yaml
+# and transfers.yaml - generated from PILE with the pile's top at that
+# fraction of the drum's height (DRUM_HEIGHT_M), the rest of PILE as
+# is. ./rebake_fills.sh bakes them all. With no fill chosen, the plans
+# in scan_plans/ itself are used (PILE's own top_height_m).
+#
+# A level whose pile is too low for PILE's min_height_m (0.25, 0.3:
+# their first layer aims at 4.6 and 6.8 cm) still gets one layer: its
+# grabs may go LOW_FILL_DEPTH_M below the aim, but never under
+# LOW_FILL_MIN_HEIGHT_M (config.set_fill). Fuller levels keep
+# min_height_m.
+FILL_LEVELS = (0.25, 0.3, 0.5, 0.6, 0.75, 0.9)
+LOW_FILL_DEPTH_M = 0.03
+LOW_FILL_MIN_HEIGHT_M = 0.03
+
+# The drum's height at mid-depth: twice the fitted bucket's radius
+# there (bucket.seed_cone; test_fill checks it against the model).
+DRUM_HEIGHT_M = 0.425
 
 RETRIEVE_GRID = {
     'max_depth_m': 0.55,
@@ -127,3 +159,23 @@ DETECTED_GRAB_DIG = {
 # solve everywhere from 0 to +/-90 deg at depths 3-48 cm. Items beyond
 # it fall back to the Cartesian reach (grasp/plan.py).
 DETECTED_GRAB_MAX_ANGLE_DEG = 90.0
+
+# Carry turned: once the claw has closed, every grasp (the sweep,
+# detected items, `laundry grasp`) turns J7 by this much while it lifts
+# the laundry out and carries it to DROP, and back by the time it gets
+# there, so it opens unturned (grasp/carry.py). The turn rides on the
+# baked carry - it is not a move of its own, nothing stops for it
+# (arm/joint_path.add_j7_turn). The jaws close along link7 Y, and every
+# grab sets link7 X along the bucket axis (at INTER: X down), so
+# unturned they close sideways and the laundry hangs in a pinch;
+# turned, the lower jaw is under it. +90, not -90: -90 takes the
+# deepest grabs past J7's -270 deg task limit. Fake controller,
+# 2026-10-26: turning was collision-free for all 24 baked grabs, and
+# every baked carry (3.2-4.9 s) fits the turn and back (1.3-1.7 s
+# each way). 0 carries unturned, as before.
+CARRY_J7_TURN_DEG = 90.0
+
+# J7's limits for the turn, with the carry's own J7 motion added: 90%
+# of J7's own.
+CARRY_TURN_MAX_VELOCITY_RAD_S = 0.9 * JOINT7_MAX_VELOCITY_RAD_S
+CARRY_TURN_MAX_ACCELERATION_RAD_S2 = 0.9 * JOINT7_MAX_ACCELERATION_RAD_S2

@@ -9,14 +9,14 @@ generated:
     layer_step_m: 0.06
     min_height_m: 0.1
     depths_m:
-    - 0.4
-    - 0.3
-    - 0.2
+    - 0.32
+    - 0.25
+    - 0.17
     - 0.1
-    angles_deg:
+    lateral_m:
     - 0.0
-    - -20.0
-    - 20.0
+    - -0.12
+    - 0.12
     tilts_deg:
     - 0.0
     - 15.0
@@ -26,123 +26,111 @@ generated:
     approach_m: 0.05
   layers: 2
 grabs:
-- depth_m: 0.4
-  floor_angle_deg: 0.0
-  height_m: 0.19
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.4
-  floor_angle_deg: -20.0
-  height_m: 0.188
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.4
-  floor_angle_deg: 20.0
-  height_m: 0.188
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.3
+- depth_m: 0.32
   floor_angle_deg: 0.0
   height_m: 0.19
   tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.3
-  floor_angle_deg: -20.0
-  height_m: 0.188
+  lateral_m: 0.0
+- depth_m: 0.32
+  floor_angle_deg: -77.0
+  height_m: 0.19
   tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.3
-  floor_angle_deg: 20.0
-  height_m: 0.188
+  lateral_m: -0.12
+- depth_m: 0.32
+  floor_angle_deg: 77.0
+  height_m: 0.19
   tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.2
+  lateral_m: 0.12
+- depth_m: 0.25
   floor_angle_deg: 0.0
   height_m: 0.19
   tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.2
-  floor_angle_deg: -20.0
-  height_m: 0.189
+  lateral_m: 0.0
+- depth_m: 0.25
+  floor_angle_deg: -63.0
+  height_m: 0.15
   tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.2
-  floor_angle_deg: 20.0
-  height_m: 0.189
+  lateral_m: -0.12
+- depth_m: 0.25
+  floor_angle_deg: 63.0
+  height_m: 0.15
   tilt_deg: 60.0
   approach_m: 0.05
+  lateral_m: 0.12
+- depth_m: 0.17
+  floor_angle_deg: 0.0
+  height_m: 0.19
+  tilt_deg: 60.0
+  approach_m: 0.05
+  lateral_m: 0.0
+- depth_m: 0.17
+  floor_angle_deg: -60.5
+  height_m: 0.14
+  tilt_deg: 60.0
+  approach_m: 0.05
+  lateral_m: -0.11
+- depth_m: 0.17
+  floor_angle_deg: 60.5
+  height_m: 0.14
+  tilt_deg: 60.0
+  approach_m: 0.05
+  lateral_m: 0.11
 - depth_m: 0.1
   floor_angle_deg: 0.0
   height_m: 0.18
   tilt_deg: 60.0
   approach_m: 0.05
+  lateral_m: 0.0
 - depth_m: 0.1
-  floor_angle_deg: -20.0
-  height_m: 0.179
+  floor_angle_deg: -59.5
+  height_m: 0.13
   tilt_deg: 60.0
   approach_m: 0.05
+  lateral_m: -0.11
 - depth_m: 0.1
-  floor_angle_deg: 20.0
-  height_m: 0.179
+  floor_angle_deg: 59.5
+  height_m: 0.13
   tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.4
+  lateral_m: 0.11
+- depth_m: 0.32
   floor_angle_deg: 0.0
   height_m: 0.13
   tilt_deg: 45.0
   approach_m: 0.05
-- depth_m: 0.4
-  floor_angle_deg: -20.0
-  height_m: 0.124
-  tilt_deg: 45.0
+  lateral_m: 0.0
+- depth_m: 0.32
+  floor_angle_deg: -51.5
+  height_m: 0.13
+  tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.4
-  floor_angle_deg: 20.0
-  height_m: 0.124
-  tilt_deg: 45.0
+  lateral_m: -0.11
+- depth_m: 0.32
+  floor_angle_deg: 51.5
+  height_m: 0.13
+  tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.3
+  lateral_m: 0.11
+- depth_m: 0.25
   floor_angle_deg: 0.0
   height_m: 0.13
   tilt_deg: 45.0
   approach_m: 0.05
-- depth_m: 0.3
-  floor_angle_deg: -20.0
-  height_m: 0.124
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.3
-  floor_angle_deg: 20.0
-  height_m: 0.124
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.2
+  lateral_m: 0.0
+- depth_m: 0.17
   floor_angle_deg: 0.0
   height_m: 0.13
   tilt_deg: 45.0
   approach_m: 0.05
-- depth_m: 0.2
-  floor_angle_deg: -20.0
-  height_m: 0.125
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.2
-  floor_angle_deg: 20.0
-  height_m: 0.125
-  tilt_deg: 45.0
-  approach_m: 0.05
+  lateral_m: 0.0
 - depth_m: 0.1
   floor_angle_deg: 0.0
   height_m: 0.12
   tilt_deg: 60.0
   approach_m: 0.05
-- depth_m: 0.1
-  floor_angle_deg: -20.0
-  height_m: 0.115
-  tilt_deg: 45.0
-  approach_m: 0.05
-- depth_m: 0.1
-  floor_angle_deg: 20.0
-  height_m: 0.115
-  tilt_deg: 45.0
-  approach_m: 0.05
+  lateral_m: 0.0

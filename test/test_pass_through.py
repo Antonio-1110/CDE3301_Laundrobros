@@ -358,3 +358,77 @@ def test_a_colliding_straight_move_refuses_the_whole_move():
         arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
         timings={}, before=[GRAB],
     ) is None
+
+
+# ---------------------------------------------------------------
+# Claw-speed cap (config.TRANSFER_MAX_TIP_SPEED_M_S)
+# ---------------------------------------------------------------
+
+def test_the_corners_enclose_the_claw_at_any_j7_angle():
+    import os
+
+    from scipy.spatial.transform import Rotation
+
+    corners = pass_through.gripper_corners()
+
+    assert corners.shape == (33, 3)
+    assert np.allclose(corners[0], 0.0)
+    # The claw reaches past the contact point along link7's z.
+    assert corners[:, 2].max() >= config.GRIPPER_OFFSET_Z - 0.02
+
+    mesh = os.path.join(config.repo_root(), 'meshes', config.GRIPPER_MESH)
+    vertices = np.array([
+        [float(v) for v in line.split()[1:4]]
+        for line in open(mesh) if line.startswith('v ')
+    ])
+    vertices = Rotation.from_euler('xyz', config.GRIPPER_MESH_RPY).apply(
+        vertices
+    )
+    ring = corners[1:17, :2]
+    # Every vertex, turned by any J7 angle, lies inside the prism.
+    for angle in np.radians([0.0, 37.0, 90.0, 180.0]):
+        turned = Rotation.from_euler('z', angle).apply(vertices)
+        for a, b in zip(ring, np.roll(ring, -1, axis=0)):
+            edge, rel = b - a, turned[:, :2] - a
+            assert np.all(edge[0] * rel[:, 1] - edge[1] * rel[:, 0] >= -1e-9)
+        assert turned[:, 2].min() >= corners[:, 2].min() - 1e-9
+        assert turned[:, 2].max() <= corners[:, 2].max() + 1e-9
+
+
+def test_sampling_follows_the_controllers_cubic_end_to_end():
+    t, q, qd = _timed([INTER, VIA, DROP])
+
+    grid, states = pass_through.sampled(t, q, qd, step=0.01)
+
+    assert grid[0] == 0.0 and grid[-1] == pytest.approx(t[-1])
+    assert np.allclose(states[0], INTER) and np.allclose(states[-1], DROP)
+
+
+def test_stop_scales_round_trip_for_the_current_limits_only(tmp_path):
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(path, ROUTES, 0.785)
+    transfers.save_timings(path, {}, stop_scales={'drop': (0.8, 1.1)})
+
+    assert transfers.load_stop_scales(path) == {'drop': pytest.approx(0.8)}
+
+    document = transfers._read(path)
+    document['routes']['drop']['stop']['limits']['tip_speed_m_s'] = 2.0
+    transfers._write(path, document)
+
+    assert transfers.load_stop_scales(path) == {}
+
+
+def test_a_route_stopping_at_its_vias_is_slowed_by_its_scale():
+    plain = list(transfers._route_plans(
+        INTER, [('drop', False)], ROUTES, {}, 0.785, None,
+    ))[-1]
+    slowed = list(transfers._route_plans(
+        INTER, [('drop', False)], ROUTES, {}, 0.785, {'drop': 0.5},
+    ))[-1]
+
+    plain_t = plain[1][0][0][-1]
+    slowed_t = slowed[1][0][0][-1]
+
+    assert slowed_t == pytest.approx(plain_t / 0.5)
+    # Same path, only slower.
+    assert np.allclose(plain[2], slowed[2])

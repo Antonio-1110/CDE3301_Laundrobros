@@ -207,7 +207,9 @@ def _sequence(arm):
     ]
 
 
-def test_execute_grasp_with_drop_retracts_through_inter():
+def test_execute_grasp_with_drop_retracts_through_inter(monkeypatch):
+    # Unturned carry (grasp/carry.py; turned in test_carry.py).
+    monkeypatch.setattr(config, 'CARRY_J7_TURN_DEG', 0.0)
     arm = _StubArm()
     grasp = _Grasp(tcp_position=np.array([0.1, -0.3, 0.4]))
 
@@ -218,7 +220,9 @@ def test_execute_grasp_with_drop_retracts_through_inter():
     ]
 
 
-def test_execute_grasp_without_drop_matches_old_retrieve():
+def test_execute_grasp_without_drop_matches_old_retrieve(monkeypatch):
+    # Unturned carry (grasp/carry.py; turned in test_carry.py).
+    monkeypatch.setattr(config, 'CARRY_J7_TURN_DEG', 0.0)
     arm = _StubArm()
     grasp = _Grasp(tcp_position=np.array([0.1, -0.3, 0.4]))
 
@@ -359,8 +363,15 @@ def test_cli_detect_params_reach_detector_names():
     assert params['k_sigma'] == 5.0
     assert set(params) == {
         'k_sigma', 'abs_floor_m', 'cluster_radius_m', 'min_cluster_size',
-        'min_extent_m', 'min_volume_m3',
+        'min_extent_m', 'min_volume_m3', 'min_peak_sigma', 'large_volume_m3',
     }
+
+    # Every one of them is a keyword detect_on_points accepts.
+    import inspect
+
+    from laundry_control.perception.detect import detect_on_points
+
+    assert set(params) <= set(inspect.signature(detect_on_points).parameters)
 
 
 def test_cli_gripper_rejects_out_of_range_angle():

@@ -19,12 +19,71 @@ from .common import (
 )
 
 
+# `laundry clear` sweeps the drum at this fill level unless told
+# otherwise (--fill, or LAUNDRY_FILL): it runs on what is left in the
+# drum, usually little (user, 2026-10-27).
+CLEAR_DEFAULT_FILL = 0.25
+
+
+def _fill_value(text):
+    """Parse --fill: a fraction (config.FILL_LEVELS), or 'none'."""
+    return 'none' if text.strip().lower() == 'none' else float(text)
+
+
+def _choose_fill(args):
+    """
+    Use the plan set --fill asks for (config.set_fill).
+
+    --fill wins, then LAUNDRY_FILL (already applied when config was
+    imported), then the command's own default (fill_default); 'none'
+    is the plans in scan_plans/ itself.
+    """
+    import os
+
+    from .. import config
+
+    fill = args.fill
+
+    if fill is None:
+        if os.environ.get('LAUNDRY_FILL'):
+            return
+
+        fill = getattr(args, 'fill_default', None)
+
+    config.set_fill(None if fill in (None, 'none') else fill)
+
+
+def add_fill_argument(parser, default=None):
+    """Add --fill: which fill level's baked sweep plans to use."""
+    from .. import config
+
+    levels = ', '.join(f'{level:g}' for level in config.FILL_LEVELS)
+    default_text = (
+        f'{default:g}' if default is not None
+        else 'none, the plans in scan_plans/ itself'
+    )
+
+    parser.add_argument(
+        '--fill', type=_fill_value, default=None,
+        help=(
+            'How full the drum is, as a fraction of its height: use that '
+            f"fill level's baked grabs ({levels}; ./rebake_fills.sh "
+            "bakes them), or 'none' for the plans in scan_plans/ itself. "
+            f'Default: LAUNDRY_FILL if set, else {default_text}.'
+        ),
+    )
+    parser.set_defaults(fill_default=default)
+
+
 def cmd_run(args):
     """Run `laundry run`: scan -> detect -> grasp -> drop."""
+    _choose_fill(args)
+
     from ..pipeline import run_full, timestamped_scan_path
-    from ..scan.pattern import scan_kwargs_from_args
+    from ..scan.pattern import coarse_steps_from_args, scan_kwargs_from_args
 
     csv_path = args.save or timestamped_scan_path('run')
+    coarse_steps = coarse_steps_from_args(args)
 
     if not baselines_ready(args):
         return 2
@@ -42,6 +101,8 @@ def cmd_run(args):
             scan_kwargs=scan_kwargs_from_args(args),
             detect_params=detect_params(args),
             dry_run=args.dry_run,
+            coarse_steps=coarse_steps,
+            bottom_check=args.bottom_check,
         )
 
     return 0 if ok else 1
@@ -49,8 +110,12 @@ def cmd_run(args):
 
 def cmd_clear(args):
     """Run `laundry clear`: grab sweep, then scan -> grasp until empty."""
+    _choose_fill(args)
+
     from ..pipeline import run_clear
-    from ..scan.pattern import scan_kwargs_from_args
+    from ..scan.pattern import coarse_steps_from_args, scan_kwargs_from_args
+
+    coarse_steps = coarse_steps_from_args(args)
 
     if not baselines_ready(args):
         return 2
@@ -68,6 +133,8 @@ def cmd_clear(args):
             max_rounds=args.max_rounds,
             max_failed=args.max_failed,
             time_scale=args.speed,
+            coarse_steps=coarse_steps,
+            bottom_check=args.bottom_check,
         )
 
     return 0 if ok else 1
@@ -75,6 +142,8 @@ def cmd_clear(args):
 
 def cmd_preplanned(args):
     """Run `laundry preplanned`."""
+    _choose_fill(args)
+
     from ..pipeline import run_preplanned
 
     with RosSession(args=args) as arm:
@@ -90,14 +159,15 @@ def cmd_preplanned(args):
 
 def add_run_parser(subparsers):
     """Add `laundry run`."""
-    from ..scan.pattern import add_scan_arguments
+    from ..scan.pattern import add_scan_arguments, add_search_arguments
 
     run = subparsers.add_parser(
         'run',
         help=(
-            'Full pipeline: scan -> detect -> grasp -> drop. Quick scan by '
-            'default, and if it finds nothing the end scan alone; --full '
-            'for a full scan.'
+            'Full pipeline: scan -> detect -> grasp -> drop. Quick scans '
+            'by default, coarse first (12 cm, then 3 cm), checked while '
+            'the arm is still in the bucket; if they find nothing the end '
+            'scan alone. --full for one full scan.'
         ),
     )
     run.add_argument(
@@ -111,14 +181,16 @@ def add_run_parser(subparsers):
     # The quick scan: it leaves the laundry where it lies (the full
     # scan's tilting end scan swings the arm low - scan.pattern).
     add_scan_arguments(run, end_scan_default='none')
+    add_search_arguments(run)
     add_detector_arguments(run)
+    add_fill_argument(run)
     add_fake_arguments(run, with_scan_from=True)
     run.set_defaults(func=cmd_run)
 
 
 def add_clear_parser(subparsers):
     """Add `laundry clear`."""
-    from ..scan.pattern import add_scan_arguments
+    from ..scan.pattern import add_scan_arguments, add_search_arguments
     from ..pipeline import DEFAULT_CLEAR_MAX_FAILED, DEFAULT_CLEAR_MAX_ROUNDS
 
     clear = subparsers.add_parser(
@@ -126,8 +198,9 @@ def add_clear_parser(subparsers):
         help=(
             'Empty the bucket: the grab-grid sweep, then scan -> detect -> '
             'grasp -> drop until a scan finds nothing. Quick scans by '
-            'default, then the end scan alone once they find nothing; '
-            '--full for full scans throughout.'
+            'default, coarse first (12 cm, then 3 cm), then the end scan '
+            'alone once they find nothing; --full for full scans '
+            'throughout.'
         ),
     )
     clear.add_argument(
@@ -159,7 +232,9 @@ def add_clear_parser(subparsers):
     # Quick scans, then the end scan alone once they find nothing
     # (pipeline.run_clear).
     add_scan_arguments(clear, end_scan_default='none')
+    add_search_arguments(clear)
     add_detector_arguments(clear)
+    add_fill_argument(clear, default=CLEAR_DEFAULT_FILL)
     add_fake_arguments(clear, with_scan_from=True)
     clear.set_defaults(func=cmd_clear)
 
@@ -181,5 +256,6 @@ def add_preplanned_parser(subparsers):
         '--speed', type=float, default=1.0,
         help='Fraction of the baked speed, (0, 1] (default: 1).',
     )
+    add_fill_argument(preplanned)
     add_fake_arguments(preplanned)
     preplanned.set_defaults(func=cmd_preplanned)

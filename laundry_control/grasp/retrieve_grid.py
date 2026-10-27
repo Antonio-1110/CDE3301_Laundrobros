@@ -55,7 +55,7 @@ from geometry_msgs.msg import Pose
 import numpy as np
 import yaml
 
-from . import grab_targets
+from . import carry, grab_targets
 from .. import config
 from ..arm.geometry import look_at_quaternion
 from ..bucket import axis_basis, seed_cone, to_cylindrical
@@ -108,6 +108,45 @@ def grab_geometry(depth_m, floor_angle_deg, height_m, tilt_deg, cone=None):
     tool_z = np.cos(tilt) * outward - np.sin(tilt) * axis
 
     return contact, tool_z, axis
+
+
+def down_grab_geometry(depth_m, lateral_m, height_m, tilt_deg, cone=None):
+    """
+    Return (contact point, tool +Z, claw +X) for a DOWN grab, in link_base.
+
+    The contact point is lateral_m sideways of the drum's middle
+    (positive toward +x, as grab_geometry's floor angles) and height_m
+    above the floor's lowest line, depth_m from the closed end. Tool +Z
+    points straight down, tilted by tilt_deg toward the closed end
+    (grab_targets: down and radial grabs).
+    """
+    cone = cone or seed_cone()
+    axis = cone.axis_dir
+    up, side = axis_basis(axis)
+
+    if side[0] < 0.0:
+        side = -side
+
+    contact = (
+        cone.axis_point
+        + depth_m * axis
+        + (height_m - cone.radius_at(depth_m)) * up
+        + lateral_m * side
+    )
+
+    tilt = np.radians(tilt_deg)
+    tool_z = -np.cos(tilt) * up - np.sin(tilt) * axis
+
+    return contact, tool_z, axis
+
+
+def angle_about_axis(depth_m, lateral_m, height_m, cone=None):
+    """Return where a down grab's contact point lies around the axis (deg)."""
+    cone = cone or seed_cone()
+
+    return float(np.degrees(
+        np.arctan2(lateral_m, cone.radius_at(depth_m) - height_m)
+    ))
 
 
 def _flange_pose(contact, tool_z, claw_x, back_off_m=0.0):
@@ -500,15 +539,25 @@ def plan_floor_grab(arm, point, grabs, grid=None):
     return None
 
 
-def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print):
+def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print,
+                   prepare=None):
     """
     Execute a plan_floor_grab() plan; True if the item was taken (and dropped).
 
     via (INTER, or a baked grab_NN when INTER's line collides) ->
-    approach -> down -> close -> up -> back to via -> DROP -> open ->
-    INTER. Always lifts back out.
+    approach -> down, one move, the claw closing as it arrives -> up
+    -> back to via -> DROP, one move, carried with the claw turned on
+    the way and opening as it arrives (grasp/carry.py) -> INTER. The
+    move up and out is checked while the claw closes. Always lifts
+    back out.
+
+    prepare: transfers.prepare_go_to, or a stand-in for tests.
     """
+    if prepare is None:
+        from ..arm.transfers import prepare_go_to as prepare
+
     via = plan['via']
+    via_pose = config.get_named_pose(via)
 
     log(
         f'Floor grab via {via}: {plan["depth_m"] * 100:.0f} cm deep, '
@@ -521,40 +570,48 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print):
         log('Gripper did not confirm it opened; aborting before the approach.')
         return False
 
-    if not (
-        go_to(arm, via)
-        and arm.move_joints_linear(plan['approach'])
-        and arm.move_joints_linear(plan['grab'])
-    ):
+    down = prepare(arm, via, after=[plan['approach'], plan['grab']])
+    close_on_arrival, closing = carry.on_arrival(gripper.start_close)
+
+    if down is None or not down(before_end=close_on_arrival):
         log('Could not reach the grab; returning to INTER.')
         arm.move_joints_linear(plan['approach'])
         go_to(arm, 'inter')
         return False
 
-    closed = gripper.close_blocking()
+    # Checked while the claw closes. Back out the way it came, so the
+    # route on starts at a baked pose.
+    out = [plan['approach'], via_pose]
+    lift = (
+        prepare(arm, 'drop', before=out, turn_rad=carry.turn_rad())
+        if drop else prepare(arm, 'inter', before=out)
+    )
 
-    # Back out the way it came, so the route to DROP starts at a
-    # baked pose.
-    if not (
-        arm.move_joints_linear(plan['approach'])
-        and arm.move_joints_linear(config.get_named_pose(via))
-    ):
-        log('Could not lift back out; stopping here.')
-        return False
+    closed = carry.wait(closing, gripper.start_close)
 
-    if not closed:
-        log('Gripper did not confirm it closed; returning to INTER.')
+    if not closed or lift is None:
+        if not (
+            arm.move_joints_linear(plan['approach'])
+            and arm.move_joints_linear(via_pose)
+        ):
+            log('Could not lift back out; stopping here.')
+            return False
+
+        log('Gripper did not confirm it closed; returning to INTER.'
+            if not closed else 'No collision-free way out and to DROP.')
         go_to(arm, 'inter')
         return False
 
     if not drop:
-        return go_to(arm, 'inter')
+        return lift()
 
-    if not go_to(arm, 'drop'):
+    open_on_arrival, opening = carry.on_arrival(gripper.start_open)
+
+    if not lift(before_end=open_on_arrival):
         log('Failed to reach DROP.')
         return False
 
-    released = gripper.open_blocking()
+    released = carry.wait(opening, gripper.start_open)
 
     if not released:
         log('Gripper did not confirm it opened at DROP; the item may still '
@@ -587,8 +644,9 @@ def save(grabs, path=None, baked_on='', targets=None):
         'gripper_offset_z': float(config.GRIPPER_OFFSET_Z),
         'grabs': [
             {key: grab[key] for key in (
-                'name', 'depth_m', 'floor_angle_deg', 'height_m', 'tilt_deg',
-                'approach_m', 'contact', 'approach', 'grab',
+                'name', 'depth_m', 'floor_angle_deg', 'lateral_m',
+                'height_m', 'tilt_deg', 'approach_m', 'contact', 'approach',
+                'grab',
             ) if key in grab}
             for grab in grabs
         ],
@@ -629,10 +687,17 @@ def grid_mismatch(path=None, targets=None, generated=None):
     targets = grab_targets.load() if targets is None else targets
 
     def same(a, b):
-        return np.allclose(np.asarray(a, float), np.asarray(b, float))
+        # NaN: no lateral_m (a radial grab) matches no lateral_m.
+        return np.allclose(
+            np.asarray(a, float), np.asarray(b, float), equal_nan=True
+        )
 
     def values(items):
-        return [[t[f] for f in grab_targets.FIELDS] for t in items]
+        return [
+            [t[f] for f in grab_targets.FIELDS]
+            + [t.get('lateral_m', float('nan'))]
+            for t in items
+        ]
 
     baked = [grab_targets.clean(t) for t in document.get('targets', [])]
     changed = []
@@ -687,10 +752,16 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
 
     go_to / prepare: transfers.go_to and transfers.prepare_go_to (or
     stand-ins, for tests). "Route in and down" and "up and to DROP"
-    are one trajectory each (prepare_go_to's after / before), and
-    each is collision-checked while the gripper is still opening or
-    closing, so the arm does not stand still for its checks
-    (2026-10-21: ~1.5 s before every move, twice per grab).
+    are one trajectory each (prepare_go_to's after / before), and the
+    arm never stands still for their checks (2026-10-21: ~1.5 s before
+    every move, twice per grab): each is checked while the claw is
+    still moving - a grab's way up and to DROP, and the next grab's
+    way in from DROP, while the claw closes on this one.
+
+    The claw is told to close or open as the arm arrives (grasp/
+    carry.py, on_arrival), and the laundry is carried with the claw
+    turned on the way (carry.turn_rad: J7 turns as the lift starts
+    and is back at DROP, without stopping).
 
     Returns True if every motion succeeded. Stops at the first failure
     after getting the arm back to INTER where it can.
@@ -699,20 +770,23 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
 
     opening = gripper.start_open()
 
+    # Checked while the gripper opens; used only once it confirms it
+    # did, so DROP is left by the empty-gripper route.
+    descend = prepare(
+        arm, grabs[0]['name'], after=[grabs[0]['grab']],
+        time_scale=time_scale, gripper_empty=True,
+    ) if grabs else None
+
     for index, grab in enumerate(grabs):
         name = grab['name']
 
-        log(
-            f'{name}: {grab["depth_m"] * 100:.0f} cm deep, '
-            f'{grab["floor_angle_deg"]:+.0f} deg, '
-            f'{grab["height_m"] * 100:.0f} cm above the floor'
+        where = (
+            f'{grab["lateral_m"] * 100:+.0f} cm sideways'
+            if 'lateral_m' in grab else f'{grab["floor_angle_deg"]:+.0f} deg'
         )
-
-        # Checked while the gripper opens; used only once it confirms
-        # it did, so DROP is left by the empty-gripper route.
-        descend = prepare(
-            arm, name, after=[grab['grab']], time_scale=time_scale,
-            gripper_empty=True,
+        log(
+            f'{name}: {grab["depth_m"] * 100:.0f} cm deep, {where}, '
+            f'{grab["height_m"] * 100:.0f} cm above the floor'
         )
 
         if not opening.wait():
@@ -731,7 +805,9 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
             go_to(arm, 'inter', time_scale=time_scale)
             return False
 
-        if not descend():
+        close_on_arrival, closing = carry.on_arrival(gripper.start_close)
+
+        if not descend(before_end=close_on_arrival):
             log(f'The move to {name} and down failed; lifting out and '
                 'aborting.')
 
@@ -740,14 +816,21 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
 
             return False
 
-        closing = gripper.start_close()
-
-        # Checked while the gripper closes.
+        # Checked while the claw closes: this grab's way up and to DROP
+        # (carried turned), and the next grab's way in from DROP.
         lift = prepare(
-            arm, 'drop', before=[grab['approach']], time_scale=time_scale
+            arm, 'drop', before=[grab['approach']], time_scale=time_scale,
+            turn_rad=carry.turn_rad(),
         )
 
-        closed = closing.wait()
+        following = grabs[index + 1] if index + 1 < len(grabs) else None
+        descend = prepare(
+            arm, following['name'], after=[following['grab']],
+            time_scale=time_scale, gripper_empty=True,
+            start=config.get_named_pose('drop'),
+        ) if following else None
+
+        closed = carry.wait(closing, gripper.start_close)
 
         if not closed or lift is None:
             # Always lift back out, even with nothing held.
@@ -766,11 +849,13 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
 
             return False
 
-        if not lift():
+        open_on_arrival, released = carry.on_arrival(gripper.start_open)
+
+        if not lift(before_end=open_on_arrival):
             log('Failed to lift out and reach DROP; aborting.')
             return False
 
-        opening = gripper.start_open()
+        opening = released[0] if released else gripper.start_open()
 
     if not opening.wait():
         log('Gripper did not confirm it opened at DROP; returning to INTER '

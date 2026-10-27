@@ -43,8 +43,14 @@ class _Arm:
         self.calls = []
 
     def move_joints_linear(self, target, time_scale=1.0):
-        self.calls.append(('linear', tuple(target)))
+        self.calls.append(('linear', tuple(np.round(target, 4))))
         return True
+
+
+@pytest.fixture
+def unturned(monkeypatch):
+    """Carry as grabbed, as before grasp/carry.py."""
+    monkeypatch.setattr(config, 'CARRY_J7_TURN_DEG', 0.0)
 
 
 class _Pending:
@@ -76,6 +82,9 @@ class _Gripper:
         self.arm.calls.append(('close',))
         return _Pending(self.arm, 'clos', not self.fail_close)
 
+    def open_blocking(self):
+        return self.start_open().wait()
+
 
 def _grab(name, value):
     return {
@@ -92,20 +101,30 @@ def _go_to(arm, name, gripper_empty=False, **_kwargs):
 def _prepare(refuse=()):
     """Return a prepare_go_to stand-in that records the check, then the move."""
     def prepare(arm, name, before=(), after=(), gripper_empty=False,
-                **_kwargs):
-        straight = tuple(tuple(q) for q in list(before) + list(after))
-        arm.calls.append(('check', name, straight, gripper_empty))
+                turn_rad=0.0, start=None, **_kwargs):
+        straight = tuple(
+            tuple(np.round(q, 4)) for q in list(before) + list(after)
+        )
+        tags = (('turned',) if turn_rad else ()) + (
+            ('from', tuple(np.round(start, 4))) if start is not None else ()
+        )
+        arm.calls.append(('check', name, straight, gripper_empty) + tags)
 
         if name in refuse:
             return None
 
-        def move():
+        def move(before_end=None):
             arm.calls.append(('move', name))
+            if before_end is not None:
+                before_end[1]()
             return True
 
         return move
 
     return prepare
+
+
+DROP_POSE = tuple(np.round(config.get_named_pose('drop'), 4))
 
 
 def test_each_grab_goes_down_closes_lifts_and_drops():
@@ -119,17 +138,32 @@ def test_each_grab_goes_down_closes_lifts_and_drops():
     assert arm.calls == [
         ('open',),
         ('check', 'grab_01', ((1.0,) * 7,), True), ('opened',),
-        ('move', 'grab_01'),
-        ('close',), ('check', 'drop', ((0.0,) * 7,), False), ('closed',),
-        ('move', 'drop'),
-        ('open',),
-        ('check', 'grab_02', ((6.0,) * 7,), True), ('opened',),
-        ('move', 'grab_02'),
-        ('close',), ('check', 'drop', ((5.0,) * 7,), False), ('closed',),
-        ('move', 'drop'),
-        ('open',), ('opened',),
+        # The claw closes as the arm arrives.
+        ('move', 'grab_01'), ('close',),
+        # Checked while it closes: this carry (turned), and the next
+        # grab's way in from DROP.
+        ('check', 'drop', ((0.0,) * 7,), False, 'turned'),
+        ('check', 'grab_02', ((6.0,) * 7,), True, 'from', DROP_POSE),
+        ('closed',),
+        # The claw opens as the arm arrives at DROP.
+        ('move', 'drop'), ('open',),
+        ('opened',),
+        ('move', 'grab_02'), ('close',),
+        ('check', 'drop', ((5.0,) * 7,), False, 'turned'),
+        ('closed',),
+        ('move', 'drop'), ('open',),
+        ('opened',),
         ('go_to', 'inter', True),
     ]
+
+
+def test_unturned_the_carry_is_checked_unturned(unturned):
+    arm = _Arm()
+
+    assert retrieve_grid.run(
+        arm, _Gripper(arm), [_grab('grab_01', 0.0)], _go_to, _prepare(),
+    )
+    assert ('check', 'drop', ((0.0,) * 7,), False) in arm.calls
 
 
 def test_an_unconfirmed_open_at_drop_never_leaves_as_empty():
@@ -179,6 +213,48 @@ def test_a_refused_route_to_drop_still_lifts_out_then_stops():
     assert arm.calls[-2:] == [('closed',), ('linear', (0.0,) * 7)]
 
 
+def _floor_plan():
+    return {
+        'via': 'inter', 'depth_m': 0.3, 'floor_angle_deg': 0.0,
+        'height_m': 0.05, 'tilt_deg': 0.0,
+        'approach': [1.0] * 7, 'grab': [2.0] * 7,
+    }
+
+
+def test_a_detected_grab_is_two_moves_with_the_claw_on_arrival():
+    arm = _Arm()
+    inter = tuple(np.round(config.get_named_pose('inter'), 4))
+
+    assert retrieve_grid.run_floor_grab(
+        arm, _Gripper(arm), _floor_plan(), _go_to, prepare=_prepare(),
+    )
+
+    assert arm.calls == [
+        ('open',), ('opened',),
+        ('check', 'inter', ((1.0,) * 7, (2.0,) * 7), False),
+        ('move', 'inter'), ('close',),
+        ('check', 'drop', ((1.0,) * 7, inter), False, 'turned'),
+        ('closed',),
+        ('move', 'drop'), ('open',), ('opened',),
+        ('go_to', 'inter', True),
+    ]
+
+
+def test_a_detected_grab_not_closed_lifts_out_unturned():
+    arm = _Arm()
+
+    assert not retrieve_grid.run_floor_grab(
+        arm, _Gripper(arm, fail_close=True), _floor_plan(), _go_to,
+        prepare=_prepare(),
+    )
+
+    assert arm.calls[-3:] == [
+        ('linear', (1.0,) * 7),
+        ('linear', tuple(np.round(config.get_named_pose('inter'), 4))),
+        ('go_to', 'inter', False),
+    ]
+
+
 def test_saved_grabs_become_named_poses(tmp_path, monkeypatch):
     path = tmp_path / 'scan_plans' / 'retrieve.yaml'
     monkeypatch.setattr(config, 'retrieve_plan_path', lambda: str(path))
@@ -194,6 +270,11 @@ def test_saved_grabs_become_named_poses(tmp_path, monkeypatch):
 
 
 def test_a_changed_grid_is_reported(tmp_path, monkeypatch):
+    # Not the repo's own grab list (which may be stale for PILE now).
+    from laundry_control.grasp import grab_targets
+
+    monkeypatch.setattr(grab_targets, 'load', lambda *a, **k: [])
+    monkeypatch.setattr(grab_targets, 'generated_for', lambda *a, **k: None)
     path = str(tmp_path / 'retrieve.yaml')
     grab = dict(_grab('grab_01', 0.5), tilt_deg=0.0, contact=[0.1, -0.4, 0.3])
     retrieve_grid.save([grab], path=path)

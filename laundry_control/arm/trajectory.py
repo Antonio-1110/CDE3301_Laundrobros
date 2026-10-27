@@ -5,7 +5,8 @@ Edits to planned joint trajectories (trajectory_msgs), outside the node.
 
 The scan's helical strokes are a MoveIt tool-Z stroke with a J7 twist
 added on top (add_joint7_twist); XArm7Controller.move_tool_z_with_twist
-plans the stroke, applies this, and executes it.
+plans the stroke, applies this, and executes it; move_tool_z_strokes
+plans several and runs them as one (join_trajectories).
 """
 
 import math
@@ -220,3 +221,33 @@ def add_joint7_twist(trajectory, twist_deg, logger):
         point.time_from_start = seconds_to_duration(times[index] * slowdown)
 
     return True
+
+
+def join_trajectories(trajectories):
+    """
+    Return one trajectory that runs these one after another.
+
+    Each must start where the one before ends, at rest (MoveIt's
+    profiles, twisted or not, start and end at rest), so the joined
+    motion is the same path and timing without the stop and restart
+    between them: each later one's first point, a duplicate of the
+    previous end, is dropped and its times are shifted to follow on.
+    The first one is edited in place and returned.
+    """
+    joined = trajectories[0]
+    points = joined.joint_trajectory.points
+    names = list(joined.joint_trajectory.joint_names)
+
+    for trajectory in trajectories[1:]:
+        if list(trajectory.joint_trajectory.joint_names) != names:
+            raise ValueError('Cannot join trajectories over other joints.')
+
+        offset = duration_to_seconds(points[-1].time_from_start)
+
+        for point in trajectory.joint_trajectory.points[1:]:
+            point.time_from_start = seconds_to_duration(
+                offset + duration_to_seconds(point.time_from_start)
+            )
+            points.append(point)
+
+    return joined

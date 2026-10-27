@@ -1,0 +1,64 @@
+# The sweep's grabs, in visiting order (grasp/grab_targets.py).
+# Generated from config.PILE by `laundry plan bake retrieve` (grasp/pile_layers.py); it regenerates when
+# PILE changes. Dragging a grab in `laundry plan edit-grabs` and saving drops the mark and keeps your list.
+version: 1
+generated:
+  pile:
+    top_height_m: 0.106
+    sink_m: 0.06
+    layer_step_m: 0.06
+    min_height_m: 0.03
+    depths_m:
+    - 0.32
+    - 0.25
+    - 0.17
+    - 0.1
+    lateral_m:
+    - 0.0
+    - -0.12
+    - 0.12
+    tilts_deg:
+    - 0.0
+    - 15.0
+    - 30.0
+    - 45.0
+    - 60.0
+    approach_m: 0.05
+  layers: 1
+grabs:
+- depth_m: 0.32
+  floor_angle_deg: 0.0
+  height_m: 0.046
+  tilt_deg: 0.0
+  approach_m: 0.05
+  lateral_m: 0.0
+- depth_m: 0.32
+  floor_angle_deg: -19.0
+  height_m: 0.046
+  tilt_deg: 15.0
+  approach_m: 0.05
+  lateral_m: -0.06
+- depth_m: 0.32
+  floor_angle_deg: 19.0
+  height_m: 0.046
+  tilt_deg: 15.0
+  approach_m: 0.05
+  lateral_m: 0.06
+- depth_m: 0.25
+  floor_angle_deg: 0.0
+  height_m: 0.046
+  tilt_deg: 15.0
+  approach_m: 0.05
+  lateral_m: 0.0
+- depth_m: 0.17
+  floor_angle_deg: 0.0
+  height_m: 0.046
+  tilt_deg: 15.0
+  approach_m: 0.05
+  lateral_m: 0.0
+- depth_m: 0.1
+  floor_angle_deg: 0.0
+  height_m: 0.046
+  tilt_deg: 30.0
+  approach_m: 0.05
+  lateral_m: 0.0

@@ -129,3 +129,31 @@ def test_the_bucket_wireframe_lies_on_the_bucket():
 
     assert np.all(on_wall | on_closed_end)
     assert s.max() == pytest.approx(cone.s_max)
+
+
+def test_a_down_grab_points_straight_down_at_its_sideways_offset():
+    from laundry_control.bucket import axis_basis
+
+    cone = seed_cone()
+    up, side = axis_basis(cone.axis_dir)
+    side = side if side[0] >= 0 else -side
+    target = grab_targets.clean({
+        'depth_m': 0.25, 'floor_angle_deg': 0.0, 'lateral_m': 0.12,
+        'height_m': 0.18, 'tilt_deg': 0.0, 'approach_m': 0.05,
+    })
+
+    contact, tool_z, _claw_x = grab_targets.geometry(target, cone)
+
+    relative = contact - cone.axis_point
+    assert relative @ side == pytest.approx(0.12)
+    assert relative @ up + cone.radius_at(0.25) == pytest.approx(0.18)
+    assert tool_z @ -up == pytest.approx(1.0)
+    assert 'sideways' in grab_targets.describe(target)
+
+
+def test_lateral_is_kept_and_clamped_only_when_given():
+    radial = grab_targets.clean(_target())
+    down = grab_targets.clean(_target(lateral_m=0.5))
+
+    assert 'lateral_m' not in radial
+    assert down['lateral_m'] == grab_targets.LIMITS['lateral_m'][1]

@@ -3,8 +3,9 @@
 import contextlib
 
 from laundry_control import config
-from laundry_control.bucket import seed_cone
+from laundry_control.bucket import axis_basis, seed_cone
 from laundry_control.grasp import grab_targets, pile_layers, retrieve_grid
+import numpy as np
 import pytest
 
 
@@ -21,14 +22,17 @@ def reach(monkeypatch):
     """
     tries = []
 
-    def try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
-        placed = grab_targets.from_pose(contact, tool_z, approach_m)
-        vertical = pile_layers.vertical_height(
-            placed['depth_m'], placed['floor_angle_deg'], placed['height_m']
-        )
-        tries.append((round(vertical, 3), placed['tilt_deg']))
+    cone = seed_cone()
+    up, _side = axis_basis(cone.axis_dir)
 
-        if vertical <= 0.07 + 0.0015 * placed['tilt_deg'] + 1e-6:
+    def try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
+        relative = np.asarray(contact) - cone.axis_point
+        depth = relative @ cone.axis_dir
+        vertical = relative @ up + cone.radius_at(depth)
+        tilt = np.degrees(np.arcsin(-np.asarray(tool_z) @ cone.axis_dir))
+        tries.append((round(vertical, 3), round(tilt, 1)))
+
+        if vertical <= 0.07 + 0.0015 * tilt + 1e-6:
             return {'contact': [0.0, 0.0, 0.0]}, None
 
         return None, 'out of reach'
@@ -103,7 +107,7 @@ def test_layers_step_down_from_what_was_reached(reach, monkeypatch):
 
     targets, misses, layers = pile_layers.generate(None, log=_quiet)
 
-    spots = len(config.PILE['depths_m']) * len(config.PILE['angles_deg'])
+    spots = len(config.PILE['depths_m']) * len(config.PILE['lateral_m'])
 
     # Layer 1 reaches ~16 cm, layer 2 a step (6 cm) lower, ~10 cm; layer 3
     # would be ~4 cm, under the minimum.
@@ -123,20 +127,42 @@ def test_layers_step_down_from_what_was_reached(reach, monkeypatch):
 def test_the_sweep_runs_each_layer_over_all_spots_mouth_first(reach):
     targets, _, _ = pile_layers.generate(None, log=_quiet)
 
-    spots = len(config.PILE['depths_m']) * len(config.PILE['angles_deg'])
+    spots = len(config.PILE['depths_m']) * len(config.PILE['lateral_m'])
     first = targets[:spots]
 
     assert [t['depth_m'] for t in first[::3]] == sorted(
         {t['depth_m'] for t in first}, reverse=True
     )
-    assert [t['floor_angle_deg'] for t in first[:3]] == [0.0, -20.0, 20.0]
+    # Spread across the pile, the claw down.
+    assert [t['lateral_m'] for t in first[:3]] == [0.0, -0.12, 0.12]
     # Layer 2 starts over at the mouth, lower.
     assert targets[spots]['depth_m'] == first[0]['depth_m']
-    assert pile_layers.vertical_height(
-        targets[spots]['depth_m'], 0.0, targets[spots]['height_m']
-    ) < pile_layers.vertical_height(
-        first[0]['depth_m'], 0.0, first[0]['height_m']
+    assert pile_layers.target_vertical(targets[spots]) < (
+        pile_layers.target_vertical(first[0])
     )
+
+
+def test_a_side_spot_that_does_not_fit_moves_toward_the_middle(
+    reach, monkeypatch
+):
+    real = retrieve_grid._try_pose
+    side = axis_basis(seed_cone().axis_dir)[1]
+    side = side if side[0] >= 0 else -side
+
+    def try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
+        offset = (np.asarray(contact) - seed_cone().axis_point) @ side
+
+        if abs(offset) > 0.09 + 1e-3:
+            return None, 'the gripper collides'
+
+        return real(arm, contact, tool_z, claw_x, approach_m, seeds, inter)
+
+    monkeypatch.setattr(retrieve_grid, '_try_pose', try_pose)
+
+    targets, misses, _ = pile_layers.generate(None, log=_quiet)
+
+    assert misses == []
+    assert sorted({t['lateral_m'] for t in targets}) == [-0.09, 0.0, 0.09]
 
 
 def test_a_fuller_drum_aims_higher_and_a_lower_one_has_fewer_layers(
@@ -166,10 +192,15 @@ def test_an_unreachable_spot_is_reported_and_dropped_from_later_layers(
 ):
     real = retrieve_grid._try_pose
 
-    def try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
-        depth, angle, _ = retrieve_grid.floor_position(contact, seed_cone())
+    side = axis_basis(seed_cone().axis_dir)[1]
+    side = side if side[0] >= 0 else -side
 
-        if abs(depth - 0.10) < 1e-3 and abs(angle + 20.0) < 0.5:
+    def try_pose(arm, contact, tool_z, claw_x, approach_m, seeds, inter):
+        depth, _angle, _ = retrieve_grid.floor_position(contact, seed_cone())
+        offset = (np.asarray(contact) - seed_cone().axis_point) @ side
+
+        # Nowhere on the -x side at 10 cm deep, however near the middle.
+        if abs(depth - 0.10) < 1e-3 and offset < -1e-3:
             return None, 'the gripper collides'
 
         return real(arm, contact, tool_z, claw_x, approach_m, seeds, inter)
@@ -178,9 +209,9 @@ def test_an_unreachable_spot_is_reported_and_dropped_from_later_layers(
 
     targets, misses, layers = pile_layers.generate(None, log=_quiet)
 
-    spots = len(config.PILE['depths_m']) * len(config.PILE['angles_deg'])
+    spots = len(config.PILE['depths_m']) * len(config.PILE['lateral_m'])
 
-    assert [(m[0], m[1], m[2]) for m in misses] == [(1, 0.10, -20.0)]
+    assert [(m[0], m[1], m[2]) for m in misses] == [(1, 0.10, -0.12)]
     assert 'collides' in misses[0][3]
     assert len(layers[0]) == spots - 1 and len(layers[1]) == spots - 1
     assert len(targets) == 2 * (spots - 1)

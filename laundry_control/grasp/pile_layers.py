@@ -55,6 +55,12 @@ MIN_FLANGE_MARGIN_M = 0.0
 # Layers are capped, so a bad PILE cannot loop.
 MAX_LAYERS = 8
 
+# A side spot that does not fit this far out tries this much nearer the
+# middle, and so on - but no nearer than MIN_SIDE_M: about half the
+# claw's open width (~13 cm), so it never repeats the middle's grab.
+LATERAL_STEP_M = 0.01
+MIN_SIDE_M = 0.06
+
 
 def vertical_height(depth_m, floor_angle_deg, height_m, cone=None):
     """
@@ -117,27 +123,41 @@ def pile_changed(generated, pile=None):
 
 def _spots(pile):
     return [
-        (depth, angle)
+        (depth, lateral)
         for depth in pile['depths_m']
-        for angle in pile['angles_deg']
+        for lateral in pile['lateral_m']
     ]
 
 
-def _candidates(depth_m, angle_deg, aim_m, pile, cone):
+def _inward(lateral_m):
+    """Yield lateral_m, then each step closer to the middle, to MIN_SIDE_M."""
+    if abs(lateral_m) < 1e-9:
+        yield 0.0
+        return
+
+    steps = int(round(abs(lateral_m) / LATERAL_STEP_M))
+    lowest = int(round(MIN_SIDE_M / LATERAL_STEP_M))
+
+    for k in range(steps, min(lowest, steps) - 1, -1):
+        yield float(np.copysign(k * LATERAL_STEP_M, lateral_m))
+
+
+def _candidates(depth_m, lateral_m, aim_m, pile, cone):
     """Yield (vertical height, target) from the aim down, tilts smallest first."""
     low = grab_targets.LIMITS['height_m']
 
     vertical = aim_m
 
     while vertical >= pile['min_height_m'] - 1e-9:
-        height = radial_height(depth_m, angle_deg, vertical, cone)
-
-        if low[0] <= height <= low[1]:
+        if low[0] <= vertical <= low[1]:
             for tilt in pile['tilts_deg']:
                 target = grab_targets.clean({
                     'depth_m': depth_m,
-                    'floor_angle_deg': angle_deg,
-                    'height_m': height,
+                    'floor_angle_deg': retrieve_grid.angle_about_axis(
+                        depth_m, lateral_m, vertical, cone
+                    ),
+                    'lateral_m': lateral_m,
+                    'height_m': vertical,
                     'tilt_deg': tilt,
                     'approach_m': pile['approach_m'],
                 })
@@ -147,14 +167,29 @@ def _candidates(depth_m, angle_deg, aim_m, pile, cone):
         vertical -= HEIGHT_STEP_M
 
 
-def find_grab(arm, depth_m, angle_deg, aim_m, pile=None, seeds=None, cone=None):
-    """
-    Return the highest-reachable grab at one spot as (target, reason).
+def target_vertical(target, cone=None):
+    """Return a target's height above the floor's lowest line (m)."""
+    if 'lateral_m' in target:
+        return float(target['height_m'])
 
-    Searches vertical heights from aim_m down to PILE's min_height_m,
-    each at every tilt, and returns the first that retrieve_grid's
-    checks pass: (target, None); else (None, why the last try failed).
-    Needs the gripper padded (retrieve_grid.gripper_padding).
+    return vertical_height(
+        target['depth_m'], target['floor_angle_deg'], target['height_m'], cone
+    )
+
+
+def find_grab(arm, depth_m, lateral_m, aim_m, pile=None, seeds=None, cone=None):
+    """
+    Return the widest, highest-reachable grab at one spot as (target, reason).
+
+    A down grab (grab_targets) lateral_m sideways of the middle: the
+    first sideways offset, from lateral_m in LATERAL_STEP_M steps toward
+    the middle (no nearer than MIN_SIDE_M), at which any height from aim_m down to PILE's
+    min_height_m passes retrieve_grid's checks, at its highest such
+    height and least tilt: (target, None); else (None, why the last try
+    failed). The drum's ceiling comes down and in toward the closed
+    end, so the deeper spots fit less far out (fake controller,
+    2026-10-27: +/-12 cm at 32 cm deep, +/-9 at 17). Needs the gripper
+    padded (retrieve_grid.gripper_padding).
     """
     pile = pile or config.PILE
     cone = cone or seed_cone()
@@ -163,22 +198,26 @@ def find_grab(arm, depth_m, angle_deg, aim_m, pile=None, seeds=None, cone=None):
 
     reason = 'the aim is below the lowest sweep height'
 
-    for _vertical, target in _candidates(depth_m, angle_deg, aim_m, pile, cone):
-        contact, tool_z, claw_x = grab_targets.geometry(target, cone)
-        flange = contact - config.GRIPPER_OFFSET_Z * tool_z
+    for lateral in _inward(lateral_m):
+        for _vertical, target in _candidates(
+            depth_m, lateral, aim_m, pile, cone
+        ):
+            contact, tool_z, claw_x = grab_targets.geometry(target, cone)
+            flange = contact - config.GRIPPER_OFFSET_Z * tool_z
 
-        if grab_targets.wall_margin(flange, cone) < MIN_FLANGE_MARGIN_M:
-            reason = 'the wrist does not fit under the drum wall'
-            continue
+            if grab_targets.wall_margin(flange, cone) < MIN_FLANGE_MARGIN_M:
+                reason = 'the wrist does not fit under the drum wall'
+                continue
 
-        found, why = retrieve_grid._try_pose(
-            arm, contact, tool_z, claw_x, target['approach_m'], seeds, inter,
-        )
+            found, why = retrieve_grid._try_pose(
+                arm, contact, tool_z, claw_x, target['approach_m'], seeds,
+                inter,
+            )
 
-        if found is not None:
-            return target, None
+            if found is not None:
+                return target, None
 
-        reason = why
+            reason = why
 
     return None, reason
 
@@ -188,7 +227,7 @@ def generate(arm, pile=None, log=print):
     Return (targets, misses, layers) for the pile, in visiting order.
 
     targets: the grab_targets.yaml list; misses: (layer, depth_m,
-    angle_deg, reason) for spots a layer found nothing for; layers:
+    lateral_m, reason) for spots a layer found nothing for; layers:
     per layer, the vertical heights its grabs reached (m).
     """
     pile = pile or config.PILE
@@ -227,14 +266,12 @@ def generate(arm, pile=None, log=print):
                     reached.pop(spot, None)
                     log(
                         f'  layer {layer}: {spot[0] * 100:.0f} cm deep, '
-                        f'{spot[1]:+.0f} deg: NOT REACHABLE - {reason}'
+                        f'{spot[1] * 100:+.0f} cm sideways: NOT REACHABLE - '
+                        f'{reason}'
                     )
                     continue
 
-                vertical = vertical_height(
-                    target['depth_m'], target['floor_angle_deg'],
-                    target['height_m'], cone,
-                )
+                vertical = target_vertical(target, cone)
                 reached[spot] = vertical
                 found.append((vertical, target))
 
