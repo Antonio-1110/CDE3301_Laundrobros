@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 
 """
-The sensorless sweep's grabs, from how full the drum is (config.PILE).
+The sensorless sweep's grabs, in layers from the floor up (config.PILE).
 
 WHY
 ---
-`laundry preplanned` runs when the drum is already full and nothing has
-been taken out, so there is a pile: grabbing at the drum floor would
-drive the claw through all of it. The grabs belong in the pile's upper
-part, and where that is depends on how full the drum is.
+`laundry preplanned` (and the start of `laundry clear`) runs on a drum
+with laundry in it, so there is a pile: grabbing at the drum floor
+would drive the claw through all of it. The grabs go into the pile from
+its top down, and where its top is depends on how full the drum is.
 
 WHAT
 ----
 generate() turns config.PILE into the grab list of scan_plans/
-grab_targets.yaml, in visiting order, by solving on the MoveIt scene:
+grab_targets.yaml by solving on the MoveIt scene, once for every
+layer:
 
-  - Layer 1 aims at the pile's top, top_height_m, sink_m below its
-    surface. The 15 cm gripper and its approach meet the drum's
-    ceiling, so a spot usually cannot reach that high: each spot takes
-    the HIGHEST height some tilt reaches (heights 1 cm apart from
-    the aim down to min_height_m, tilts smallest first).
-  - Layer 2 aims layer_step_m below what the spot's layer 1 actually
-    reached, and so on, until a layer would go below min_height_m.
-    Laundry lower than that is for the scan-then-grasp stage; a pile
-    that low gets no sweep at all.
-  - The sweep visits layer 1 over all spots, mouth first, then layer
-    2, so each pass takes from a pile that the one before has
-    lowered.
+  - Layer N's grabs aim at layer_heights_m[N - 1] above the floor, one
+    per spot (depth x sideways offset, the claw down). A spot takes the
+    HIGHEST height down to layer_window_m under that (never under
+    floor_clearance_m) that some tilt reaches, at the widest sideways
+    offset that fits (no nearer the middle than MIN_SIDE_M); else it
+    is left out of that layer.
+  - The list is in visiting order: the top layer first, mouth first
+    within a layer. Each grab carries its layer number.
+
+At run time `--fill N` picks the layers: select_layers() keeps layer N
+and every layer under it, so the sweep starts in the pile, not above
+it, and follows it down as it empties - one bake for any fill.
 
 A grab's height_m (grab_targets.py) is its distance in from the wall
 along the radius at its floor angle; the pile's level is vertical, so
@@ -51,9 +52,6 @@ HEIGHT_STEP_M = 0.01
 # it, cannot fit: skipped without asking IK (the arm links are padded
 # by 3 cm besides).
 MIN_FLANGE_MARGIN_M = 0.0
-
-# Layers are capped, so a bad PILE cannot loop.
-MAX_LAYERS = 8
 
 # A side spot that does not fit this far out tries this much nearer the
 # middle, and so on - but no nearer than MIN_SIDE_M: about half the
@@ -95,7 +93,11 @@ def fill_fraction(top_height_m=None, cone=None):
     at mid-depth.
     """
     cone = cone or seed_cone()
-    top = config.PILE['top_height_m'] if top_height_m is None else top_height_m
+    # Default: as full as the top layer reaches into, ~5 cm over it.
+    top = (
+        max(config.PILE['layer_heights_m']) + 0.05
+        if top_height_m is None else top_height_m
+    )
 
     return float(top / (2.0 * cone.radius_at(0.5 * cone.s_max)))
 
@@ -142,13 +144,13 @@ def _inward(lateral_m):
         yield float(np.copysign(k * LATERAL_STEP_M, lateral_m))
 
 
-def _candidates(depth_m, lateral_m, aim_m, pile, cone):
+def _candidates(depth_m, lateral_m, aim_m, lowest_m, pile, cone):
     """Yield (vertical height, target) from the aim down, tilts smallest first."""
     low = grab_targets.LIMITS['height_m']
 
     vertical = aim_m
 
-    while vertical >= pile['min_height_m'] - 1e-9:
+    while vertical >= lowest_m - 1e-9:
         if low[0] <= vertical <= low[1]:
             for tilt in pile['tilts_deg']:
                 target = grab_targets.clean({
@@ -177,16 +179,19 @@ def target_vertical(target, cone=None):
     )
 
 
-def find_grab(arm, depth_m, lateral_m, aim_m, pile=None, seeds=None, cone=None):
+def find_grab(
+    arm, depth_m, lateral_m, aim_m, lowest_m, pile=None, seeds=None,
+    cone=None,
+):
     """
     Return the widest, highest-reachable grab at one spot as (target, reason).
 
     A down grab (grab_targets) lateral_m sideways of the middle: the
-    first sideways offset, from lateral_m in LATERAL_STEP_M steps toward
-    the middle (no nearer than MIN_SIDE_M), at which any height from aim_m down to PILE's
-    min_height_m passes retrieve_grid's checks, at its highest such
-    height and least tilt: (target, None); else (None, why the last try
-    failed). The drum's ceiling comes down and in toward the closed
+    first sideways offset, from lateral_m in LATERAL_STEP_M steps
+    toward the middle (no nearer than MIN_SIDE_M), at which any height
+    from aim_m down to lowest_m passes retrieve_grid's checks, at its
+    highest such height and least tilt: (target, None); else (None,
+    why the last try failed). The drum's ceiling comes down and in toward the closed
     end, so the deeper spots fit less far out (fake controller,
     2026-10-27: +/-12 cm at 32 cm deep, +/-9 at 17). Needs the gripper
     padded (retrieve_grid.gripper_padding).
@@ -196,11 +201,11 @@ def find_grab(arm, depth_m, lateral_m, aim_m, pile=None, seeds=None, cone=None):
     seeds = seeds or retrieve_grid._seeds()
     inter = np.array(config.get_named_pose('inter'))
 
-    reason = 'the aim is below the lowest sweep height'
+    reason = "nothing in the layer's heights"
 
     for lateral in _inward(lateral_m):
         for _vertical, target in _candidates(
-            depth_m, lateral, aim_m, pile, cone
+            depth_m, lateral, aim_m, lowest_m, pile, cone
         ):
             contact, tool_z, claw_x = grab_targets.geometry(target, cone)
             flange = contact - config.GRIPPER_OFFSET_Z * tool_z
@@ -224,66 +229,62 @@ def find_grab(arm, depth_m, lateral_m, aim_m, pile=None, seeds=None, cone=None):
 
 def generate(arm, pile=None, log=print):
     """
-    Return (targets, misses, layers) for the pile, in visiting order.
+    Return (targets, misses, layers) for every layer, in visiting order.
 
-    targets: the grab_targets.yaml list; misses: (layer, depth_m,
-    lateral_m, reason) for spots a layer found nothing for; layers:
-    per layer, the vertical heights its grabs reached (m).
+    targets: the grab_targets.yaml list, each with its 'layer' (1 =
+    lowest), top layer first; misses: (layer, depth_m, lateral_m,
+    reason) for spots a layer found nothing for; layers: per layer,
+    top first, the heights its grabs reached (m).
     """
     pile = pile or config.PILE
     cone = seed_cone()
     seeds = retrieve_grid._seeds()
 
-    top = pile['top_height_m']
-    aim = top - pile['sink_m']
-
-    # Where each spot's last layer reached; a spot with none left drops out.
-    reached = {}
+    heights = pile['layer_heights_m']
     targets, misses, layers = [], [], []
 
     with retrieve_grid.gripper_padding(arm):
-        for layer in range(1, MAX_LAYERS + 1):
+        for number in range(len(heights), 0, -1):
+            aim = heights[number - 1]
+            lowest = max(
+                aim - pile['layer_window_m'], pile['floor_clearance_m']
+            )
             found = []
 
-            for spot in _spots(pile):
-                if layer == 1:
-                    spot_aim = aim
-                elif spot in reached:
-                    spot_aim = reached[spot] - pile['layer_step_m']
-                else:
-                    continue
-
-                if spot_aim < pile['min_height_m'] - 1e-9:
-                    reached.pop(spot, None)
-                    continue
-
+            for depth, lateral in _spots(pile):
                 target, reason = find_grab(
-                    arm, spot[0], spot[1], spot_aim, pile, seeds, cone
+                    arm, depth, lateral, aim, lowest, pile, seeds, cone
                 )
 
                 if target is None:
-                    misses.append((layer, spot[0], spot[1], reason))
-                    reached.pop(spot, None)
+                    misses.append((number, depth, lateral, reason))
                     log(
-                        f'  layer {layer}: {spot[0] * 100:.0f} cm deep, '
-                        f'{spot[1] * 100:+.0f} cm sideways: NOT REACHABLE - '
+                        f'  layer {number}: {depth * 100:.0f} cm deep, '
+                        f'{lateral * 100:+.0f} cm sideways: NOT REACHABLE - '
                         f'{reason}'
                     )
                     continue
 
-                vertical = target_vertical(target, cone)
-                reached[spot] = vertical
-                found.append((vertical, target))
+                target = dict(target, layer=number)
+                found.append(target)
 
-                log(
-                    f'  layer {layer}: {grab_targets.describe(target)} '
-                    f'({vertical * 100:.0f} cm above the floor)'
-                )
+                log(f'  layer {number}: {grab_targets.describe(target)}')
 
-            if not found:
-                break
-
-            targets += [target for _vertical, target in found]
-            layers.append([vertical for vertical, _target in found])
+            targets += found
+            layers.append([target_vertical(t, cone) for t in found])
 
     return targets, misses, layers
+
+
+def select_layers(grabs, fill):
+    """
+    Return the grabs `--fill fill` sweeps: layer fill and every one under.
+
+    In the list's own (visiting) order. A list without layers (placed
+    by hand, `laundry plan edit-grabs`) is returned whole; fill None
+    keeps everything.
+    """
+    if fill is None or not any('layer' in grab for grab in grabs):
+        return list(grabs)
+
+    return [grab for grab in grabs if grab.get('layer', 0) <= fill]

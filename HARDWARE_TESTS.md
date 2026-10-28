@@ -349,13 +349,14 @@ laundry run
 - **Turn things off if needed:** `laundry run --coarse none --no-bottom-check` (one 3 cm scan, no early exit); `config.CARRY_J7_TURN_DEG = 0` (no claw turn); a larger `wall_clearance_m` in `config.DETECTED_GRAB_DIG` (less digging).
 - **Paste back:** the log from "SCAN" on, including the `cm into the pile` line, and whether the towel came out.
 
-**22. Fill levels.** Plans for several fill levels (`config.FILL_LEVELS`: 0.5, 0.6, 0.75, 0.9) are baked into `scan_plans/fill_<percent>/` by `./rebake_fills.sh`. Run one:
+**22. Sweep layers.** The sweep is baked once, in four layers (`config.PILE['layer_heights_m']`: 4, 9, 14, 19 cm above the floor); `--fill N` starts at layer N and sweeps every layer under it. Run the top layer's mouth row, then a lower layer:
 
 ```bash
-laundry preplanned --fill 0.75 --limit 3 --speed 0.3
+laundry preplanned --fill 4 --limit 3 --speed 0.3
+laundry preplanned --fill 2 --limit 3 --speed 0.3
 ```
 
-- **Paste back:** the claw-to-floor gap at each of the 3 grabs.
+- **Paste back:** the claw-to-floor gap at each grab, and the side grabs' clearance to the drum wall (±12 cm sideways at the top of the mouth row).
 
 **23. Baselines that stay inside the bucket.** `laundry baseline collect` now hands over between scans at the entry pose (6 cm in) instead of going out to INTER. Try a short set first (into a scratch directory, so the real baselines are untouched):
 

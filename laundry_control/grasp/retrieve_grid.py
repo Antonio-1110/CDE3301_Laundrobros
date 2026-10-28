@@ -644,7 +644,7 @@ def save(grabs, path=None, baked_on='', targets=None):
         'gripper_offset_z': float(config.GRIPPER_OFFSET_Z),
         'grabs': [
             {key: grab[key] for key in (
-                'name', 'depth_m', 'floor_angle_deg', 'lateral_m',
+                'name', 'layer', 'depth_m', 'floor_angle_deg', 'lateral_m',
                 'height_m', 'tilt_deg', 'approach_m', 'contact', 'approach',
                 'grab',
             ) if key in grab}
@@ -695,7 +695,7 @@ def grid_mismatch(path=None, targets=None, generated=None):
     def values(items):
         return [
             [t[f] for f in grab_targets.FIELDS]
-            + [t.get('lateral_m', float('nan'))]
+            + [t.get('lateral_m', float('nan')), t.get('layer', float('nan'))]
             for t in items
         ]
 

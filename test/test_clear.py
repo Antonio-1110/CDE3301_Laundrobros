@@ -21,7 +21,7 @@ def stages(monkeypatch):
         ) or ('S' if segments is None else 'Q'),
     )
 
-    def preplanned(arm, gripper, limit=None, time_scale=1.0):
+    def preplanned(arm, gripper, limit=None, time_scale=1.0, fill=None):
         log.append('sweep')
         return state['sweep_ok']
 

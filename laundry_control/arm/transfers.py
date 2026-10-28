@@ -118,13 +118,8 @@ AT_POSE_TOLERANCE_RAD = np.deg2rad(2.0)
 
 
 def default_plan_path():
-    """
-    Return the plan set's transfers.yaml (config.plan_set_dir).
-
-    <repo>/scan_plans/transfers.yaml, or the chosen fill level's own:
-    its grab routes, direct routes and chains go with its grabs.
-    """
-    return os.path.join(config.plan_set_dir(), 'transfers.yaml')
+    """Return <repo>/scan_plans/transfers.yaml."""
+    return os.path.join(config.repo_root(), 'scan_plans', 'transfers.yaml')
 
 
 def weighted_travel_deg(path, weights=TRAVEL_WEIGHTS):

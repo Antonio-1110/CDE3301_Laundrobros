@@ -37,13 +37,13 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry detect scan.csv [-o targets.json] [--publish]` — quick or full is read from the CSV | nothing — plain files |
 | `laundry grasp targets.json [--drop] [--dry-run]` | rig, or `--fake-hardware` |
 | `laundry run [--dry-run] [--coarse 0.12\|none] [--no-bottom-check]` — scan (12 cm first, then 3 cm) → detect → grasp → drop, one item | rig, or `--fake-hardware --scan-from X.csv` |
-| `laundry clear [--fill 0.25\|0.3\|...\|none] [--no-grabs] [--grab-limit N] [--max-rounds 15]` — empty the bucket: the sweep (the fill level's baked grabs, 0.25 unless `--fill` or `LAUNDRY_FILL` says otherwise), then scan → grasp → drop until a scan finds nothing | rig, or `--fake-hardware --scan-from A.csv B.csv ...` |
+| `laundry clear [--fill N] [--no-grabs] [--grab-limit N] [--max-rounds 15]` — empty the bucket: the sweep from layer N (default 1) down, then scan → grasp → drop until a scan finds nothing | rig, or `--fake-hardware --scan-from A.csv B.csv ...` |
 | `laundry gripper open` / `close` / `ANGLE` | `gripper_node` (open/close); the servo on this Pi's GPIO (ANGLE) |
 | `laundry baseline collect [--count 8] [--archive] [-- <scan options>]` — straight into `baseline_scans/`; `--archive` replaces the set | rig, empty bucket |
 | `laundry baseline promote X.csv\|dir ... [--move] [--archive]`, `archive`, `list`, `restore LABEL` | nothing |
 | `laundry replay scan.csv` | a ROS graph (for RViz) |
 | `laundry evaluate [--sweep] [--synthetic] [--coverage] [--laundry X.csv ...]` | nothing |
-| `laundry preplanned [--limit N] [--speed 0.3]` — sensorless sweep into the pile, layer by layer (refuses if it isn't baked) | rig, or `--fake-hardware` |
+| `laundry preplanned [--fill N] [--limit N] [--speed 0.3]` — sensorless sweep into the pile from layer N (default 4, the top) down (refuses if it isn't baked) | rig, or `--fake-hardware` |
 
 `laundry <command> --help` documents every option.
 
@@ -79,22 +79,31 @@ The detector models the empty bucket from every `*.csv` directly in `baseline_sc
 - **Adopt scans taken earlier:** `laundry baseline promote scan_records/scan_X.csv ... [--move] [--archive]` names them `baseline_<when taken>_NN.csv`.
 - `laundry baseline list` shows the current set and the archive. `laundry baseline restore <label>` brings an archived set back and archives the current one. Nothing is ever deleted.
 
-## Sensorless first pass: grabs for a full drum
+## Sensorless first pass: grabs in layers
 
-The sweep (`laundry preplanned`, and the start of `laundry clear`) runs on a drum that is already full, with nothing taken out and no scan. So it does not grab at the floor: it aims into the pile, and **where depends on how full the drum is**. `config.PILE` (`config/grabs.py`) sets that:
+The sweep (`laundry preplanned`, and the start of `laundry clear`) runs on a drum with laundry in it, with no scan. So it does not grab at the floor: it grabs into the pile **in layers, from the top down**, since taking laundry lowers the pile. `config.PILE` (`config/grabs.py`) sets the layers:
 
 | Setting | Default | |
 |---|---|---|
-| `top_height_m` | 0.25 | where the pile's top is, above the floor (2/3 of the drum). **Change this for a different fill.** `LAUNDRY_PILE_TOP_M=0.20` overrides it for one run |
-| `sink_m` | 0.06 | how far below the pile's surface the first layer grabs |
-| `layer_step_m` | 0.06 | how much lower each further layer goes than the one before actually reached |
-| `min_height_m` | 0.10 | the lowest sweep grab: laundry below it is for the scan-then-grasp stage, so a pile this low gets no sweep |
-| `depths_m`, `angles_deg` | 4 × 3 | the spots (40, 30, 20, 10 cm from the closed end, mouth first; centre, then ±20°) |
+| `layer_heights_m` | 4, 9, 14, 19 cm | the layers, 1 (lowest) to 4, above the floor's lowest line: 5 cm apart, about half the claw's length |
+| `layer_window_m` | 2 cm | how far under its layer's height a grab may sit where the claw does not fit higher |
+| `floor_clearance_m` | 3 cm | the lowest any grab may be |
+| `depths_m` | 32, 21, 10 cm | the rows, from the closed end, mouth first: 11 cm apart (the claw is ~6 cm wide along the drum) |
+| `lateral_m` | 0, ±12 cm | each row's spots sideways of the middle, claw pointing down: the claw opens ~13 cm. A spot that does not fit steps 1 cm toward the middle, no nearer than 6 cm |
 | `tilts_deg` | 0 to 60° | tried smallest first |
 
-`laundry plan bake retrieve` generates the grab list from it (`grasp/pile_layers.py`, saved to `scan_plans/grab_targets.yaml`) and solves each grab exactly as generated. For each spot it takes the **highest height that some tilt reaches**: the 15 cm gripper and its approach meet the drum's ceiling, so a grab near the pile top costs tilt (on the fake controller, at 25 cm fill: 45° near the mouth, 60° deeper). Layer 1 aims at the pile's top, `sink_m` below it. Each further layer aims `layer_step_m` below what that spot's last layer actually reached, until it would go below `min_height_m`. The sweep runs layer 1 over every spot, mouth first, then layer 2, because taking laundry lowers the pile. At the defaults: **24 grabs in 2 layers, about 19 and 13 cm above the floor**, about 6 min 30 s on the rig.
+`laundry plan bake retrieve` generates every layer's grabs (`grasp/pile_layers.py`, saved to `scan_plans/grab_targets.yaml`, each with its layer number) and solves each exactly as generated. A spot takes the **highest height in its layer's window that some tilt reaches** at the widest sideways offset that fits: the 15 cm gripper and its approach meet the drum's ceiling high up, and near the floor the drum curves up under the side grabs. A spot that fits nowhere in a layer is left out of that layer.
 
-**Another fill level means another plan.** Change `PILE['top_height_m']` (or set `LAUNDRY_PILE_TOP_M`) and re-bake with `./rebake.sh retrieve` (about 2.5 minutes); a generated list regenerates by itself when `PILE` changes. `laundry preplanned` warns when the plan was baked for another `PILE`. Bake and run with the same value, since the override is read each time.
+**How full the drum is: `--fill N`.** The sweep starts at layer N and sweeps every layer under it, top down, so the first grab lands in the pile, not above it. There's no re-bake to change it:
+
+| `--fill` | Starts at | Grabs (2026-10-28 bake) |
+|---|---|---|
+| 4 (`preplanned`'s default) | 19 cm | 29 |
+| 3 | 14 cm | 20 |
+| 2 | 9 cm | 11 |
+| 1 (`clear`'s default) | 4 cm | 2 |
+
+Layer 1 has only 2 grabs (the middle of the 32 and 10 cm rows): at 4 cm the side grabs' jaws meet the drum's curved floor, and the 21 cm row's middle has no collision-free approach. Use `--fill 2` for a fuller first sweep.
 
 **Placing grabs by hand** still works: drag them in `laundry plan edit-grabs` and SAVE. A hand-placed list is kept on re-bake (it stops following `PILE`) until you pass `--regenerate`. The editor draws the pile level from `PILE`.
 
@@ -106,7 +115,7 @@ The sweep runs: route in → descend → close → lift → DROP → open, for e
 
 **Detected items are grabbed the same way.** When the grid is baked, a detected item anywhere in the lower half of the drum (within `config.DETECTED_GRAB_MAX_ANGLE_DEG` = 90° of the floor's lowest line, so the lower walls too) gets a grab placed over it. The grab digs as deep into the pile as is collision-free: for each tilt it tries heights from the deepest allowed upward and keeps the lowest whose grab, approach and descent all pass the collision checks, never closer than 2 cm to the bucket wall and never more than 15 cm below the sensed top (`config.DETECTED_GRAB_DIG`). The approach starts 3 cm above the pile where it fits, so the digging is the straight descent. On the fake controller (2026-10-22, 36 spots): 9.5 cm into the pile on average, against 4.3 cm with the old rule (half the pile, at most 5 cm), for about 0.8 s more planning. The arm takes the baked route to the nearest `grab_NN`, makes a short straight collision-checked move from there, then descends, closes and lifts. Items beyond that angle use the older Cartesian reach from INTER. On the fake controller, that reach couldn't get to a towel in the middle of the floor at any depth; the floor grab could.
 
-**`laundry clear`** chains it all. It fits the bucket model once and runs the sweep (`--no-grabs` skips it), from the grabs baked for `--fill` (default 0.25; `LAUNDRY_FILL` overrides the default, `--fill none` uses `scan_plans/` itself). Then it repeats open → scan → detect → grasp the best reachable item → DROP until a scan finds nothing. It stops early if nothing detected is reachable (a rescan would see the same pile), after 2 failed grasps in a row, or after `--max-rounds`.
+**`laundry clear`** chains it all. It fits the bucket model once and runs the sweep from layer `--fill` (default 1) down (`--no-grabs` skips it). Then it repeats open → scan → detect → grasp the best reachable item → DROP until a scan finds nothing. It stops early if nothing detected is reachable (a rescan would see the same pile), after 2 failed grasps in a row, or after `--max-rounds`.
 
 ## After moving the bucket (or table)
 

@@ -455,15 +455,17 @@ def run_full(
     )
 
 
-def run_preplanned(arm, gripper, limit=None, time_scale=1.0):
+def run_preplanned(arm, gripper, limit=None, time_scale=1.0, fill=None):
     """
     Sensorless "clear the bucket" sweep over the generated grab grid.
 
     No sensor data and no detection: visits each baked grab
     (grasp/retrieve_grid.py, scan_plans/retrieve.yaml), closing the
     gripper there as if grabbing something, and opens it at DROP;
-    limit keeps only the first N grabs. Refuses, without moving, if
-    the grid has not been baked.
+    fill: start at that layer and sweep every one under it (grasp/
+    pile_layers.select_layers); None, every layer. limit keeps only the
+    first N grabs of those. Refuses, without moving, if the grid has
+    not been baked.
 
     Returns True if every motion succeeded.
     """
@@ -489,9 +491,18 @@ def run_preplanned(arm, gripper, limit=None, time_scale=1.0):
     if changed:
         print(f'WARNING: {changed}')
 
+    from .grasp import pile_layers
+
+    grabs = pile_layers.select_layers(grabs, fill)
+
+    if fill is not None and not any('layer' in grab for grab in grabs):
+        print('WARNING: the grab list has no layers (placed by hand); '
+              '--fill is ignored and every grab is swept.')
+
     grabs = grabs[:limit] if limit else grabs
 
-    print(f'Sensorless sweep over {len(grabs)} generated grab(s).')
+    layers = f' (layers {fill} down to 1)' if fill is not None else ''
+    print(f'Sensorless sweep over {len(grabs)} generated grab(s){layers}.')
 
     if not go_to(arm, 'inter', time_scale=time_scale):
         print('Failed to reach INTER; aborting.')
@@ -519,6 +530,7 @@ def run_clear(
     detect_params,
     sweep=True,
     sweep_limit=None,
+    sweep_fill=None,
     max_rounds=DEFAULT_CLEAR_MAX_ROUNDS,
     max_failed=DEFAULT_CLEAR_MAX_FAILED,
     scan_path=None,
@@ -529,8 +541,9 @@ def run_clear(
     """
     Empty the bucket: the sensorless grab sweep, then scan until clear.
 
-        1. the grab-grid sweep (run_preplanned; sweep=False skips it) -
-           laundry is expected at the start, so no scan is needed yet;
+        1. the grab-grid sweep (run_preplanned, from layer sweep_fill
+           down; sweep=False skips it) - laundry is expected at the
+           start, so no scan is needed yet;
         2. open -> scan -> detect -> grasp the best reachable item ->
            DROP, repeated until a scan finds nothing.
 
@@ -563,7 +576,8 @@ def run_clear(
         print('========== GRAB SWEEP ==========')
 
         if not run_preplanned(
-            arm, gripper, limit=sweep_limit, time_scale=time_scale
+            arm, gripper, limit=sweep_limit, time_scale=time_scale,
+            fill=sweep_fill,
         ):
             print('The grab sweep failed; stopping before any scan.')
             return False

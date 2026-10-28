@@ -116,7 +116,7 @@ data_files=[
 ],
 ```
 
-- **Environment variables the code reads:** `LAUNDRY_DATA_DIR` (where scans and plans live; default: the source checkout, `config.repo_root()`), `LAUNDRY_PILE_TOP_M` (pile height for generating the sweep, `config/grabs.py`). Simulation scripts use `ROS_DOMAIN_ID` 73/77 with `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` so they can never reach the real arm (`rebake.sh`, `benchmarks/sim_timing.sh`).
+- **Environment variables the code reads:** `LAUNDRY_DATA_DIR` (where scans and plans live; default: the source checkout, `config.repo_root()`). Simulation scripts use `ROS_DOMAIN_ID` 73/77 with `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` so they can never reach the real arm (`rebake.sh`, `benchmarks/sim_timing.sh`).
 
 ---
 
@@ -284,7 +284,7 @@ for index in range(1, max_rounds + 1):
 
 **Overlapping checks and claw commands** (`grasp/retrieve_grid.run`, `grasp/carry.py`): each move is collision-checked while the claw is still opening or closing, and the claw is commanded as the arm arrives (`move(before_end=...)`), so the arm doesn't stand still for either.
 
-**Fill levels** (`config.FILL_LEVELS` 0.5 / 0.6 / 0.75 / 0.9): the sweep is baked per level into `scan_plans/fill_<percent>/` (`./rebake_fills.sh`), and chosen at run time with `laundry preplanned --fill 0.75` or `LAUNDRY_FILL`.
+**Layers** (`config.PILE['layer_heights_m']` 4 / 9 / 14 / 19 cm above the floor): the sweep is baked once, every layer at rows 32 / 21 / 10 cm from the closed end and 0 / ±12 cm sideways (the claw down; side spots step toward the middle where they do not fit). `laundry preplanned --fill N` (default 4) or `laundry clear --fill N` (default 1) starts at layer N and sweeps every layer under it, top down. The 2026-10-28 bake: 29 grabs, 9 / 9 / 9 / 2 from the top layer down.
 
 If the report needs a state diagram, these are descriptive names (they do not exist in the code): `OPEN_GRIPPER -> SCAN_QUICK -> DETECT -> (EMPTY? END_SCAN -> DETECT_FULL) -> GO_INTER -> PLAN_GRASP -> APPROACH -> CLOSE -> RETRACT_INTER -> GO_DROP -> RELEASE -> GO_INTER`.
 
@@ -652,8 +652,8 @@ Fit: **M(v, a) ≈ 15.8 + 140.5 / v + 202.6 · v / a** s (v in rad/s, a in rad/s
 
 - **Grasp success is not sensed.** Nothing detects whether the claw closed on laundry; simulation counts a grasp as done when the motions finish.
 - **Mouth false positives (issue #20, resolved).** On the rig (2026-10-21), shallow anomalies at the bucket mouth (16–104 points, 6–7 mm intrusion) were ranked ahead of real laundry. Cause: the baselines predated the new ToF mount. Against the re-collected baselines, only the laundry cluster remains. Example scan in `validation_scans/mouth_false_positive_20261021/`.
-- **Most of the last week's work is untested on the rig:** the claw cap at 7.0 rad/s², the fast HOME route, one-trajectory scans, coarse-first `run`/`clear`, stay-inside baselines, deeper detected grabs, the claw turn, the fill levels and the new gripper mesh. The staged tests are in `HARDWARE_TESTS.md` section G.
+- **Most of the last week's work is untested on the rig:** the claw cap at 7.0 rad/s², the fast HOME route, one-trajectory scans, coarse-first `run`/`clear`, stay-inside baselines, deeper detected grabs and the new gripper mesh. The claw turn, the layered sweep and coarse-first `run`/`clear` have run on the rig (2026-10-27/28). The staged tests are in `HARDWARE_TESTS.md` section G.
 - **The detector gate was tuned on the 6 false clusters it now rejects,** with thin margins (5.0 vs 5.5 σ, 61 vs 70 cm³). New empty scans with the current mount are needed to test it independently.
 - **The detection figures are an upper bound:** synthetic items, a simple ToF model, and baselines from the old mount.
 - **The claw contact offset** (`GRIPPER_OFFSET_Z` = 0.15 m) is user-measured and marked unverified in the code.
-- **Fill levels** (issue #18) and **shorter scans** (issue #10) are built but not yet run on the rig; the scan times in §6.2 predate the one-trajectory and coarse-first changes and need re-measuring.
+- **The layered sweep** (issue #18) and **shorter scans** (issue #10) have run on the rig (2026-10-27/28); the scan times in §6.2 predate the one-trajectory and coarse-first changes and need re-measuring.
