@@ -11,6 +11,8 @@ both kinds of scan are modelled from the one set of full baselines in
 stroke readings only (`scan/segments.py`). Nothing in the code reads
 this folder.
 
+**No longer valid as empty-bucket tests (2026-10-26).** They were taken with the old ToF mount. Against the 2026-10-22 baselines (new mount), all 8 report the same strong cluster (8-12σ, 56-190 cm³) at about (−0.04, −0.49, 0.37) on one side wall, a mount/geometry difference rather than noise. New empty scans with the current mount are needed for this role (issue #22).
+
 They're kept as test data. The model was never built from them, so
 detection on any of them should find **nothing**. That makes them an
 independent check for false alarms on quick scans, like

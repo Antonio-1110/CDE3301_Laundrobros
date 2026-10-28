@@ -94,7 +94,9 @@ from .detect import (
     compute_intrusion,
     DEFAULT_ABS_FLOOR_M,
     DEFAULT_K_SIGMA,
+    DEFAULT_LARGE_VOLUME_M3,
     DEFAULT_MIN_EXTENT_M,
+    DEFAULT_MIN_PEAK_SIGMA,
     DEFAULT_MIN_VOLUME_M3,
     detect_on_points,
     load_baseline_scans,
@@ -421,6 +423,7 @@ def report_point_separation(surface, repeat_csv, laundry_csv=None):
 LEGACY_DETECTOR = {
     'grow_k_sigma': None,
     'low_confidence_min_peak_sigma': 0.0,
+    'min_peak_sigma': 0.0,
 }
 
 
@@ -705,6 +708,27 @@ def add_evaluate_arguments(parser):
         ),
     )
 
+    parser.add_argument(
+        '--min-peak-sigma',
+        type=float,
+        default=DEFAULT_MIN_PEAK_SIGMA,
+        help=(
+            'Strong-or-large gate: a cluster must peak at this many sigmas '
+            'or reach --large-volume; 0 disables '
+            f'(default: {DEFAULT_MIN_PEAK_SIGMA}).'
+        ),
+    )
+
+    parser.add_argument(
+        '--large-volume',
+        type=float,
+        default=DEFAULT_LARGE_VOLUME_M3,
+        help=(
+            'Volume in cubic metres that lets a weak cluster through '
+            f'(default: {DEFAULT_LARGE_VOLUME_M3:g}).'
+        ),
+    )
+
 
 def run_evaluate(args):
     """Run `laundry evaluate`; returns a process exit code."""
@@ -751,6 +775,8 @@ def run_evaluate(args):
         'abs_floor_m': args.abs_floor,
         'min_volume_m3': args.min_volume,
         'min_extent_m': args.min_extent,
+        'min_peak_sigma': args.min_peak_sigma,
+        'large_volume_m3': args.large_volume,
     }
 
     if args.legacy:

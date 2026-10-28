@@ -21,7 +21,7 @@ import math
 import time
 
 from action_msgs.srv import CancelGoal
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Quaternion
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint, RobotTrajectory
 from moveit_msgs.srv import GetCartesianPath
@@ -42,7 +42,9 @@ from .moveit_errors import (
     failure_is_retryable,
     usable_attempts,
 )
-from .trajectory import add_joint7_twist, seconds_to_duration
+from .trajectory import (
+    add_joint7_twist, join_trajectories, seconds_to_duration,
+)
 from .. import config
 from ..config import (
     OMPL_PIPELINE_ID,
@@ -930,6 +932,7 @@ class XArm7Controller(MoveItQueries, Node):
         max_step=0.005,
         velocity=0.1,
         acceleration=0.1,
+        start_joints=None,
     ):
         """
         Plan (without executing) a straight Cartesian path to target_pose.
@@ -949,6 +952,10 @@ class XArm7Controller(MoveItQueries, Node):
             response at all), even when trajectory is None, so
             callers doing reachability probing can inspect partial
             feasibility instead of only getting a binary None.
+
+        start_joints: plan from these joint angles (JOINT_NAMES order)
+        instead of the current state, e.g. where a previous planned
+        trajectory ends.
         """
         request = GetCartesianPath.Request()
 
@@ -965,7 +972,14 @@ class XArm7Controller(MoveItQueries, Node):
 
         request.avoid_collisions = True
 
-        if self.plan_from_observed_state:
+        if start_joints is not None:
+
+            request.start_state.joint_state = JointState(
+                name=list(self.JOINT_NAMES),
+                position=[float(q) for q in start_joints],
+            )
+
+        elif self.plan_from_observed_state:
 
             joints = self.get_current_joints()
 
@@ -1481,4 +1495,94 @@ class XArm7Controller(MoveItQueries, Node):
 
         return self._execute_trajectory(
             trajectory
+        )
+
+    def move_tool_z_strokes(
+        self,
+        strokes,
+        max_step=0.005,
+        velocity=0.1,
+        acceleration=0.1,
+    ):
+        """
+        Run several move_tool_z_with_twist strokes as ONE trajectory.
+
+        strokes: (distance, twist_deg) pairs, in order. Each stroke is
+        planned from where the previous planned one ends (its tool Z,
+        its twisted J7), then all are joined and executed once. The
+        path and each stroke's timing are the same as one call per
+        stroke, but the arm does not stand at every J7 turnaround
+        while MoveIt waits for it to settle and checks the next
+        start (~0.5 s per stroke on the rig). Plans every stroke
+        before moving: if one fails, nothing moves.
+        """
+        joints = self.get_current_joints()
+
+        if joints is None:
+
+            self.get_logger().error(
+                'Could not read joint state to plan the strokes.'
+            )
+
+            return False
+
+        planned = []
+
+        for distance, twist_deg in strokes:
+
+            if abs(distance) <= 1e-12:
+
+                self.get_logger().error(
+                    'For J7-only movement use rotate_joint7().'
+                )
+
+                return False
+
+            fk = self.compute_fk(joints)
+
+            if fk is None:
+
+                self.get_logger().error(
+                    'Could not compute FK to plan the next stroke.'
+                )
+
+                return False
+
+            position, (qx, qy, qz, qw) = fk
+            rotation = Quaternion(
+                x=float(qx), y=float(qy), z=float(qz), w=float(qw)
+            )
+            zx, zy, zz = tool_z_from_quaternion(rotation)
+
+            target_pose = self._build_pose(
+                x=float(position[0] + distance * zx),
+                y=float(position[1] + distance * zy),
+                z=float(position[2] + distance * zz),
+                orientation=rotation,
+            )
+
+            trajectory, _fraction = self._plan_to_pose(
+                target_pose,
+                max_step=max_step,
+                velocity=velocity,
+                acceleration=acceleration,
+                start_joints=joints,
+            )
+
+            if trajectory is None:
+                return False
+
+            if not add_joint7_twist(
+                trajectory, twist_deg, self.get_logger()
+            ):
+                return False
+
+            names = list(trajectory.joint_trajectory.joint_names)
+            end = trajectory.joint_trajectory.points[-1].positions
+            joints = [end[names.index(name)] for name in self.JOINT_NAMES]
+
+            planned.append(trajectory)
+
+        return self._execute_trajectory(
+            join_trajectories(planned)
         )

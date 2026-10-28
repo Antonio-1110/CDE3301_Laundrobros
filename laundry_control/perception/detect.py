@@ -162,6 +162,29 @@ DEFAULT_GROW_FLOOR_M = 0.004
 # gated: their sigma is measured, not a pooled fallback.
 DEFAULT_LOW_CONFIDENCE_MIN_PEAK_SIGMA = 7.0
 
+# Strong OR large: every reported cluster must either peak at
+# DEFAULT_MIN_PEAK_SIGMA local sigmas, or have an integrated volume of
+# DEFAULT_LARGE_VOLUME_M3. Real laundry is one or the other: a sock or
+# anything bulkier stands well proud of the wall, and a cloth lying
+# flat - only ~8 mm thick, as shallow as the noise - covers a wide
+# area. Noise is neither. Measured 2026-10-26 (issue #22), leave-one-
+# out over the 2026-10-22 baselines and the synthetic campaign:
+#
+#   - the 6 false clusters on empty scans peaked at 4.0-5.0 sigma,
+#     11.8-61 cm^3; detected socks peak at >= 5.1 sigma (95% >= 6.7),
+#     flat cloths at 4.2-5.6 sigma but a median 131 cm^3;
+#   - this gate: false clusters 6 -> 0, stray clusters in injected
+#     scans 526 -> 31; recall flat cloth 80.0 -> 78.5%, sock 91.9 ->
+#     89.4%, shirt/towel/bundle unchanged.
+#
+# A depth- or sigma-only gate also clears the false clusters but drops
+# most flat cloths (peak >= 5.5 sigma alone: 46.7%; max intrusion >=
+# 13 mm alone: 12.6%). The margins are thin (5.0 vs 5.5 sigma, 61 vs
+# 70 cm^3, from 6 false clusters): re-check with `laundry evaluate`
+# after re-collecting baselines. min_peak_sigma=0 disables it.
+DEFAULT_MIN_PEAK_SIGMA = 5.5
+DEFAULT_LARGE_VOLUME_M3 = 70.0e-6
+
 # Grasp point = mean of the cluster's top-quartile-intrusion points.
 # On synthetic items its median distance to the item's apex was 1.5cm
 # against 2.6cm for the plain centroid (which is dragged toward the
@@ -717,6 +740,24 @@ def summarize_clusters(
     return summaries
 
 
+def strong_or_large(
+    summary,
+    min_peak_sigma: float = DEFAULT_MIN_PEAK_SIGMA,
+    large_volume_m3: float = DEFAULT_LARGE_VOLUME_M3,
+) -> bool:
+    """
+    Return True if a cluster peaks at min_peak_sigma OR is large_volume_m3.
+
+    See DEFAULT_MIN_PEAK_SIGMA: real laundry stands proud of the wall
+    or covers a wide area; noise does neither. A cluster whose peak is
+    unknown (NaN) is not rejected for it.
+    """
+    return (
+        not summary.peak_sigma < min_peak_sigma
+        or summary.volume_m3 >= large_volume_m3
+    )
+
+
 def detect_on_points(
     candidate_xyz: np.ndarray,
     surface: BaselineSurface,
@@ -731,6 +772,8 @@ def detect_on_points(
     low_confidence_min_peak_sigma: float = (
         DEFAULT_LOW_CONFIDENCE_MIN_PEAK_SIGMA
     ),
+    min_peak_sigma: float = DEFAULT_MIN_PEAK_SIGMA,
+    large_volume_m3: float = DEFAULT_LARGE_VOLUME_M3,
 ):
     """
     Run the detector over an already-loaded point array.
@@ -745,7 +788,9 @@ def detect_on_points(
     grow_k_sigma/grow_floor_m and kept only if they contain a seed
     (hysteresis); grow_k_sigma=None reproduces the pre-hysteresis
     detector exactly. Low-confidence clusters must also peak at
-    low_confidence_min_peak_sigma (0 disables the gate).
+    low_confidence_min_peak_sigma (0 disables the gate). Every cluster
+    must peak at min_peak_sigma OR have large_volume_m3 of volume
+    (strong or large; 0 disables it, see DEFAULT_MIN_PEAK_SIGMA).
 
     This is the one implementation of the detector; detect_laundry()
     wraps it for CSV input. Evaluation calls it directly because it
@@ -805,6 +850,7 @@ def detect_on_points(
             summary.confident
             or not summary.peak_sigma < low_confidence_min_peak_sigma
         )
+        and strong_or_large(summary, min_peak_sigma, large_volume_m3)
     ]
 
     kept.sort(key=lambda summary: summary.volume_m3, reverse=True)
@@ -822,6 +868,8 @@ def detect_laundry(
     min_extent_m: float = DEFAULT_MIN_EXTENT_M,
     min_volume_m3: float = DEFAULT_MIN_VOLUME_M3,
     surface: Optional[BaselineSurface] = None,
+    min_peak_sigma: float = DEFAULT_MIN_PEAK_SIGMA,
+    large_volume_m3: float = DEFAULT_LARGE_VOLUME_M3,
 ) -> List[ClusterSummary]:
     """
     Detect laundry in a candidate scan CSV, end to end.
@@ -866,6 +914,8 @@ def detect_laundry(
         min_cluster_size=min_cluster_size,
         min_extent_m=min_extent_m,
         min_volume_m3=min_volume_m3,
+        min_peak_sigma=min_peak_sigma,
+        large_volume_m3=large_volume_m3,
     )
 
     return clusters

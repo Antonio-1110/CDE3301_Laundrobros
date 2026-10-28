@@ -326,3 +326,134 @@ def time_stop_at_each(
         np.concatenate(times),
         np.concatenate(velocities),
     )
+
+
+def hermite_resample(times, positions, velocities, dt):
+    """
+    Return (times, positions, velocities) of a timed path every dt s.
+
+    Cubic Hermite through each point's position and velocity - how the
+    trajectory controller interpolates a path given without
+    accelerations - so the samples are what the arm will be sent.
+    The last point is kept exactly.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    positions = np.asarray(positions, dtype=np.float64)
+    velocities = np.asarray(velocities, dtype=np.float64)
+
+    keep = np.concatenate([[True], np.diff(times) > 1e-9])
+    times, positions, velocities = times[keep], positions[keep], velocities[keep]
+
+    grid = np.arange(0.0, times[-1], dt)
+    grid = np.append(grid, times[-1])
+
+    index = np.clip(np.searchsorted(times, grid, side='right') - 1,
+                    0, len(times) - 2)
+    t0, t1 = times[index], times[index + 1]
+    h = (t1 - t0)[:, None]
+    s = ((grid - t0) / (t1 - t0))[:, None]
+
+    p0, p1 = positions[index], positions[index + 1]
+    v0, v1 = velocities[index], velocities[index + 1]
+
+    s2, s3 = s * s, s * s * s
+    sampled = (
+        (2 * s3 - 3 * s2 + 1) * p0 + (s3 - 2 * s2 + s) * h * v0
+        + (-2 * s3 + 3 * s2) * p1 + (s3 - s2) * h * v1
+    )
+    rates = (
+        (6 * s2 - 6 * s) / h * p0 + (3 * s2 - 4 * s + 1) * v0
+        + (-6 * s2 + 6 * s) / h * p1 + (3 * s2 - 2 * s) * v1
+    )
+
+    return grid, sampled, rates
+
+
+def add_j7_turn(
+    times, positions, velocities, turn_rad, max_velocity_rad_s,
+    max_acceleration_rad_s2, max_jerk_rad_s3, dt=0.02, shrink=0.9,
+    max_added_rate_rad_s=None,
+):
+    """
+    Turn J7 by turn_rad on the way, and back by the end, without stopping.
+
+    Superimposes on a timed path a J7 offset that rises from 0 to
+    turn_rad as the path starts, holds, and falls back to 0 as it
+    ends, so the path starts and ends where it did, at the same times
+    - nothing else is re-timed. Each ramp is a jerk-limited S-curve,
+    as fast as J7's limits allow with the path's own J7 motion added:
+    from the limits themselves, its speed and acceleration shrink
+    until the sum fits. max_added_rate_rad_s caps the turn's own J7
+    speed besides (the claw's tip speed: transfers._turn_overlay).
+
+    Returns (times, positions, velocities, ramp seconds) sampled every
+    dt (hermite_resample), or None if the path is too short to turn
+    and turn back within the limits.
+    """
+    grid, sampled, rates = hermite_resample(times, positions, velocities, dt)
+    duration = float(grid[-1])
+    turn = abs(turn_rad)
+
+    if turn == 0.0:
+        return grid, sampled, rates, 0.0
+
+    sign = np.sign(turn_rad)
+    v_ramp, a_ramp = max_velocity_rad_s, max_acceleration_rad_s2
+
+    if max_added_rate_rad_s is not None:
+        v_ramp = min(v_ramp, max_added_rate_rad_s)
+
+    for _ in range(30):
+        ramp_t, ramp_s, ramp_v = s_curve(turn, v_ramp, a_ramp, max_jerk_rad_s3)
+        ramp = float(ramp_t[-1])
+
+        if 2.0 * ramp > duration:
+            return None
+
+        up = np.interp(grid, ramp_t, ramp_s)
+        d_up = np.interp(grid, ramp_t, ramp_v, right=0.0)
+        tail = grid - (duration - ramp)
+        down = np.interp(tail, ramp_t, ramp_s, left=0.0)
+        d_down = np.interp(tail, ramp_t, ramp_v, left=0.0, right=0.0)
+
+        offset = sign * (up - down)
+        j7_rate = rates[:, 6] + sign * (d_up - d_down)
+        j7_acceleration = np.gradient(j7_rate, grid)
+
+        if (
+            np.abs(j7_rate).max() <= max_velocity_rad_s
+            and np.abs(j7_acceleration).max() <= max_acceleration_rad_s2
+        ):
+            turned = sampled.copy()
+            turned_rates = rates.copy()
+            turned[:, 6] += offset
+            turned_rates[:, 6] = j7_rate
+            return grid, turned, turned_rates, ramp
+
+        v_ramp *= shrink
+        a_ramp *= shrink
+
+    return None
+
+
+def resample_by_step(states, step_rad=DEFAULT_CHECK_STEP_RAD):
+    """
+    Return states evenly along a path, at most step_rad apart.
+
+    Apart by the largest joint's travel, as densify spaces its checks,
+    but as few as that allows: a timed path's samples are uneven
+    (dense where it is slow), and checking them all, or densifying
+    them, checks up to twice as many states as needed. Ends kept.
+    """
+    states = np.asarray(states, dtype=np.float64)
+    arc = np.concatenate(
+        [[0.0], np.cumsum(np.abs(np.diff(states, axis=0)).max(axis=1))]
+    )
+    count = max(1, int(np.ceil(arc[-1] / step_rad - 1e-9)))
+    targets = np.linspace(0.0, arc[-1], count + 1)
+
+    return np.stack(
+        [np.interp(targets, arc, states[:, joint])
+         for joint in range(states.shape[1])],
+        axis=1,
+    )

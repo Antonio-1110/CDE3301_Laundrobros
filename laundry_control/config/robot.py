@@ -3,6 +3,7 @@
 """The xArm7 as MoveIt and xarm_ros2 see it: frames, launch arguments, limits."""
 
 import math
+import os
 
 # =============================================================
 # FRAMES AND MOVEIT
@@ -19,10 +20,16 @@ JOINT_STATE_TOPIC = '/joint_states'
 # laundry_bringup.launch.py hands these to xarm_moveit_config's own
 # launch arguments, so nothing in xarm_ros2 is edited:
 #
-#   - The gripper is the manufacturer's "other geometry": our STL,
+#   - The gripper is the manufacturer's "other geometry": our mesh,
 #     attached to link_eef (= link7, no offset), turned GRIPPER_MESH_RPY
 #     about link7. Its link is called other_geometry_link, and the
 #     stock SRDF already exempts it from colliding with link3/6/7.
+#     The mesh is the arm plate (bolted to the flange, its trays
+#     hanging 34 mm down beside the wrist) with the gripper plate
+#     stacked on its top face, 14 mm up. Both are CoACD convex
+#     decompositions (~11k triangles, was a 403k-triangle STL), so
+#     collision checks and padding are cheap; RViz shows the hulls.
+#     The full-detail CAD is FINAL ARM/GRIPPER PLATE OBJ.obj (mm).
 #   - XARM_LIMITED False gives the xArm7's true hardware joint ranges
 #     (the URDF defaults), including J7 +/-360 deg - the scan and grabs
 #     turn J7 past -180 deg (INTER is -155, grabs reach ~-197). The
@@ -32,7 +39,7 @@ JOINT_STATE_TOPIC = '/joint_states'
 # =============================================================
 
 GRIPPER_LINK = 'other_geometry_link'
-GRIPPER_MESH = 'xArm7_Gripper_2Plate_Assembled_RevH_ROS2_Meters.stl'
+GRIPPER_MESH = 'xArm7_ArmPlate_Gripper_CoACD.obj'
 GRIPPER_MESH_XYZ = (0.0, 0.0, 0.0)
 GRIPPER_MESH_RPY = (0.0, 0.0, 1.57)
 XARM_LIMITED = False
@@ -192,8 +199,31 @@ JOINT7_MAX_ACCELERATION_RAD_S2 = 10.0
 # shortest segment (29 deg) peaked at 2.0 rad/s^2 and 17 rad/s^3. So
 # no transfer accelerates harder than one already did; the long legs
 # just do it as often. MoveIt's xArm7 limit is 10 rad/s^2.
-TRANSFER_MAX_ACCELERATION_RAD_S2 = 2.0
-TRANSFER_MAX_JERK_RAD_S3 = 17.0
+#
+# For benchmarks, LAUNDRY_TRANSFER_ACCEL_RAD_S2 / LAUNDRY_TRANSFER_JERK_RAD_S3
+# (and LAUNDRY_TRANSFER_VELOCITY_DEG_S below) override these for one
+# process tree; the jerk then defaults to the same ~8.4 x the
+# acceleration. Baked timings record their limits, so a plan timed for
+# other values is not used (pass_through.current_limits).
+TRANSFER_MAX_ACCELERATION_RAD_S2 = float(
+    os.environ.get('LAUNDRY_TRANSFER_ACCEL_RAD_S2', 7.0)
+)
+TRANSFER_MAX_JERK_RAD_S3 = float(os.environ.get(
+    'LAUNDRY_TRANSFER_JERK_RAD_S3',
+    59.0 if 'LAUNDRY_TRANSFER_ACCEL_RAD_S2' not in os.environ
+    else round(TRANSFER_MAX_ACCELERATION_RAD_S2 * 59.0 / 7.0, 1),
+))
+
+# Peak speed of any point of the claw during a baked transfer, m/s.
+# The xArm7 stops with C24 "Speed Exceeds Limit" over 1 m/s at the
+# tool: on 2026-10-22 at 7.0 rad/s^2 the INTER -> HOME leg did it with
+# no joint over its limit - J1, J3 and J7 near 60 deg/s together add
+# up at the gripper, ~0.6 m from the base (1050 mm/s; 975 at 5.0, only
+# 2.5% under). `laundry plan bake timing` keeps the claw under this
+# (pass_through.Retimer: the corners of the gripper mesh's box, by
+# forward kinematics), and slows any route that stops at its vias by
+# the factor it records. 10% under the xArm's limit.
+TRANSFER_MAX_TIP_SPEED_M_S = 0.9
 
 # Peak joint speed of baked-transfer replays (and of go_to's straight
 # fallback). transfers.yaml records the speed it was baked at, but the
@@ -212,8 +242,29 @@ TRANSFER_MAX_JERK_RAD_S3 = 17.0
 #        60           3.0           25           11.2
 #        90           3.0           25           10.1
 #
-# MoveIt's own xArm7 limits are 2.14 rad/s (123 deg/s) and 10 rad/s^2.
-TRANSFER_MAX_VELOCITY_RAD_S = math.radians(45.0)
+# 2026-10-21: set to 60 deg/s, accel 5.0 rad/s^2 (50% of MoveIt's 10),
+# jerk 42 rad/s^3 (MoveIt has no jerk limit; this keeps the ~8.4 ratio of
+# the earlier settings). Ran on the arm on 2026-10-22 (the sweep and
+# DROP <-> HOME; C24 came only at 7.0, below); the routes were timed for
+# these limits (`./rebake.sh timing`). Simulated 24-grab sweep on the fake
+# controller (single runs, a few seconds of noise): 45/2.0/17 346 s,
+# 60/2.0/17 339 s (-2%: the routes are short, so the acceleration limit,
+# not the top speed, sets the time), 60/3.0/25 304 s (-12%, but the two
+# DROP routes then had no pass-through timing within the limits), and
+# 60/5.0/42 318 s with every route passing through its vias (DROP legs
+# 3.5 -> 2.5 s). The sweep total did not fall further in that run; why
+# was not investigated (more runs would show whether it is noise).
+# 2026-10-26: accel 7.0 rad/s^2 (70% of MoveIt's 10), jerk 59 rad/s^3,
+# now with TRANSFER_MAX_TIP_SPEED_M_S capping the claw (the first try
+# at 7.0, without it, tripped C24 on INTER -> HOME). Re-timed: INTER <->
+# DROP 2.36 s each way (claw <= 428 mm/s), BOTTOM 2.29 s; only HOME is
+# over the cap (claw 1202 mm/s stopping at its vias) and is slowed to
+# x0.749. Simulated 24-grab sweep 203 s. NOT yet run on the arm; staged
+# test as above, HOME <-> INTER first.
+# Go back one step if the arm overruns, shivers or throws laundry.
+TRANSFER_MAX_VELOCITY_RAD_S = math.radians(
+    float(os.environ.get('LAUNDRY_TRANSFER_VELOCITY_DEG_S', 60.0))
+)
 
 # Pass through the vias of baked transfers instead of stopping at each
 # (arm/pass_through.py): uses the timing `laundry plan bake timing`

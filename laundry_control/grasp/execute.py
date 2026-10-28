@@ -14,6 +14,8 @@ against:
        lands on the target -> close gripper -> retract to INTER
     -> (drop=True) DROP -> open gripper (release) -> INTER
 
+carried with the claw turned on the way to DROP (grasp/carry.py).
+
 Run from the terminal as `laundry grasp targets.json`, or as part of
 `laundry run`.
 
@@ -25,9 +27,10 @@ hardware.fake.FakeGripper.
 from dataclasses import dataclass
 from typing import Any
 
-from . import retrieve_grid
+from . import carry, retrieve_grid
 from .plan import compute_grasp_target
-from ..arm.transfers import go_to
+from .. import config
+from ..arm.transfers import go_to, prepare_go_to
 
 
 def rank_clusters(clusters):
@@ -131,6 +134,28 @@ def execute_grasp(arm, gripper, grasp, drop=False):
         print('Gripper did not confirm it closed; retracting without the '
               'item.')
 
+    if closed and drop and carry.turn_rad():
+        # Out and to DROP as one move, carried with the claw turned on
+        # the way and opening as it arrives (grasp/carry.py).
+        out = prepare_go_to(
+            arm, 'drop', before=[config.get_named_pose('inter')],
+            turn_rad=carry.turn_rad(),
+        )
+
+        if out is not None:
+            print('Retracting to INTER and on to DROP...')
+
+            open_on_arrival, opening = carry.on_arrival(gripper.start_open)
+
+            if not out(before_end=open_on_arrival):
+                print('Failed to reach DROP; aborting.')
+
+                return False
+
+            released = carry.wait(opening, gripper.start_open)
+
+            return _back_from_drop(arm, released)
+
     print('Retracting to INTER...')
 
     if not go_to(arm, 'inter'):
@@ -153,8 +178,11 @@ def execute_grasp(arm, gripper, grasp, drop=False):
 
     print('Opening gripper to release the item...')
 
-    released = gripper.open_blocking()
+    return _back_from_drop(arm, gripper.open_blocking())
 
+
+def _back_from_drop(arm, released):
+    """Back to INTER from DROP, once the claw opened (released)."""
     if not released:
         print('Gripper did not confirm it opened at DROP; the item may '
               'still be held.')
@@ -245,7 +273,8 @@ def describe_plan(plan):
         f'Floor grab via {grab["via"]}: contact={grab["contact"]}, '
         f'{grab["floor_angle_deg"]:+.0f} deg, '
         f'{grab["height_m"] * 100:.1f} cm from the wall, '
-        f'tilt {grab["tilt_deg"]:.0f} deg'
+        f'tilt {grab["tilt_deg"]:.0f} deg, '
+        f'{grab.get("sink_m", 0.0) * 100:.1f} cm into the pile'
     )
 
 

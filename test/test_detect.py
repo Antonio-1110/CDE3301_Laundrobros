@@ -620,3 +620,53 @@ def test_load_baseline_scans_from_list(tmp_path):
 def test_load_baseline_scans_rejects_empty_directory(tmp_path):
     with pytest.raises(ValueError):
         load_baseline_scans(str(tmp_path))
+
+
+# ---------------------------------------------------------------
+# Strong-or-large gate (issue #22)
+# ---------------------------------------------------------------
+
+def _gated(peak_sigma, volume_cm3):
+    from laundry_control.perception.detect import ClusterSummary, strong_or_large
+
+    point = np.zeros((1, 3))
+    summary = ClusterSummary(
+        points=point, centroid=point[0], size=10, bbox_min=point[0],
+        bbox_max=point[0], extent=np.zeros(3), highest_point=point[0],
+        mean_deviation_m=0.01, volume_m3=volume_cm3 * 1e-6,
+        peak_sigma=peak_sigma,
+    )
+    return strong_or_large(summary)
+
+
+def test_the_measured_false_clusters_are_rejected():
+    # The six false clusters on the 2026-10-22 baselines (leave-one-out).
+    for peak, volume in ((4.1, 11.8), (4.0, 12.9), (5.0, 20.3),
+                         (4.4, 61.0), (4.3, 58.6), (4.6, 31.7)):
+        assert not _gated(peak, volume)
+
+
+def test_a_strong_small_item_is_kept():
+    # A sock: small, but well proud of the wall.
+    assert _gated(6.7, 19.4)
+
+
+def test_a_weak_but_wide_flat_cloth_is_kept():
+    # A flat cloth is as shallow as the noise but covers a wide area.
+    assert _gated(5.0, 131.0)
+
+
+def test_a_cluster_with_no_peak_measure_is_not_rejected_for_it():
+    assert _gated(float('nan'), 5.0)
+
+
+def test_the_gate_can_be_switched_off():
+    from laundry_control.perception.detect import ClusterSummary, strong_or_large
+
+    point = np.zeros((1, 3))
+    summary = ClusterSummary(
+        points=point, centroid=point[0], size=4, bbox_min=point[0],
+        bbox_max=point[0], extent=np.zeros(3), highest_point=point[0],
+        mean_deviation_m=0.01, volume_m3=12e-6, peak_sigma=4.0,
+    )
+    assert strong_or_large(summary, min_peak_sigma=0.0)

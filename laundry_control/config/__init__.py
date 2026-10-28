@@ -91,13 +91,45 @@ def get_named_pose(name):
 
 def _read_plan(path):
     """Return a baked plan file's document, or None if it is missing."""
-    if not os.path.isfile(path):
+    document = read_yaml(path)
+
+    return None if document is None else (document or {})
+
+
+# {path: ((mtime_ns, size), document)} - see read_yaml.
+_YAML_CACHE = {}
+
+
+def read_yaml(path):
+    """
+    Return a YAML file's document (a fresh copy), or None if it is missing.
+
+    Parsed once per version of the file: a move looks up named poses
+    and baked routes several times, and parsing retrieve.yaml and
+    transfers.yaml each time cost ~0.5 s per move on the Pi
+    (2026-10-21). A rewritten file (new mtime or size) is read again.
+    """
+    import copy
+
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
         return None
 
-    import yaml
+    version = (stat.st_mtime_ns, stat.st_size)
+    cached = _YAML_CACHE.get(path)
 
-    with open(path) as handle:
-        return yaml.safe_load(handle) or {}
+    if cached is None or cached[0] != version:
+        import yaml
+
+        loader = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
+
+        with open(path) as handle:
+            cached = (version, yaml.load(handle, Loader=loader))
+
+        _YAML_CACHE[path] = cached
+
+    return copy.deepcopy(cached[1])
 
 
 def generated_grab_poses():
@@ -180,10 +212,87 @@ def bucket_poses_path():
 
 
 def retrieve_plan_path():
-    """Return <repo>/scan_plans/retrieve.yaml (see grasp/retrieve_grid.py)."""
-    return os.path.join(repo_root(), 'scan_plans', 'retrieve.yaml')
+    """Return the plan set's retrieve.yaml (see grasp/retrieve_grid.py)."""
+    return os.path.join(plan_set_dir(), 'retrieve.yaml')
 
 
 def grab_targets_path():
-    """Return <repo>/scan_plans/grab_targets.yaml (see grasp/grab_targets.py)."""
-    return os.path.join(repo_root(), 'scan_plans', 'grab_targets.yaml')
+    """Return the plan set's grab_targets.yaml (see grasp/grab_targets.py)."""
+    return os.path.join(plan_set_dir(), 'grab_targets.yaml')
+
+
+# =============================================================
+# FILL LEVELS (config.FILL_LEVELS)
+# =============================================================
+
+# The fill level chosen for this process, or None for scan_plans/.
+_FILL = [None]
+# PILE's own top_height_m and min_height_m, for when no fill level is
+# chosen.
+_PILE_TOP_M = PILE['top_height_m']  # noqa: F405
+_PILE_MIN_M = PILE['min_height_m']  # noqa: F405
+
+
+def fill_level():
+    """Return the fill level chosen (a FILL_LEVELS entry), or None."""
+    return _FILL[0]
+
+
+def set_fill(fill):
+    """
+    Choose the sweep's fill level for this process (None: scan_plans/).
+
+    Points the grab-dependent plans (plan_set_dir) at its set and sets
+    PILE's top_height_m to it, so a bake generates for it and a run
+    reports a set generated for another as stale - and, for a pile too
+    low for PILE's own min_height_m, lowers that (LOW_FILL_*). Raises
+    ValueError for a level not in FILL_LEVELS.
+    """
+    if fill is None:
+        _FILL[0] = None
+        PILE['top_height_m'] = _PILE_TOP_M  # noqa: F405
+        PILE['min_height_m'] = _PILE_MIN_M  # noqa: F405
+        return
+
+    fill = float(fill)
+    match = [
+        level for level in FILL_LEVELS  # noqa: F405
+        if abs(level - fill) < 1e-6
+    ]
+
+    if not match:
+        raise ValueError(
+            f'No fill level {fill:g}; the baked ones are '
+            + ', '.join(f'{level:g}' for level in FILL_LEVELS)  # noqa: F405
+            + ' (config.FILL_LEVELS).'
+        )
+
+    _FILL[0] = match[0]
+    top = round(match[0] * DRUM_HEIGHT_M, 3)  # noqa: F405
+    aim = top - PILE['sink_m']  # noqa: F405
+
+    PILE['top_height_m'] = top  # noqa: F405
+    PILE['min_height_m'] = round(min(  # noqa: F405
+        _PILE_MIN_M,
+        max(aim - LOW_FILL_DEPTH_M, LOW_FILL_MIN_HEIGHT_M),  # noqa: F405
+    ), 3)
+
+
+def plan_set_dir(fill=None):
+    """
+    Return the directory of the grab-dependent plans.
+
+    <repo>/scan_plans/fill_<percent>/ for the chosen fill level (or
+    `fill`), else <repo>/scan_plans/ itself.
+    """
+    fill = fill_level() if fill is None else fill
+    base = os.path.join(repo_root(), 'scan_plans')
+
+    if fill is None:
+        return base
+
+    return os.path.join(base, f'fill_{round(fill * 100):d}')
+
+
+if os.environ.get('LAUNDRY_FILL'):
+    set_fill(os.environ['LAUNDRY_FILL'])

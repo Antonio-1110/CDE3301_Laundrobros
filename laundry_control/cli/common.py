@@ -17,8 +17,10 @@ def add_detector_arguments(parser):
         DEFAULT_ABS_FLOOR_M,
         DEFAULT_CLUSTER_RADIUS_M,
         DEFAULT_K_SIGMA,
+        DEFAULT_LARGE_VOLUME_M3,
         DEFAULT_MIN_CLUSTER_SIZE,
         DEFAULT_MIN_EXTENT_M,
+        DEFAULT_MIN_PEAK_SIGMA,
         DEFAULT_MIN_VOLUME_M3,
     )
 
@@ -94,6 +96,29 @@ def add_detector_arguments(parser):
         ),
     )
 
+    group.add_argument(
+        '--min-peak-sigma',
+        type=float,
+        default=DEFAULT_MIN_PEAK_SIGMA,
+        help=(
+            'A cluster must peak at this many sigmas OR reach '
+            '--large-volume (strong or large; real laundry is one or the '
+            f'other, noise neither). 0 disables (default: '
+            f'{DEFAULT_MIN_PEAK_SIGMA}).'
+        ),
+    )
+
+    group.add_argument(
+        '--large-volume',
+        type=float,
+        default=DEFAULT_LARGE_VOLUME_M3,
+        help=(
+            'Volume (cubic metres) that lets a weak cluster through, for '
+            'flat cloth (default: '
+            f'{DEFAULT_LARGE_VOLUME_M3:g}).'
+        ),
+    )
+
 
 def detect_params(args):
     """Return the detector thresholds from add_detector_arguments as kwargs."""
@@ -104,6 +129,8 @@ def detect_params(args):
         'min_cluster_size': args.min_cluster_size,
         'min_extent_m': args.min_extent,
         'min_volume_m3': args.min_volume,
+        'min_peak_sigma': args.min_peak_sigma,
+        'large_volume_m3': args.large_volume,
     }
 
 

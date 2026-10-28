@@ -42,7 +42,12 @@ SAMPLE_DT = 0.2
 # fraction of each transfer limit TOTG is given.
 PATH_TOLERANCES = (0.05, 0.02)
 ACCELERATION_FRACTIONS = (0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6)
-VELOCITY_FRACTIONS = (1.0, 0.987, 0.975)
+# The controller's cubic overshoots TOTG's speed by 1-3 deg/s, more
+# at higher acceleration: at 7 rad/s^2 (2026-10-22) DROP needed 0.95
+# of the speed limit before any setting stayed within it.
+# The lower ones are for the claw-speed cap (TRANSFER_MAX_TIP_SPEED_M_S):
+# INTER -> HOME at full speed takes the claw over it.
+VELOCITY_FRACTIONS = (1.0, 0.987, 0.975, 0.95, 0.925, 0.9, 0.85, 0.8, 0.75)
 
 # Collision checks need states at most this far apart.
 CHECK_STEP_RAD = np.deg2rad(1.0)
@@ -181,7 +186,87 @@ def current_limits():
             float(config.TRANSFER_MAX_ACCELERATION_RAD_S2), 6
         ),
         'jerk_rad_s3': round(float(config.TRANSFER_MAX_JERK_RAD_S3), 6),
+        'tip_speed_m_s': round(float(config.TRANSFER_MAX_TIP_SPEED_M_S), 6),
     }
+
+
+def gripper_corners(sides=16):
+    """
+    Return points whose speeds bound the claw's, in link7's frame.
+
+    The speed of a point of a rigid body is a convex function of where
+    the point is, so its maximum over any convex set is reached at a
+    vertex. The set used is a prism around link7's z axis: a regular
+    polygon of `sides` drawn just outside the circle of the claw's
+    furthest reach from that axis, between the claw's lowest and
+    highest z. It holds the claw at ANY J7 angle, so the bound stays
+    true when a caller turns J7 by a constant offset (a claw carried
+    turned, go_to's j7_offset), and whichever point of the claw the
+    xArm takes as its tool centre point. The flange origin is added too.
+    """
+    import os
+
+    from scipy.spatial.transform import Rotation
+
+    from .. import config
+
+    vertices = []
+
+    with open(os.path.join(config.repo_root(), 'meshes', config.GRIPPER_MESH)) as handle:
+        for line in handle:
+            if line.startswith('v '):
+                vertices.append([float(v) for v in line.split()[1:4]])
+
+    vertices = Rotation.from_euler('xyz', config.GRIPPER_MESH_RPY).apply(
+        np.asarray(vertices)
+    ) + np.asarray(config.GRIPPER_MESH_XYZ)
+
+    # Circumscribe the circle: the polygon's sides touch it.
+    radius = np.hypot(vertices[:, 0], vertices[:, 1]).max() / np.cos(
+        np.pi / sides
+    )
+    angles = 2.0 * np.pi * np.arange(sides) / sides
+    ring = np.column_stack([radius * np.cos(angles), radius * np.sin(angles)])
+
+    corners = [
+        np.column_stack([ring, np.full(sides, z)])
+        for z in (vertices[:, 2].min(), vertices[:, 2].max())
+    ]
+
+    return np.vstack([np.zeros((1, 3))] + corners)
+
+
+def sampled(times, positions, velocities=None, step=0.01):
+    """
+    Return (times, states) every `step` seconds along a timed path.
+
+    With velocities: the controller's cubic (as curve_peaks); without:
+    straight interpolation between the given states (a densely
+    sampled path such as time_stop_at_each's).
+    """
+    times = np.asarray(times, dtype=np.float64)
+    positions = np.asarray(positions, dtype=np.float64)
+    grid = np.append(np.arange(0.0, times[-1], step), times[-1])
+
+    if velocities is None:
+        return grid, np.column_stack([
+            np.interp(grid, times, positions[:, j])
+            for j in range(positions.shape[1])
+        ])
+
+    states = []
+    pieces = list(_cubics(times, positions, velocities))
+    k = 0
+
+    for t in grid:
+        while k < len(pieces) - 1 and t > pieces[k][0] + pieces[k][1]:
+            k += 1
+
+        t0, _h, p0, v0, c2, c3 = pieces[k]
+        s = t - t0
+        states.append(p0 + v0 * s + c2 * s ** 2 + c3 * s ** 3)
+
+    return grid, np.array(states)
 
 
 class Retimer:
@@ -194,7 +279,10 @@ class Retimer:
     the fake controller's domain, never in a replay.
     """
 
-    def __init__(self, v_max, a_max, j_max, node_name='laundry_retimer'):
+    def __init__(
+        self, v_max, a_max, j_max, tip_speed=None, corners=None,
+        node_name='laundry_retimer',
+    ):
         from launch import LaunchContext
         from moveit.planning import MoveItPy
         from uf_ros_lib.moveit_configs_builder import MoveItConfigsBuilder
@@ -202,6 +290,8 @@ class Retimer:
         from .. import config
 
         self.v_max, self.a_max, self.j_max = v_max, a_max, j_max
+        self.tip_speed = tip_speed
+        self.corners = None if corners is None else np.asarray(corners)
 
         params = MoveItConfigsBuilder(
             context=LaunchContext(), **config.xarm_description_arguments()
@@ -232,6 +322,32 @@ class Retimer:
 
     def close(self):
         self._moveit.shutdown()
+
+    def tip_peak(self, times, positions, velocities=None):
+        """
+        Return the claw's peak speed along a timed path, m/s.
+
+        The fastest of self.corners (gripper_corners), by forward
+        kinematics of link7 every 10 ms along the path the controller
+        will draw.
+        """
+        from moveit.core.robot_state import RobotState
+
+        grid, states = sampled(times, positions, velocities)
+        state = RobotState(self._model)
+        points = []
+
+        for q in states:
+            state.set_joint_group_positions('xarm7', np.asarray(q))
+            state.update()
+            frame = np.asarray(state.get_global_link_transform('link7'))
+            points.append(self.corners @ frame[:3, :3].T + frame[:3, 3])
+
+        points = np.array(points)                  # (time, corner, xyz)
+        speeds = np.linalg.norm(np.diff(points, axis=0), axis=2)
+        speeds /= np.diff(grid)[:, None]
+
+        return float(speeds.max())
 
     def _totg(self, waypoints, v, a, tolerance):
         from moveit.core.robot_state import RobotState
@@ -284,9 +400,12 @@ class Retimer:
 
         Tries PATH_TOLERANCES x ACCELERATION_FRACTIONS x
         VELOCITY_FRACTIONS and keeps the fastest whose controller cubic
-        keeps all three limits. Not collision-checked: the caller does.
+        keeps all three joint limits and, with tip_speed set, keeps the
+        claw under it (tip_peak) - the xArm stops with C24 "Speed
+        Exceeds Limit" over 1 m/s at the tool (2026-10-22). Not
+        collision-checked: the caller does.
         """
-        best = None
+        passing = []
 
         for tolerance in PATH_TOLERANCES:
             for a_fraction in ACCELERATION_FRACTIONS:
@@ -308,20 +427,59 @@ class Retimer:
                     ):
                         continue
 
-                    if best is None or timed[0][-1] < best[0][-1]:
-                        best = timed + ({
-                            'path_tolerance_rad': tolerance,
-                            'acceleration_fraction': a_fraction,
-                            'velocity_fraction': v_fraction,
-                            'peaks': [round(x, 4) for x in peaks],
-                        },)
+                    passing.append(timed + ({
+                        'path_tolerance_rad': tolerance,
+                        'acceleration_fraction': a_fraction,
+                        'velocity_fraction': v_fraction,
+                        'peaks': [round(x, 4) for x in peaks],
+                    },))
 
-        return best
+        # Fastest first; the claw check (forward kinematics) only until
+        # one passes.
+        for candidate in sorted(passing, key=lambda c: c[0][-1]):
+            if self.tip_speed is None:
+                return candidate
+
+            tip = self.tip_peak(*candidate[:3])
+
+            if tip <= self.tip_speed * (1.0 + _SLACK):
+                candidate[3]['tip_peak_m_s'] = round(tip, 4)
+                return candidate
+
+        return None
+
+    def stop_time_scale(self, waypoints):
+        """
+        Return (time scale, claw peak) for the route stopping at its vias.
+
+        go_to times a route without a pass-through timing at replay
+        (joint_path.time_stop_at_each, the transfer limits); this is the
+        factor (<= 1, as go_to's time_scale) that keeps the claw under
+        tip_speed on that profile. Peak speed scales with it exactly.
+        """
+        from .joint_path import time_stop_at_each
+
+        dense, times, _velocities = time_stop_at_each(
+            waypoints, self.v_max,
+            max_acceleration=self.a_max, max_jerk=self.j_max,
+        )
+        tip = self.tip_peak(times, dense)
+
+        if self.tip_speed is None or tip <= self.tip_speed:
+            return 1.0, tip
+
+        return self.tip_speed / tip, tip
 
 
-def time_routes(routes, v_max, a_max, j_max, timeout_sec=900):
+def time_routes(
+    routes, v_max, a_max, j_max, tip_speed=None, corners=None,
+    timeout_sec=900,
+):
     """
-    Return {route: (times, positions, velocities, settings) or None}.
+    Return ({route: (t, q, qd, settings) or None}, {route: (scale, peak)}).
+
+    The second: each route's stop-at-each time scale and claw peak
+    (Retimer.stop_time_scale); empty without tip_speed.
 
     Runs the Retimer in a child process (main() below): MoveItPy then
     never shares a process with the caller's rclpy session, and its
@@ -340,6 +498,10 @@ def time_routes(routes, v_max, a_max, j_max, timeout_sec=900):
         with open(request, 'w') as handle:
             json.dump({
                 'limits': [v_max, a_max, j_max],
+                'tip_speed': tip_speed,
+                'corners': None if corners is None else np.asarray(
+                    corners
+                ).tolist(),
                 'routes': {
                     name: np.asarray(waypoints).tolist()
                     for name, waypoints in routes.items()
@@ -358,14 +520,18 @@ def time_routes(routes, v_max, a_max, j_max, timeout_sec=900):
         with open(answer) as handle:
             result = json.load(handle)
 
-    return {
+    timings = {
         name: None if entry is None else (
             np.asarray(entry['times']),
             np.asarray(entry['positions']),
             np.asarray(entry['velocities']),
             entry['settings'],
         )
-        for name, entry in result.items()
+        for name, entry in result['timings'].items()
+    }
+
+    return timings, {
+        name: tuple(value) for name, value in result['stop'].items()
     }
 
 
@@ -380,17 +546,24 @@ def main(argv=None):
     with open(request) as handle:
         job = json.load(handle)
 
-    retimer = Retimer(*job['limits'])
-    result = {}
+    retimer = Retimer(
+        *job['limits'], tip_speed=job.get('tip_speed'),
+        corners=job.get('corners'),
+    )
+    result = {'timings': {}, 'stop': {}}
 
     for name, waypoints in job['routes'].items():
-        timed = retimer.time_route(np.asarray(waypoints))
-        result[name] = None if timed is None else {
+        waypoints = np.asarray(waypoints)
+        timed = retimer.time_route(waypoints)
+        result['timings'][name] = None if timed is None else {
             'times': timed[0].tolist(),
             'positions': timed[1].tolist(),
             'velocities': timed[2].tolist(),
             'settings': timed[3],
         }
+
+        if retimer.tip_speed is not None:
+            result['stop'][name] = list(retimer.stop_time_scale(waypoints))
 
     with open(answer + '.part', 'w') as handle:
         json.dump(result, handle)

@@ -30,10 +30,11 @@ approach is within WRIST_MARGIN_M of the wall (it probably will not
 fit), green reachable, red not.
 
 The bucket is drawn as a green wireframe, and the laundry's level top
-at --fill (default 2/3 of the drum's height) as a tan outline: what
-the sweep aims into. Both are lines, so they do not catch clicks;
-switch off RViz's solid Obstacles (planning scene) display while
-dragging, or the bucket mesh takes the clicks meant for the grabs.
+at --fill (default: config.PILE's top_height_m, so as full as the sweep
+is generated for) as a tan outline: what the sweep aims into. Both
+are lines, so they do not catch clicks; switch off RViz's solid
+Obstacles (planning scene) display while dragging, or the bucket mesh
+takes the clicks meant for the grabs.
 
 Needs only a ROS graph and RViz with the InteractiveMarkers display on
 namespace /grab_editor and a MarkerArray display on
@@ -59,7 +60,7 @@ from visualization_msgs.msg import (
     MarkerArray,
 )
 
-from . import grab_targets
+from . import grab_targets, pile_layers
 from .. import config
 from ..arm.geometry import look_at_quaternion
 from ..bucket import axis_basis, seed_cone
@@ -67,7 +68,6 @@ from ..bucket import axis_basis, seed_cone
 NAMESPACE = 'grab_editor'
 SCENE_TOPIC = 'grab_editor/scene'
 
-DEFAULT_FILL_FRACTION = 2.0 / 3.0
 
 # Under this much room between the wall and the wrist (at the grab or
 # at the approach pose), an unchecked grab is shown orange: the
@@ -136,11 +136,14 @@ def _visual(shape, position, scale, colour):
 class GrabEditor(Node):
     """The interactive markers, the scene and the CHECK worker."""
 
-    def __init__(self, fill_fraction=DEFAULT_FILL_FRACTION, file_path=None):
+    def __init__(self, fill_fraction=None, file_path=None):
         super().__init__('grab_editor')
 
         self.file_path = file_path or grab_targets.path()
-        self.fill_fraction = fill_fraction
+        self.fill_fraction = (
+            pile_layers.fill_fraction() if fill_fraction is None
+            else fill_fraction
+        )
         self.cone = seed_cone()
 
         self.targets = grab_targets.load(self.file_path)
@@ -748,9 +751,9 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        '--fill', type=float, default=DEFAULT_FILL_FRACTION,
+        '--fill', type=float, default=None,
         help='How full the drum is shown, as a fraction of its height '
-             '(default: 2/3).',
+             "(default: config.PILE's top_height_m).",
     )
     parser.add_argument(
         '--file', default=None,

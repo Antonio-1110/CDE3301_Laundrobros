@@ -105,13 +105,18 @@ def count_points(csv_path):
         return max(0, sum(1 for line in handle if line.strip()) - 1)
 
 
-def run_one_scan(csv_path, scan_args, timeout_sec):
+def run_one_scan(
+    csv_path, scan_args, timeout_sec, start_inside=False, stay_inside=False,
+):
     """
     Run one `laundry scan --save csv_path`; True if it reported success.
 
     Always a full scan: `laundry scan` defaults to the quick one, and
     baselines must include the end scan (run_collect). Forwarded
     options come after, so --end-scan bottom still overrides it.
+
+    start_inside / stay_inside: skip the trip out to INTER and back in
+    between back-to-back scans (scan.pattern.scan); not recorded.
     """
     command = [
         sys.executable,
@@ -122,7 +127,9 @@ def run_one_scan(csv_path, scan_args, timeout_sec):
         csv_path,
         '--end-scan',
         'precession',
-    ] + list(scan_args)
+    ] + (['--start-inside'] if start_inside else []) + (
+        ['--stay-inside'] if stay_inside else []
+    ) + list(scan_args)
 
     try:
         result = subprocess.run(command, timeout=timeout_sec)
@@ -132,6 +139,24 @@ def run_one_scan(csv_path, scan_args, timeout_sec):
         return False
 
     return result.returncode == 0
+
+
+def leave_bucket():
+    """
+    Move from the entry pose out to INTER; True on success.
+
+    For a run that stopped after a --stay-inside scan: the arm is
+    still 6 cm in, J7 turned back. `laundry move inter` takes the
+    straight checked joint move out (arm/transfers.go_to).
+    """
+    command = [sys.executable, '-m', 'laundry_control.cli', 'move', 'inter']
+
+    try:
+        return subprocess.run(command, timeout=120).returncode == 0
+
+    except subprocess.TimeoutExpired:
+        print('  ! the move out to INTER exceeded 120s and was killed')
+        return False
 
 
 def confirm_setup(count, dest):
@@ -278,6 +303,12 @@ def collect(
 
     started = time.time()
 
+    # Every scan but the last stays in the bucket at the entry pose,
+    # and the next one starts there: no trip out to INTER and back in
+    # between scans. After a failed scan the arm is wherever it
+    # stopped, so the next one starts from INTER again.
+    inside = False
+
     try:
 
         for index in range(1, count + 1):
@@ -304,7 +335,12 @@ def collect(
             print('-' * 62)
 
             scan_started = time.time()
-            ok = run_one_scan(csv_path, scan_args, timeout_sec)
+            stay = index < count
+            ok = run_one_scan(
+                csv_path, scan_args, timeout_sec,
+                start_inside=inside, stay_inside=stay,
+            )
+            inside = ok and stay
             took = time.time() - scan_started
 
             points = count_points(csv_path)
@@ -341,6 +377,13 @@ def collect(
 
                 if not keep_going:
                     print('\nStopping after a failed scan.')
+
+                    if not ok and index > 1 and failed[-1][0] == index:
+                        print(
+                            '  The arm may still be in the bucket; move '
+                            'it out with: laundry move inter'
+                        )
+
                     break
 
             if index < count and settle_sec > 0:
@@ -348,7 +391,16 @@ def collect(
                 time.sleep(settle_sec)
 
     except KeyboardInterrupt:
+        # The arm stays where Ctrl+C stopped it.
         print('\n\nInterrupted.')
+        inside = False
+
+    if inside:
+        # Stopped early (a rejected scan) with the arm still in.
+        print('\nMoving out of the bucket to INTER...')
+
+        if not leave_bucket():
+            print('  ! could not move out to INTER; do it by hand: laundry move inter')
 
     return written, failed
 

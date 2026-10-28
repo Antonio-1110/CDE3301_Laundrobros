@@ -6,10 +6,11 @@ Client for the separate gripper_node process (see gripper_node.py).
 All servo/GPIO access happens over there, on its own executor - the
 same split scan/recorder_client.py uses for scan_recorder_node.
 
-Only blocking calls are provided: unlike a mid-scan checkpoint save
-(safe to fire-and-forget), the grasp stage always needs to know the
-gripper actually finished opening/closing before its next motion
-step, so there is no async flavour here.
+The grasp stage always needs to know the gripper actually finished
+opening/closing before its next motion step. open_blocking() and
+close_blocking() wait for that; start_open() and start_close() send
+the request and return a Pending whose wait() does, so the arm can
+check its next motion while the claw moves (grasp/retrieve_grid.run).
 
 hardware.fake.FakeGripper has the same interface, for running the
 pipeline with no servo attached.
@@ -20,6 +21,21 @@ from std_srvs.srv import Trigger
 
 OPEN_SERVICE = 'open_gripper'
 CLOSE_SERVICE = 'close_gripper'
+
+
+class Pending:
+    """A gripper move under way; wait() returns True once it is confirmed."""
+
+    def __init__(self, finish):
+        self._finish = finish
+        self._result = None
+
+    def wait(self):
+        """Wait for the gripper's answer (once); True if it confirmed the move."""
+        if self._result is None:
+            self._result = bool(self._finish())
+
+        return self._result
 
 
 class GripperClient:
@@ -37,25 +53,34 @@ class GripperClient:
 
     def open_blocking(self, timeout_sec=5.0):
         """Open the gripper and wait for confirmation."""
-        return self._call_blocking(self._open_client, OPEN_SERVICE, timeout_sec)
+        return self.start_open(timeout_sec).wait()
 
     def close_blocking(self, timeout_sec=5.0):
         """Close the gripper and wait for confirmation."""
-        return self._call_blocking(
-            self._close_client, CLOSE_SERVICE, timeout_sec
-        )
+        return self.start_close(timeout_sec).wait()
 
-    def _call_blocking(self, client, name, timeout_sec):
+    def start_open(self, timeout_sec=5.0):
+        """Ask the gripper to open; wait() on the result for confirmation."""
+        return self._start(self._open_client, OPEN_SERVICE, timeout_sec)
+
+    def start_close(self, timeout_sec=5.0):
+        """Ask the gripper to close; wait() on the result for confirmation."""
+        return self._start(self._close_client, CLOSE_SERVICE, timeout_sec)
+
+    def _start(self, client, name, timeout_sec):
         if not client.wait_for_service(timeout_sec=timeout_sec):
             self.node.get_logger().warning(
                 f"'{name}' service not available after "
                 f'{timeout_sec:.1f}s (is gripper_node running?).'
             )
 
-            return False
+            return Pending(lambda: False)
 
         future = client.call_async(Trigger.Request())
 
+        return Pending(lambda: self._finish(future, name, timeout_sec))
+
+    def _finish(self, future, name, timeout_sec):
         rclpy.spin_until_future_complete(
             self.node,
             future,

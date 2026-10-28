@@ -42,6 +42,20 @@ class FakeGripper:
         self.node.get_logger().info('[fake gripper] close')
         return True
 
+    def start_open(self, timeout_sec=5.0):
+        """Pretend to open the gripper (already done when wait() is called)."""
+        from .gripper_client import Pending
+
+        done = self.open_blocking(timeout_sec)
+        return Pending(lambda: done)
+
+    def start_close(self, timeout_sec=5.0):
+        """Pretend to close the gripper (already done when wait() is called)."""
+        from .gripper_client import Pending
+
+        done = self.close_blocking(timeout_sec)
+        return Pending(lambda: done)
+
 
 class FakeRecorder:
     """
@@ -57,8 +71,11 @@ class FakeRecorder:
         """
         source_csv: one scan CSV, or a list used one per scan, in order.
 
-        With a list, each save uses the next file and the last repeats
-        - so `laundry clear` can be fed "laundry, then empty".
+        With a list, each scan uses the next file and the last repeats
+        - so `laundry clear` can be fed "laundry, then empty". A scan
+        is one pinned csv_path: saves before the next one is pinned
+        (the pipeline's check at the bottom of a pass, then its final
+        save) all use the same file.
         """
         sources = [source_csv] if isinstance(source_csv, str) else list(
             source_csv
@@ -70,16 +87,21 @@ class FakeRecorder:
 
         self.node = node
         self._sources = sources
-        self._saves = 0
+        self._scans = 0
+        self._saved = False
         self.csv_path = csv_path
 
     @property
     def source_csv(self):
         """Return the scan the next save stands in with."""
-        return self._sources[min(self._saves, len(self._sources) - 1)]
+        return self._sources[min(self._scans, len(self._sources) - 1)]
 
     def set_csv_path(self, csv_path, timeout_sec=5.0):
-        """Record where the final save should land."""
+        """Record where the saves should land; a new file is a new scan."""
+        if csv_path and self._saved:
+            self._scans += 1
+            self._saved = False
+
         self.csv_path = csv_path
         return True
 
@@ -118,6 +140,6 @@ class FakeRecorder:
             f'[fake recorder] {self.source_csv} -> {self.csv_path}'
         )
 
-        self._saves += 1
+        self._saved = True
 
         return True

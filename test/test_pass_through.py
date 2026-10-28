@@ -198,8 +198,8 @@ def test_the_way_back_runs_the_timing_backwards():
 
 
 def test_colliding_corners_fall_back_to_stopping_at_the_vias():
-    # 1st check (the straight route) clear; 2nd (the rounded curve) hits.
-    arm = _Arm(INTER, verdicts=[None, 5])
+    # 1st check (the rounded curve) hits; 2nd (the straight route) clear.
+    arm = _Arm(INTER, verdicts=[5, None])
 
     assert _go(arm, 'drop', {'drop': _timed([INTER, VIA, DROP])})
 
@@ -259,3 +259,176 @@ def test_a_stored_timing_is_loaded_at_rest_at_both_ends():
     _t, _q, loaded = pass_through.from_document(document)
 
     assert np.all(loaded[-1] == 0.0)
+
+
+GRAB = np.array(config.get_named_pose('grab_01'))
+CHAIN_ROUTES = dict(ROUTES, grab_01=np.array([INTER, GRAB]))
+
+
+def test_the_sweep_chains_are_grab_to_drop_and_back_when_empty(monkeypatch):
+    monkeypatch.setattr(
+        config, 'generated_grab_poses', lambda: {'grab_01': list(GRAB)}
+    )
+    routes = dict(CHAIN_ROUTES, drop_return=np.array([INTER, VIA, DROP]))
+
+    assert transfers.chain_pairs(routes) == {
+        'grab_01..drop': ('grab_01', 'drop'),
+        'drop_return..grab_01': ('drop_return', 'grab_01'),
+    }
+
+
+def test_a_chain_timing_passes_through_inter():
+    chain = _timed(transfers.chain_waypoints(CHAIN_ROUTES, 'grab_01', 'drop'))
+    arm = _Arm(GRAB)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={'grab_01..drop': chain, 'drop': _timed([INTER, VIA, DROP])},
+    )
+
+    (positions, times), = arm.executed
+    assert times[-1] == pytest.approx(chain[0][-1])
+    assert np.allclose(positions[-1], DROP)
+    assert any('INTER included' in line for line in arm.logger.lines)
+
+
+def test_without_a_chain_timing_the_arm_stops_at_inter():
+    arm = _Arm(GRAB)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={'drop': _timed([INTER, VIA, DROP])},
+    )
+
+    assert any('stopping at INTER' in line for line in arm.logger.lines)
+
+
+def test_a_stored_chain_is_used_only_for_the_routes_it_was_timed_on(tmp_path):
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(path, CHAIN_ROUTES, 0.785)
+    t, q, qd = _timed(
+        transfers.chain_waypoints(CHAIN_ROUTES, 'grab_01', 'drop')
+    )
+    chain = {
+        'back': 'grab_01', 'out': 'drop',
+        'timed': pass_through.to_document(
+            t, q, qd, pass_through.current_limits(), {}
+        ),
+    }
+    transfers.save_timings(path, {}, chains={'grab_01..drop': chain})
+
+    assert set(transfers.load_timings(path)) == {'grab_01..drop'}
+
+    # DROP's route re-baked with another via: the chain is stale.
+    transfers.save(
+        path, dict(CHAIN_ROUTES, drop=np.array([INTER, VIA + 0.05, DROP])),
+        0.785,
+    )
+    document = transfers._read(path)
+    document['chains'] = {'grab_01..drop': dict(chain, digest='0' * 16)}
+    transfers._write(path, document)
+
+    assert transfers.load_timings(path) == {}
+
+
+def test_straight_moves_before_and_after_are_one_trajectory():
+    below = GRAB + 0.05
+    arm = _Arm(below)
+
+    move = transfers.prepare_go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={}, before=[GRAB], after=[DROP + 0.05],
+    )
+
+    assert arm.executed == []  # checked, not moved yet
+    assert move()
+
+    (positions, _times), = arm.executed
+    assert np.allclose(positions[0], below)
+    assert np.any(np.all(np.isclose(positions, GRAB), axis=1))
+    assert np.any(np.all(np.isclose(positions, DROP), axis=1))
+    assert np.allclose(positions[-1], DROP + 0.05)
+
+
+def test_a_colliding_straight_move_refuses_the_whole_move():
+    arm = _Arm(GRAB + 0.05, verdicts=[2])
+    arm._why_invalid = lambda *_a: 'collision'
+
+    assert transfers.prepare_go_to(
+        arm, 'drop', routes=CHAIN_ROUTES, max_velocity_rad_s=0.785,
+        timings={}, before=[GRAB],
+    ) is None
+
+
+# ---------------------------------------------------------------
+# Claw-speed cap (config.TRANSFER_MAX_TIP_SPEED_M_S)
+# ---------------------------------------------------------------
+
+def test_the_corners_enclose_the_claw_at_any_j7_angle():
+    import os
+
+    from scipy.spatial.transform import Rotation
+
+    corners = pass_through.gripper_corners()
+
+    assert corners.shape == (33, 3)
+    assert np.allclose(corners[0], 0.0)
+    # The claw reaches past the contact point along link7's z.
+    assert corners[:, 2].max() >= config.GRIPPER_OFFSET_Z - 0.02
+
+    mesh = os.path.join(config.repo_root(), 'meshes', config.GRIPPER_MESH)
+    vertices = np.array([
+        [float(v) for v in line.split()[1:4]]
+        for line in open(mesh) if line.startswith('v ')
+    ])
+    vertices = Rotation.from_euler('xyz', config.GRIPPER_MESH_RPY).apply(
+        vertices
+    )
+    ring = corners[1:17, :2]
+    # Every vertex, turned by any J7 angle, lies inside the prism.
+    for angle in np.radians([0.0, 37.0, 90.0, 180.0]):
+        turned = Rotation.from_euler('z', angle).apply(vertices)
+        for a, b in zip(ring, np.roll(ring, -1, axis=0)):
+            edge, rel = b - a, turned[:, :2] - a
+            assert np.all(edge[0] * rel[:, 1] - edge[1] * rel[:, 0] >= -1e-9)
+        assert turned[:, 2].min() >= corners[:, 2].min() - 1e-9
+        assert turned[:, 2].max() <= corners[:, 2].max() + 1e-9
+
+
+def test_sampling_follows_the_controllers_cubic_end_to_end():
+    t, q, qd = _timed([INTER, VIA, DROP])
+
+    grid, states = pass_through.sampled(t, q, qd, step=0.01)
+
+    assert grid[0] == 0.0 and grid[-1] == pytest.approx(t[-1])
+    assert np.allclose(states[0], INTER) and np.allclose(states[-1], DROP)
+
+
+def test_stop_scales_round_trip_for_the_current_limits_only(tmp_path):
+    path = str(tmp_path / 'transfers.yaml')
+    transfers.save(path, ROUTES, 0.785)
+    transfers.save_timings(path, {}, stop_scales={'drop': (0.8, 1.1)})
+
+    assert transfers.load_stop_scales(path) == {'drop': pytest.approx(0.8)}
+
+    document = transfers._read(path)
+    document['routes']['drop']['stop']['limits']['tip_speed_m_s'] = 2.0
+    transfers._write(path, document)
+
+    assert transfers.load_stop_scales(path) == {}
+
+
+def test_a_route_stopping_at_its_vias_is_slowed_by_its_scale():
+    plain = list(transfers._route_plans(
+        INTER, [('drop', False)], ROUTES, {}, 0.785, None,
+    ))[-1]
+    slowed = list(transfers._route_plans(
+        INTER, [('drop', False)], ROUTES, {}, 0.785, {'drop': 0.5},
+    ))[-1]
+
+    plain_t = plain[1][0][0][-1]
+    slowed_t = slowed[1][0][0][-1]
+
+    assert slowed_t == pytest.approx(plain_t / 0.5)
+    # Same path, only slower.
+    assert np.allclose(plain[2], slowed[2])

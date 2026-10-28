@@ -1,6 +1,6 @@
 # Operating the rig
 
-Bringing it up, the `laundry` commands, and the routine jobs: baselines, the grab grid, and moving the bucket. How the pieces work is in [how-it-works.md](how-it-works.md).
+Bringing it up, the `laundry` commands, and the routine jobs: baselines, the full-drum sweep, and moving the bucket. How the pieces work is in [how-it-works.md](how-it-works.md).
 
 ## Bring-up and commands
 
@@ -14,7 +14,7 @@ ros2 launch laundry_control laundry_bringup.launch.py robot_ip:=192.168.1.207
 
 The arm's control loop (ros2_control) runs at 100 Hz, not the stock 150 Hz: each tick waits for the arm twice, and at 150 Hz the ticks kept overrunning. It's set by `config.ARM_CONTROL_RATE_HZ`, and `control_rate_hz:=150` brings back the stock rate for comparison. `xarm_ros2` itself is unmodified: the bring-up passes the rate into the manufacturer's launch.
 
-The ToF sensor and the servo can be on an ESP32 that talks to this Pi over MQTT (the default) or on this Pi (I2C and GPIO). Pick with `tof_source:=i2c|mqtt` and `gripper_backend:=gpio|mqtt`, or change the defaults in `config/hardware.py` (`TOF_SOURCE`, `GRIPPER_BACKEND`). The default needs the broker (mosquitto, a systemd service that starts at boot; check with `mqtt_broker/broker.sh`) and the flashed firmware: set up the broker first ([mqtt_broker/README.md](../mqtt_broker/README.md)) and flash the firmware ([esp32/README.md](../esp32/README.md)).
+The ToF sensor and the servo can be on an ESP32 that talks to this Pi over MQTT (the default) or on this Pi (I2C and GPIO). With the ESP32 the servo's pulses stay on after each move (`config.GRIPPER_HOLD_PULSES`): stopping them left the claw short of its angle on the rig (2026-10-19). Pick with `tof_source:=i2c|mqtt` and `gripper_backend:=gpio|mqtt`, or change the defaults in `config/hardware.py` (`TOF_SOURCE`, `GRIPPER_BACKEND`). The default needs the broker (mosquitto, a systemd service that starts at boot; check with `mqtt_broker/broker.sh`) and the flashed firmware: set up the broker first ([mqtt_broker/README.md](../mqtt_broker/README.md)) and flash the firmware ([esp32/README.md](../esp32/README.md)).
 
 No hardware: the MoveIt fake controller only. Pair it with `--fake-hardware`.
 
@@ -36,14 +36,14 @@ ros2 launch laundry_control laundry_bringup.launch.py fake:=true rviz:=false
 | `laundry scan [--save scan.csv] [--full \| --end-scan precession\|bottom] [--velocity 0.03 ...]` — the quick scan unless `--full` | rig, or `--fake-hardware --scan-from X.csv` |
 | `laundry detect scan.csv [-o targets.json] [--publish]` — quick or full is read from the CSV | nothing — plain files |
 | `laundry grasp targets.json [--drop] [--dry-run]` | rig, or `--fake-hardware` |
-| `laundry run [--dry-run]` — scan → detect → grasp → drop, one item | rig, or `--fake-hardware --scan-from X.csv` |
-| `laundry clear [--no-grabs] [--grab-limit N] [--max-rounds 15]` — empty the bucket: the grab grid, then scan → grasp → drop until a scan finds nothing | rig, or `--fake-hardware --scan-from A.csv B.csv ...` |
+| `laundry run [--dry-run] [--coarse 0.12\|none] [--no-bottom-check]` — scan (12 cm first, then 3 cm) → detect → grasp → drop, one item | rig, or `--fake-hardware --scan-from X.csv` |
+| `laundry clear [--fill 0.25\|0.3\|...\|none] [--no-grabs] [--grab-limit N] [--max-rounds 15]` — empty the bucket: the sweep (the fill level's baked grabs, 0.25 unless `--fill` or `LAUNDRY_FILL` says otherwise), then scan → grasp → drop until a scan finds nothing | rig, or `--fake-hardware --scan-from A.csv B.csv ...` |
 | `laundry gripper open` / `close` / `ANGLE` | `gripper_node` (open/close); the servo on this Pi's GPIO (ANGLE) |
 | `laundry baseline collect [--count 8] [--archive] [-- <scan options>]` — straight into `baseline_scans/`; `--archive` replaces the set | rig, empty bucket |
 | `laundry baseline promote X.csv\|dir ... [--move] [--archive]`, `archive`, `list`, `restore LABEL` | nothing |
 | `laundry replay scan.csv` | a ROS graph (for RViz) |
 | `laundry evaluate [--sweep] [--synthetic] [--coverage] [--laundry X.csv ...]` | nothing |
-| `laundry preplanned [--limit N] [--speed 0.3]` — sensorless sweep over the grab grid (refuses if it isn't baked) | rig, or `--fake-hardware` |
+| `laundry preplanned [--limit N] [--speed 0.3]` — sensorless sweep into the pile, layer by layer (refuses if it isn't baked) | rig, or `--fake-hardware` |
 
 `laundry <command> --help` documents every option.
 
@@ -75,22 +75,38 @@ The detector models the empty bucket from every `*.csv` directly in `baseline_sc
 
 - **New set** (e.g. after moving the bucket): `laundry baseline collect --archive`. The scans are named `baseline_<session>_NN.csv` and go to `baseline_scans/incoming_<session>/`. Only when all of them succeed does the old set move to `baseline_scans/archive/<its session>/` and the new one take its place. A failed run leaves the old set active, so scans of two different scenes are never mixed.
 - **Top up** the current set: `laundry baseline collect` (no `--archive`).
+- **Between scans the arm stays in the bucket.** Each scan but the last ends at the entry pose (6 cm in, J7 turned back; `laundry scan --stay-inside`), and the next starts there (`--start-inside`). That skips the trip out to INTER and back in, about 14 s per scan. Neither move is recorded, so the scans are the same as stand-alone ones. `--start-inside` refuses to move unless the flange is within 5 mm / 2° of that pose. If a run stops with the arm still inside, it moves out to INTER. If a scan fails, it tells you to run `laundry move inter`.
 - **Adopt scans taken earlier:** `laundry baseline promote scan_records/scan_X.csv ... [--move] [--archive]` names them `baseline_<when taken>_NN.csv`.
 - `laundry baseline list` shows the current set and the archive. `laundry baseline restore <label>` brings an archived set back and archives the current one. Nothing is ever deleted.
 
-## Sensorless first pass: the grab grid
+## Sensorless first pass: grabs for a full drum
 
-Laundry is expected at the start, so `laundry preplanned` grabs at fixed spots without scanning. `laundry plan bake retrieve` generates those spots from `config.RETRIEVE_GRID` in the configured bucket. The default is 4 depths (40, 30, 20, 10 cm from the closed end, mouth first) × 3 positions across the floor (centre, then ±20°).
+The sweep (`laundry preplanned`, and the start of `laundry clear`) runs on a drum that is already full, with nothing taken out and no scan. So it does not grab at the floor: it aims into the pile, and **where depends on how full the drum is**. `config.PILE` (`config/grabs.py`) sets that:
 
-For each spot, IK finds the lowest gripper height (2 cm above the floor upwards), then the most vertical approach that is collision-free with 1 cm of extra gripper clearance. Each spot is saved to `scan_plans/retrieve.yaml` as two poses:
-- **`grab_NN`**: an approach pose 8 cm up the gripper axis, reached from INTER on a baked route like any named pose (`laundry move grab_03` works).
+| Setting | Default | |
+|---|---|---|
+| `top_height_m` | 0.25 | where the pile's top is, above the floor (2/3 of the drum). **Change this for a different fill.** `LAUNDRY_PILE_TOP_M=0.20` overrides it for one run |
+| `sink_m` | 0.06 | how far below the pile's surface the first layer grabs |
+| `layer_step_m` | 0.06 | how much lower each further layer goes than the one before actually reached |
+| `min_height_m` | 0.10 | the lowest sweep grab: laundry below it is for the scan-then-grasp stage, so a pile this low gets no sweep |
+| `depths_m`, `angles_deg` | 4 × 3 | the spots (40, 30, 20, 10 cm from the closed end, mouth first; centre, then ±20°) |
+| `tilts_deg` | 0 to 60° | tried smallest first |
+
+`laundry plan bake retrieve` generates the grab list from it (`grasp/pile_layers.py`, saved to `scan_plans/grab_targets.yaml`) and solves each grab exactly as generated. For each spot it takes the **highest height that some tilt reaches**: the 15 cm gripper and its approach meet the drum's ceiling, so a grab near the pile top costs tilt (on the fake controller, at 25 cm fill: 45° near the mouth, 60° deeper). Layer 1 aims at the pile's top, `sink_m` below it. Each further layer aims `layer_step_m` below what that spot's last layer actually reached, until it would go below `min_height_m`. The sweep runs layer 1 over every spot, mouth first, then layer 2, because taking laundry lowers the pile. At the defaults: **24 grabs in 2 layers, about 19 and 13 cm above the floor**, about 6 min 30 s on the rig.
+
+**Another fill level means another plan.** Change `PILE['top_height_m']` (or set `LAUNDRY_PILE_TOP_M`) and re-bake with `./rebake.sh retrieve` (about 2.5 minutes); a generated list regenerates by itself when `PILE` changes. `laundry preplanned` warns when the plan was baked for another `PILE`. Bake and run with the same value, since the override is read each time.
+
+**Placing grabs by hand** still works: drag them in `laundry plan edit-grabs` and SAVE. A hand-placed list is kept on re-bake (it stops following `PILE`) until you pass `--regenerate`. The editor draws the pile level from `PILE`.
+
+Each grab is saved to `scan_plans/retrieve.yaml` as two poses:
+- **`grab_NN`**: an approach pose 5 cm up the gripper axis, reached from INTER on a baked route like any named pose (`laundry move grab_03` works).
 - **The grab itself**: a straight descent onto the laundry, then a straight lift back up.
 
-The sweep runs: route in → descend → close → lift → DROP → open, for each grab. Edit the grid (depths, angles, heights, tilts) in `config/grabs.py` and re-bake (`./rebake.sh retrieve`). The four grab poses once jogged by hand (RETRIEVE_0..3) are no longer poses. They remain only as `config.GRAB_IK_SEEDS`: starting postures for the grid's IK solver.
+The sweep runs: route in → descend → close → lift → DROP → open, for each grab. The four grab poses once jogged by hand (RETRIEVE_0..3) are no longer poses. They remain only as `config.GRAB_IK_SEEDS`: starting postures for the IK solver.
 
-**Detected items are grabbed the same way.** When the grid is baked, a detected item anywhere in the lower half of the drum (within `config.DETECTED_GRAB_MAX_ANGLE_DEG` = 90° of the floor's lowest line, so the lower walls too) gets a grab placed over it. The grab sinks halfway into the pile (at most 5 cm) and is solved with the same IK search. The arm takes the baked route to the nearest `grab_NN`, makes a short straight collision-checked move from there, then descends, closes and lifts. Items beyond that angle use the older Cartesian reach from INTER. On the fake controller, that reach couldn't get to a towel in the middle of the floor at any depth; the floor grab could.
+**Detected items are grabbed the same way.** When the grid is baked, a detected item anywhere in the lower half of the drum (within `config.DETECTED_GRAB_MAX_ANGLE_DEG` = 90° of the floor's lowest line, so the lower walls too) gets a grab placed over it. The grab digs as deep into the pile as is collision-free: for each tilt it tries heights from the deepest allowed upward and keeps the lowest whose grab, approach and descent all pass the collision checks, never closer than 2 cm to the bucket wall and never more than 15 cm below the sensed top (`config.DETECTED_GRAB_DIG`). The approach starts 3 cm above the pile where it fits, so the digging is the straight descent. On the fake controller (2026-10-22, 36 spots): 9.5 cm into the pile on average, against 4.3 cm with the old rule (half the pile, at most 5 cm), for about 0.8 s more planning. The arm takes the baked route to the nearest `grab_NN`, makes a short straight collision-checked move from there, then descends, closes and lifts. Items beyond that angle use the older Cartesian reach from INTER. On the fake controller, that reach couldn't get to a towel in the middle of the floor at any depth; the floor grab could.
 
-**`laundry clear`** chains it all. It fits the bucket model once and runs the grab grid (`--no-grabs` skips it). Then it repeats open → scan → detect → grasp the best reachable item → DROP until a scan finds nothing. It stops early if nothing detected is reachable (a rescan would see the same pile), after 2 failed grasps in a row, or after `--max-rounds`.
+**`laundry clear`** chains it all. It fits the bucket model once and runs the sweep (`--no-grabs` skips it), from the grabs baked for `--fill` (default 0.25; `LAUNDRY_FILL` overrides the default, `--fill none` uses `scan_plans/` itself). Then it repeats open → scan → detect → grasp the best reachable item → DROP until a scan finds nothing. It stops early if nothing detected is reachable (a rescan would see the same pile), after 2 failed grasps in a row, or after `--max-rounds`.
 
 ## After moving the bucket (or table)
 
