@@ -1002,7 +1002,9 @@ def prepare_go_to(
     is now - to prepare it during an earlier move or claw wait. The
     move refuses to run unless the arm is there by then.
 
-    The returned move(before_end=None) takes (seconds, callback):
+    The returned move(before_end=None, while_moving=None) takes, as
+    while_moving, work to do while the arm moves (checking the next
+    moves, from their own start), and as before_end (seconds, callback):
     callback() is called that long before the move's planned end
     (from a timer on the arm's node, which spins while the move
     runs) - the claw commands, so the claw moves as the arm arrives
@@ -1151,19 +1153,29 @@ def _timed_move(
     start=None,
 ):
     """
-    Return move(before_end=None): one timed trajectory, as prepare_go_to's.
+    Return move(before_end=None, while_moving=None): one timed trajectory.
+
+    As prepare_go_to returns it. while_moving: work to do while the arm
+    moves (controller._run_goal) - preparing the next moves, which must
+    then pass `start`, since the arm is not yet where they begin.
 
     start: refuse to move unless the arm is there (within
     AT_POSE_TOLERANCE_RAD).
     """
     duration = float(times[-1]) / time_scale
 
-    def execute():
-        return arm.execute_joint_path(
-            positions, times, velocities, time_scale=time_scale
-        )
+    def move(before_end=None, while_moving=None):
+        def execute():
+            if while_moving is None:
+                return arm.execute_joint_path(
+                    positions, times, velocities, time_scale=time_scale
+                )
 
-    def move(before_end=None):
+            return arm.execute_joint_path(
+                positions, times, velocities, time_scale=time_scale,
+                while_running=while_moving,
+            )
+
         if start is not None:
             now = arm.get_current_joints()
 
@@ -1185,12 +1197,19 @@ def _timed_move(
 
 
 def _calling_at_end(move_now):
-    """Wrap a move with no timing of its own: before_end's callback after it."""
-    def move(before_end=None):
+    """
+    Wrap a move with no timing of its own: its hooks after it.
+
+    before_end's callback, then while_moving, once the move is made.
+    """
+    def move(before_end=None, while_moving=None):
         ok = move_now()
 
         if ok and before_end is not None:
             before_end[1]()
+
+        if while_moving is not None:
+            while_moving()
 
         return ok
 
@@ -1256,7 +1275,9 @@ def _turn_overlay(arm, target_name, plan, turn_rad, claw_peak):
     its own J7 speed is capped where the claw's corners (pass_through.
     gripper_corners, any J7 angle) would pass TRANSFER_MAX_TIP_SPEED_M_S
     on top of the move's baked claw peak. Without a baked peak the
-    move is not turned. The caller checks it (_checked_plan).
+    move is not turned. A carry with no room for the full turn is
+    turned as far as fits, in CARRY_TURN_STEP_DEG steps, down to
+    CARRY_MIN_TURN_DEG. The caller checks it (_checked_plan).
     """
     from . import pass_through
     from .joint_path import add_j7_turn
@@ -1280,26 +1301,38 @@ def _turn_overlay(arm, target_name, plan, turn_rad, claw_peak):
         )
         return None
 
-    turned = add_j7_turn(
-        times, positions, velocities, turn_rad,
-        config.CARRY_TURN_MAX_VELOCITY_RAD_S,
-        config.CARRY_TURN_MAX_ACCELERATION_RAD_S2,
-        config.TRANSFER_MAX_JERK_RAD_S3,
-        max_added_rate_rad_s=added,
-    )
+    full = math.degrees(abs(turn_rad))
+    step = config.CARRY_TURN_STEP_DEG
+    turned = None
+    amount = full
+
+    while turned is None and amount >= config.CARRY_MIN_TURN_DEG - 1e-9:
+        turned = add_j7_turn(
+            times, positions, velocities,
+            math.copysign(math.radians(amount), turn_rad),
+            config.CARRY_TURN_MAX_VELOCITY_RAD_S,
+            config.CARRY_TURN_MAX_ACCELERATION_RAD_S2,
+            config.TRANSFER_MAX_JERK_RAD_S3,
+            max_added_rate_rad_s=added,
+        )
+
+        if turned is None:
+            amount -= step
 
     if turned is None:
         arm.get_logger().info(
             f'The move to {target_name.upper()} is too short to turn the '
-            "claw and back within J7's limits; carrying it unturned."
+            f'claw even {config.CARRY_MIN_TURN_DEG:.0f} deg and back within '
+            "J7's limits; carrying it unturned."
         )
         return None
 
     grid, turned_positions, turned_velocities, ramp = turned
+    partly = f' (of {full:.0f}: no room for more)' if amount < full else ''
 
     return (
-        message + f', claw turned {math.degrees(turn_rad):+.0f} deg on the '
-        f'way ({ramp:.1f} s each way)',
+        message + f', claw turned {math.copysign(amount, turn_rad):+.0f} deg'
+        f'{partly} on the way ({ramp:.1f} s each way)',
         grid, turned_positions, turned_velocities,
     )
 

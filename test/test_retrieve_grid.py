@@ -113,8 +113,11 @@ def _prepare(refuse=()):
         if name in refuse:
             return None
 
-        def move(before_end=None):
+        def move(before_end=None, while_moving=None):
             arm.calls.append(('move', name))
+            # The checks made while the arm moves, then its arrival.
+            if while_moving is not None:
+                while_moving()
             if before_end is not None:
                 before_end[1]()
             return True
@@ -138,19 +141,22 @@ def test_each_grab_goes_down_closes_lifts_and_drops():
     assert arm.calls == [
         ('open',),
         ('check', 'grab_01', ((1.0,) * 7,), True), ('opened',),
-        # The claw closes as the arm arrives.
-        ('move', 'grab_01'), ('close',),
-        # Checked while it closes: this carry (turned), and the next
-        # grab's way in from DROP.
-        ('check', 'drop', ((0.0,) * 7,), False, 'turned'),
+        # Going down: this grab's carry is checked (turned, from the
+        # grab), then the claw closes as the arm arrives.
+        ('move', 'grab_01'),
+        ('check', 'drop', ((0.0,) * 7,), False, 'turned', 'from',
+         (1.0,) * 7),
+        ('close',), ('closed',),
+        # Carrying to DROP: the next grab's way in is checked (from
+        # DROP), then the claw opens as the arm arrives.
+        ('move', 'drop'),
         ('check', 'grab_02', ((6.0,) * 7,), True, 'from', DROP_POSE),
-        ('closed',),
-        # The claw opens as the arm arrives at DROP.
-        ('move', 'drop'), ('open',),
+        ('open',),
         ('opened',),
-        ('move', 'grab_02'), ('close',),
-        ('check', 'drop', ((5.0,) * 7,), False, 'turned'),
-        ('closed',),
+        ('move', 'grab_02'),
+        ('check', 'drop', ((5.0,) * 7,), False, 'turned', 'from',
+         (6.0,) * 7),
+        ('close',), ('closed',),
         ('move', 'drop'), ('open',),
         ('opened',),
         ('go_to', 'inter', True),
@@ -163,7 +169,9 @@ def test_unturned_the_carry_is_checked_unturned(unturned):
     assert retrieve_grid.run(
         arm, _Gripper(arm), [_grab('grab_01', 0.0)], _go_to, _prepare(),
     )
-    assert ('check', 'drop', ((0.0,) * 7,), False) in arm.calls
+    assert ('check', 'drop', ((0.0,) * 7,), False, 'from', (1.0,) * 7) in (
+        arm.calls
+    )
 
 
 def test_an_unconfirmed_open_at_drop_never_leaves_as_empty():
@@ -232,9 +240,11 @@ def test_a_detected_grab_is_two_moves_with_the_claw_on_arrival():
     assert arm.calls == [
         ('open',), ('opened',),
         ('check', 'inter', ((1.0,) * 7, (2.0,) * 7), False),
-        ('move', 'inter'), ('close',),
-        ('check', 'drop', ((1.0,) * 7, inter), False, 'turned'),
-        ('closed',),
+        # The way out is checked while the arm goes down.
+        ('move', 'inter'),
+        ('check', 'drop', ((1.0,) * 7, inter), False, 'turned', 'from',
+         (2.0,) * 7),
+        ('close',), ('closed',),
         ('move', 'drop'), ('open',), ('opened',),
         ('go_to', 'inter', True),
     ]

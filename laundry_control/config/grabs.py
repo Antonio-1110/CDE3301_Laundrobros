@@ -147,6 +147,15 @@ DETECTED_GRAB_MAX_ANGLE_DEG = 90.0
 # each way). 0 carries unturned, as before.
 CARRY_J7_TURN_DEG = 90.0
 
+# A carry too short (or with too much J7 motion of its own) for the
+# full turn and back is turned as far as fits, in steps of this much,
+# but not less than CARRY_MIN_TURN_DEG - less than that hardly puts
+# the lower jaw under the laundry - below which it goes unturned. On
+# the rig (2026-10-28) the -12 cm grab at the top of the mouth row had
+# no room for 90.
+CARRY_TURN_STEP_DEG = 10.0
+CARRY_MIN_TURN_DEG = 30.0
+
 # J7's limits for the turn, with the carry's own J7 motion added: 90%
 # of J7's own.
 CARRY_TURN_MAX_VELOCITY_RAD_S = 0.9 * JOINT7_MAX_VELOCITY_RAD_S

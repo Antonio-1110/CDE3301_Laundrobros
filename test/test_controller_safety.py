@@ -208,6 +208,49 @@ def test_ctrl_c_while_moving_stops_the_controller_and_the_goal():
     assert handle.cancelled
 
 
+def _goal_run():
+    """Return an arm whose goal is accepted at once, done when waited for."""
+    arm = _Self()
+    handle = _GoalHandle()
+    order = []
+
+    def spin_until_done(future, timeout_sec=None):
+        if future is handle.result_future:
+            order.append('waited for the motion')
+            future._done = True
+        return True
+
+    arm._spin_until_done = spin_until_done
+    return arm, handle, order
+
+
+def test_work_while_running_happens_after_acceptance_before_the_wait():
+    arm, handle, order = _goal_run()
+
+    _handle, result = XArm7Controller._run_goal(
+        arm, _Client(handle), object(), 'test move',
+        while_running=lambda: order.append('checks'),
+    )
+
+    assert order == ['checks', 'waited for the motion']
+
+
+def test_failing_work_while_running_still_waits_for_the_motion():
+    arm, handle, order = _goal_run()
+
+    def checks():
+        order.append('checks')
+        raise RuntimeError('a check failed')
+
+    with pytest.raises(RuntimeError):
+        XArm7Controller._run_goal(
+            arm, _Client(handle), object(), 'test move',
+            while_running=checks,
+        )
+
+    assert order == ['checks', 'waited for the motion']
+
+
 # ---------------------------------------------------------------
 # Fix 3: the J7 twist keeps positions, velocities and timing consistent
 # ---------------------------------------------------------------

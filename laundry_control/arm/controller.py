@@ -429,7 +429,7 @@ class XArm7Controller(MoveItQueries, Node):
 
         return future.done()
 
-    def _run_goal(self, client, goal, what):
+    def _run_goal(self, client, goal, what, while_running=None):
         """
         Send an action goal and wait for its result; stop the arm on Ctrl+C.
 
@@ -437,6 +437,11 @@ class XArm7Controller(MoveItQueries, Node):
         MoveIt never answered, wrapped_result None if the goal was
         rejected or returned nothing. KeyboardInterrupt is re-raised
         once the arm has been stopped (see _stop_after_interrupt).
+
+        while_running: called once the goal is accepted, before waiting
+        for its result - work to do while the arm moves (the next moves'
+        collision checks: grasp/retrieve_grid.run). It must not move the
+        arm. If it raises, the motion is still waited for first.
         """
         send_future = client.send_goal_async(goal)
         result_future = None
@@ -450,6 +455,13 @@ class XArm7Controller(MoveItQueries, Node):
                 return goal_handle, None
 
             result_future = goal_handle.get_result_async()
+
+            if while_running is not None:
+                try:
+                    while_running()
+                except Exception:
+                    self._spin_until_done(result_future)
+                    raise
 
             self._spin_until_done(result_future)
 
@@ -1140,6 +1152,7 @@ class XArm7Controller(MoveItQueries, Node):
     def _execute_trajectory(
         self,
         trajectory,
+        while_running=None,
     ):
 
         goal = ExecuteTrajectory.Goal()
@@ -1147,7 +1160,7 @@ class XArm7Controller(MoveItQueries, Node):
         goal.trajectory = trajectory
 
         goal_handle, wrapped_result = self._run_goal(
-            self.execute_client, goal, 'trajectory execution'
+            self.execute_client, goal, 'trajectory execution', while_running
         )
 
         if goal_handle is None:
@@ -1205,7 +1218,10 @@ class XArm7Controller(MoveItQueries, Node):
     # always produces the same motion, or the same refusal.
     # =========================================================
 
-    def execute_joint_path(self, waypoints, times, velocities, time_scale=1.0):
+    def execute_joint_path(
+        self, waypoints, times, velocities, time_scale=1.0,
+        while_running=None,
+    ):
         """
         Execute a fixed joint trajectory exactly as given.
 
@@ -1214,6 +1230,7 @@ class XArm7Controller(MoveItQueries, Node):
         runs on the real arm. The first waypoint must match the arm's
         current state within MoveIt's start tolerance (0.01 rad);
         callers get there with move_joints_linear() first.
+        while_running: work to do while the arm moves (_run_goal).
         """
         if not 0.0 < time_scale <= 1.0:
             raise ValueError('time_scale must be in (0, 1].')
@@ -1233,7 +1250,7 @@ class XArm7Controller(MoveItQueries, Node):
         robot_trajectory = RobotTrajectory()
         robot_trajectory.joint_trajectory = trajectory
 
-        return self._execute_trajectory(robot_trajectory)
+        return self._execute_trajectory(robot_trajectory, while_running)
 
     def _why_invalid(self, joints, limits=None):
         """Say why a state fails state_is_valid: a joint limit, or contacts."""

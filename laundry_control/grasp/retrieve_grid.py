@@ -548,7 +548,7 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print,
     approach -> down, one move, the claw closing as it arrives -> up
     -> back to via -> DROP, one move, carried with the claw turned on
     the way and opening as it arrives (grasp/carry.py) -> INTER. The
-    move up and out is checked while the claw closes. Always lifts
+    move up and out is checked while the arm goes down. Always lifts
     back out.
 
     prepare: transfers.prepare_go_to, or a stand-in for tests.
@@ -572,20 +572,27 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print,
 
     down = prepare(arm, via, after=[plan['approach'], plan['grab']])
     close_on_arrival, closing = carry.on_arrival(gripper.start_close)
+    planned = {}
 
-    if down is None or not down(before_end=close_on_arrival):
+    def check_lift():
+        # While the arm goes down: the way back out the way it came (so
+        # the route on starts at a baked pose), from the grab.
+        out = [plan['approach'], via_pose]
+        planned['lift'] = (
+            prepare(arm, 'drop', before=out, turn_rad=carry.turn_rad(),
+                    start=plan['grab'])
+            if drop else prepare(arm, 'inter', before=out, start=plan['grab'])
+        )
+
+    if down is None or not down(
+        before_end=close_on_arrival, while_moving=check_lift
+    ):
         log('Could not reach the grab; returning to INTER.')
         arm.move_joints_linear(plan['approach'])
         go_to(arm, 'inter')
         return False
 
-    # Checked while the claw closes. Back out the way it came, so the
-    # route on starts at a baked pose.
-    out = [plan['approach'], via_pose]
-    lift = (
-        prepare(arm, 'drop', before=out, turn_rad=carry.turn_rad())
-        if drop else prepare(arm, 'inter', before=out)
-    )
+    lift = planned.get('lift')
 
     closed = carry.wait(closing, gripper.start_close)
 
@@ -753,10 +760,13 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
     go_to / prepare: transfers.go_to and transfers.prepare_go_to (or
     stand-ins, for tests). "Route in and down" and "up and to DROP"
     are one trajectory each (prepare_go_to's after / before), and the
-    arm never stands still for their checks (2026-10-21: ~1.5 s before
-    every move, twice per grab): each is checked while the claw is
-    still moving - a grab's way up and to DROP, and the next grab's
-    way in from DROP, while the claw closes on this one.
+    arm does not stand still for their checks: each is checked while
+    the arm is still on the move before it - a grab's way up and to
+    DROP while it goes down to the grab, the next grab's way in while
+    it carries to DROP (prepare_go_to's while_moving). Checked after
+    the claw closed instead, the checks kept the arm standing 2.7-6.1
+    s at every grab on the rig (2026-10-28; 0.6-1.1 s on the fake
+    controller).
 
     The claw is told to close or open as the arm arrives (grasp/
     carry.py, on_arrival), and the laundry is carried with the claw
@@ -806,8 +816,17 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
             return False
 
         close_on_arrival, closing = carry.on_arrival(gripper.start_close)
+        planned = {}
 
-        if not descend(before_end=close_on_arrival):
+        def check_lift(grab=grab):
+            # While the arm goes down: this grab's way up and to DROP,
+            # carried turned, from the grab (where the arm is not yet).
+            planned['lift'] = prepare(
+                arm, 'drop', before=[grab['approach']], time_scale=time_scale,
+                turn_rad=carry.turn_rad(), start=grab['grab'],
+            )
+
+        if not descend(before_end=close_on_arrival, while_moving=check_lift):
             log(f'The move to {name} and down failed; lifting out and '
                 'aborting.')
 
@@ -816,19 +835,8 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
 
             return False
 
-        # Checked while the claw closes: this grab's way up and to DROP
-        # (carried turned), and the next grab's way in from DROP.
-        lift = prepare(
-            arm, 'drop', before=[grab['approach']], time_scale=time_scale,
-            turn_rad=carry.turn_rad(),
-        )
-
+        lift = planned.get('lift')
         following = grabs[index + 1] if index + 1 < len(grabs) else None
-        descend = prepare(
-            arm, following['name'], after=[following['grab']],
-            time_scale=time_scale, gripper_empty=True,
-            start=config.get_named_pose('drop'),
-        ) if following else None
 
         closed = carry.wait(closing, gripper.start_close)
 
@@ -850,10 +858,22 @@ def run(arm, gripper, grabs, go_to, prepare, time_scale=1.0, log=print):
             return False
 
         open_on_arrival, released = carry.on_arrival(gripper.start_open)
+        nxt = {}
 
-        if not lift(before_end=open_on_arrival):
+        def check_descent(following=following):
+            # While the arm carries to DROP: the next grab's way in.
+            if following is not None:
+                nxt['descend'] = prepare(
+                    arm, following['name'], after=[following['grab']],
+                    time_scale=time_scale, gripper_empty=True,
+                    start=config.get_named_pose('drop'),
+                )
+
+        if not lift(before_end=open_on_arrival, while_moving=check_descent):
             log('Failed to lift out and reach DROP; aborting.')
             return False
+
+        descend = nxt.get('descend')
 
         opening = released[0] if released else gripper.start_open()
 
