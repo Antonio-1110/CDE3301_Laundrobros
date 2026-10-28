@@ -35,18 +35,10 @@ from ..arm.transfers import go_to, prepare_go_to
 
 def rank_clusters(clusters):
     """
-    Order detected clusters: confident ones front (mouth) first, then the rest.
+    Order detected clusters for grasping: the largest first.
 
-    FRONT FIRST: laundry nearest the bucket mouth is taken first, so
-    the arm reaches deeper items through an emptied front, and the
-    front is empty by the time the end scan (which swings the elbow
-    low at the mouth) runs. Only clusters the detector is confident in
-    (most points in well-sampled cells) go by position; a weak one
-    near the mouth does not jump the queue - the rest follow, largest
-    first.
-
-    Among those, size decides: integrated intrusion VOLUME, ties
-    broken by point count. Volume rather than point count, because the scan's point
+    Size is the integrated intrusion VOLUME, ties broken by point
+    count. Volume rather than point count, because the scan's point
     density is strongly non-uniform - the helical path samples some
     parts of the bucket several times more densely than others - so
     cluster.size partly measures where an item happened to sit
@@ -55,32 +47,23 @@ def rank_clusters(clusters):
     items fairly wherever they landed. It is also the quantity a
     gripper actually cares about.
 
+    Until 2026-10-28 confident clusters went front (mouth) first,
+    whatever their size, so the front would be emptied first. On the
+    rig a 3-reading, 18 cm^3 noise cluster at the mouth jumped ahead of
+    two ~1000 cm^3 stripes of the one item in the bucket, and the arm
+    tried to reach it first (issue #20). By size, noise - always small
+    - comes last.
+
     Callers should walk this list rather than committing to its
     first entry: being the biggest cluster does not make a target
     reachable, and an unreachable one is no reason to abandon a
     scan that found other candidates.
     """
-    import numpy as np
-
-    from ..bucket import seed_cone
-
-    cone = seed_cone()
-
-    def depth_from_closed_end(cluster):
-        point = np.asarray(getattr(cluster, 'target_point', cluster.centroid))
-        return float((point - cone.axis_point) @ cone.axis_dir)
-
     def size(cluster):
         volume = cluster.volume_m3
         return (0.0 if volume != volume else volume, cluster.size)
 
-    confident = [c for c in clusters if getattr(c, 'confident', True)]
-    doubtful = [c for c in clusters if not getattr(c, 'confident', True)]
-
-    return (
-        sorted(confident, key=depth_from_closed_end, reverse=True)
-        + sorted(doubtful, key=size, reverse=True)
-    )
+    return sorted(clusters, key=size, reverse=True)
 
 
 def describe_grasp(grasp):
