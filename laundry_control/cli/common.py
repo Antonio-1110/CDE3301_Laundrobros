@@ -20,6 +20,7 @@ def add_detector_arguments(parser):
         DEFAULT_LARGE_VOLUME_M3,
         DEFAULT_MIN_CLUSTER_SIZE,
         DEFAULT_MIN_EXTENT_M,
+        DEFAULT_MIN_MAX_INTRUSION_M,
         DEFAULT_MIN_PEAK_SIGMA,
         DEFAULT_MIN_VOLUME_M3,
     )
@@ -119,6 +120,17 @@ def add_detector_arguments(parser):
         ),
     )
 
+    group.add_argument(
+        '--min-max-intrusion',
+        type=float,
+        default=DEFAULT_MIN_MAX_INTRUSION_M,
+        help=(
+            'A cluster must stand this proud of the wall (metres) at its '
+            'highest point, however large. 0 disables (default: '
+            f'{DEFAULT_MIN_MAX_INTRUSION_M}).'
+        ),
+    )
+
 
 def detect_params(args):
     """Return the detector thresholds from add_detector_arguments as kwargs."""
@@ -131,6 +143,7 @@ def detect_params(args):
         'min_volume_m3': args.min_volume,
         'min_peak_sigma': args.min_peak_sigma,
         'large_volume_m3': args.large_volume,
+        'min_max_intrusion_m': args.min_max_intrusion,
     }
 
 

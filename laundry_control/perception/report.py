@@ -80,7 +80,8 @@ def print_report(candidate_csv, candidate_count, clusters, params):
         f"min_extent={params['min_extent_m']:.3f}m, "
         f"min_volume={params['min_volume_m3']:.2e}m3, "
         f"peak>={params.get('min_peak_sigma', 0.0):g}sigma or "
-        f"volume>={params.get('large_volume_m3', 0.0) * 1e6:g}cm3)"
+        f"volume>={params.get('large_volume_m3', 0.0) * 1e6:g}cm3, "
+        f"max>={params.get('min_max_intrusion_m', 0.0) * 100:g}cm)"
     )
 
     if not clusters:

@@ -96,6 +96,7 @@ from .detect import (
     DEFAULT_K_SIGMA,
     DEFAULT_LARGE_VOLUME_M3,
     DEFAULT_MIN_EXTENT_M,
+    DEFAULT_MIN_MAX_INTRUSION_M,
     DEFAULT_MIN_PEAK_SIGMA,
     DEFAULT_MIN_VOLUME_M3,
     detect_on_points,
@@ -424,6 +425,7 @@ LEGACY_DETECTOR = {
     'grow_k_sigma': None,
     'low_confidence_min_peak_sigma': 0.0,
     'min_peak_sigma': 0.0,
+    'min_max_intrusion_m': 0.0,
 }
 
 
@@ -729,6 +731,16 @@ def add_evaluate_arguments(parser):
         ),
     )
 
+    parser.add_argument(
+        '--min-max-intrusion',
+        type=float,
+        default=DEFAULT_MIN_MAX_INTRUSION_M,
+        help=(
+            'A cluster must stand this proud of the wall (metres) at its '
+            f'highest point; 0 disables (default: {DEFAULT_MIN_MAX_INTRUSION_M}).'
+        ),
+    )
+
 
 def run_evaluate(args):
     """Run `laundry evaluate`; returns a process exit code."""
@@ -777,6 +789,7 @@ def run_evaluate(args):
         'min_extent_m': args.min_extent,
         'min_peak_sigma': args.min_peak_sigma,
         'large_volume_m3': args.large_volume,
+        'min_max_intrusion_m': args.min_max_intrusion,
     }
 
     if args.legacy:

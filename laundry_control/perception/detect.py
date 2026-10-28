@@ -185,6 +185,17 @@ DEFAULT_LOW_CONFIDENCE_MIN_PEAK_SIGMA = 7.0
 DEFAULT_MIN_PEAK_SIGMA = 5.5
 DEFAULT_LARGE_VOLUME_M3 = 70.0e-6
 
+# And every cluster must stand at least this proud of the wall at its
+# highest point, however large. On the rig (2026-10-28, baselines of
+# 2026-10-22) an empty drum gave thin films 22-30 cm across, only
+# 9-12 mm proud at most, which the large-volume clause let through
+# (86-146 cm^3) - a clear never ended. Laundry in today's scans stood
+# 33-125 mm proud; a sock lying flat on the wall 16-21 mm, 34 at its
+# fold. The synthetic flat cloth (~8 mm) falls under it (see above:
+# 13 mm alone kept 12.6%), so a lone flat cloth is no longer found.
+# 0 disables it.
+DEFAULT_MIN_MAX_INTRUSION_M = 0.015
+
 # Grasp point = mean of the cluster's top-quartile-intrusion points.
 # On synthetic items its median distance to the item's apex was 1.5cm
 # against 2.6cm for the plain centroid (which is dragged toward the
@@ -774,6 +785,7 @@ def detect_on_points(
     ),
     min_peak_sigma: float = DEFAULT_MIN_PEAK_SIGMA,
     large_volume_m3: float = DEFAULT_LARGE_VOLUME_M3,
+    min_max_intrusion_m: float = DEFAULT_MIN_MAX_INTRUSION_M,
 ):
     """
     Run the detector over an already-loaded point array.
@@ -790,7 +802,9 @@ def detect_on_points(
     detector exactly. Low-confidence clusters must also peak at
     low_confidence_min_peak_sigma (0 disables the gate). Every cluster
     must peak at min_peak_sigma OR have large_volume_m3 of volume
-    (strong or large; 0 disables it, see DEFAULT_MIN_PEAK_SIGMA).
+    (strong or large; 0 disables it, see DEFAULT_MIN_PEAK_SIGMA), and
+    stand min_max_intrusion_m proud of the wall at its highest point
+    (0 disables it, see DEFAULT_MIN_MAX_INTRUSION_M).
 
     This is the one implementation of the detector; detect_laundry()
     wraps it for CSV input. Evaluation calls it directly because it
@@ -851,6 +865,7 @@ def detect_on_points(
             or not summary.peak_sigma < low_confidence_min_peak_sigma
         )
         and strong_or_large(summary, min_peak_sigma, large_volume_m3)
+        and not summary.max_intrusion_m < min_max_intrusion_m
     ]
 
     kept.sort(key=lambda summary: summary.volume_m3, reverse=True)
@@ -870,6 +885,7 @@ def detect_laundry(
     surface: Optional[BaselineSurface] = None,
     min_peak_sigma: float = DEFAULT_MIN_PEAK_SIGMA,
     large_volume_m3: float = DEFAULT_LARGE_VOLUME_M3,
+    min_max_intrusion_m: float = DEFAULT_MIN_MAX_INTRUSION_M,
 ) -> List[ClusterSummary]:
     """
     Detect laundry in a candidate scan CSV, end to end.
@@ -916,6 +932,7 @@ def detect_laundry(
         min_volume_m3=min_volume_m3,
         min_peak_sigma=min_peak_sigma,
         large_volume_m3=large_volume_m3,
+        min_max_intrusion_m=min_max_intrusion_m,
     )
 
     return clusters
