@@ -52,6 +52,7 @@ import datetime
 import os
 
 from geometry_msgs.msg import Pose
+
 import numpy as np
 import yaml
 
@@ -548,8 +549,8 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print,
     approach -> down, one move, the claw closing as it arrives -> up
     -> back to via -> DROP, one move, carried with the claw turned on
     the way and opening as it arrives (grasp/carry.py) -> INTER. The
-    move up and out is checked while the arm goes down. Always lifts
-    back out.
+    move up and out is checked while the arm goes down, and the way
+    back to INTER while it carries. Always lifts back out.
 
     prepare: transfers.prepare_go_to, or a stand-in for tests.
     """
@@ -613,8 +614,17 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print,
         return lift()
 
     open_on_arrival, opening = carry.on_arrival(gripper.start_open)
+    back = {}
 
-    if not lift(before_end=open_on_arrival):
+    def check_return():
+        # While the arm carries: the way back to INTER once the claw let
+        # go (it stood ~0.6 s at DROP for it on the rig, 2026-10-28).
+        back['inter'] = prepare(
+            arm, 'inter', gripper_empty=True,
+            start=config.get_named_pose('drop'),
+        )
+
+    if not lift(before_end=open_on_arrival, while_moving=check_return):
         log('Failed to reach DROP.')
         return False
 
@@ -623,8 +633,12 @@ def run_floor_grab(arm, gripper, plan, go_to, drop=True, log=print,
     if not released:
         log('Gripper did not confirm it opened at DROP; the item may still '
             'be held.')
+        return go_to(arm, 'inter') and released
 
-    return go_to(arm, 'inter', gripper_empty=released) and released
+    if back.get('inter') is not None:
+        return back['inter']()
+
+    return go_to(arm, 'inter', gripper_empty=True)
 
 
 def save(grabs, path=None, baked_on='', targets=None):

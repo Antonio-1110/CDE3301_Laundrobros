@@ -104,3 +104,35 @@ def test_stored_direct_routes_load_while_their_poses_hold(tmp_path):
     # Keeping only one, without a timing, removes the other.
     transfers.save_timings(path, {}, direct={'grab_01>drop_return': None})
     assert set(transfers._read(path)['direct']) == {'grab_01>drop_return'}
+
+
+class _FkArm:
+    """compute_fk for a claw `metres_per_rad` from the base on J1 alone."""
+
+    def __init__(self, metres_per_rad):
+        self.radius = metres_per_rad
+
+    def compute_fk(self, joints):
+        angle = joints[0]
+        return (
+            np.array([self.radius * np.cos(angle),
+                      self.radius * np.sin(angle), 0.0]),
+            np.array([0.0, 0.0, np.sin(angle / 2.0), np.cos(angle / 2.0)]),
+        )
+
+
+def test_a_straight_leg_is_slowed_to_keep_the_claw_under_its_cap():
+    from laundry_control.arm.joint_path import densify
+
+    states = densify([np.zeros(7), np.r_[1.5, np.zeros(6)]])
+
+    near = transfers._time_straight(_FkArm(0.05), states)
+    far = transfers._time_straight(_FkArm(2.0), states)
+    unknown = transfers._time_straight(object(), states)
+
+    assert near[2] < config.TRANSFER_MAX_TIP_SPEED_M_S
+    assert far[2] == config.TRANSFER_MAX_TIP_SPEED_M_S
+    assert far[0][-1] > near[0][-1]
+    # Without forward kinematics: timed as before (min-jerk, 45 deg/s).
+    assert unknown[2] is None
+    assert unknown[0][-1] > near[0][-1]

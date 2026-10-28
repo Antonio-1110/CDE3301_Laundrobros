@@ -119,7 +119,11 @@ RETRIEVE_GRID = {
 # on a 20 cm pile the claw closed 15 cm above the floor.
 DETECTED_GRAB_DIG = {
     'max_sink_m': 0.15,
-    'wall_clearance_m': 0.02,
+    # 1 cm (was 2): a sock lying flat on the wall stands 1.6-2.1 cm
+    # proud, so at 2 cm the claw closed over it (rig, 2026-10-28; the
+    # fitted wall agreed with the configured one to 2 mm). Toward
+    # ~0.5 cm once GRIPPER_OFFSET_Z is measured on the rig.
+    'wall_clearance_m': 0.01,
     'resolution_m': 0.01,
 }
 

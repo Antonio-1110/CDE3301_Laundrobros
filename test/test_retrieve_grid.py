@@ -245,8 +245,11 @@ def test_a_detected_grab_is_two_moves_with_the_claw_on_arrival():
         ('check', 'drop', ((1.0,) * 7, inter), False, 'turned', 'from',
          (2.0,) * 7),
         ('close',), ('closed',),
-        ('move', 'drop'), ('open',), ('opened',),
-        ('go_to', 'inter', True),
+        ('move', 'drop'),
+        # The way back is checked while the arm carries.
+        ('check', 'inter', (), True, 'from', DROP_POSE),
+        ('open',), ('opened',),
+        ('move', 'inter'),
     ]
 
 

@@ -377,14 +377,14 @@ Other named poses (deg): HOME (90, 0, 0, 0, 0, 0, 0); DROP (5.8, 85.9, −177.2,
 
 ### 3.4 Grasp planning for detected items
 
-`grasp/execute.plan_grasp` walks the detected clusters best-first (`rank_clusters`: confident clusters nearest the mouth first, then the rest by volume) and takes the first one with a reachable grasp:
+`grasp/execute.plan_grasp` walks the detected clusters best-first (`rank_clusters`: largest integrated volume first, ties by point count; mouth-first until 2026-10-28, which let a 3-reading noise cluster at the mouth go first) and takes the first one with a reachable grasp:
 
 1. **Floor grab** (`retrieve_grid.plan_floor_grab`): IK over the item, a straight descent, approached from the nearest baked `grab_NN` pose. Used for items near the floor's lowest line.
 2. **Cartesian reach** (`grasp/plan.compute_grasp_target`): a straight tool-axis reach from INTER, checked with `/compute_cartesian_path`. Used for items away from the floor.
 
 The aim point is the mean of the cluster's top-quartile-intrusion points (`GRASP_POINT_QUANTILE = 75.0`, `perception/detect.py`), which is closer to the item's apex than the centroid (median 1.5 cm vs 2.6 cm in simulation).
 
-**How deep the claw digs** (`retrieve_grid.deepest_grab`, `config.DETECTED_GRAB_DIG`). The ToF sees only the pile's top, so the grab is sunk into it as deep as is **collision-free**. For each claw tilt, heights are tried from the deepest allowed upward: at least `wall_clearance_m` (2 cm) off the bucket wall and at most `max_sink_m` (15 cm) below the sensed top. The first height whose grab, approach and descent pass IK and MoveIt's collision checks wins. The approach starts 3 cm above the pile where it fits, so the digging is a straight descent. On the fake controller (36 spots) the claw went 9.5 cm into the pile on average, against 4.3 cm with the earlier rule (half the pile's height, at most 5 cm).
+**How deep the claw digs** (`retrieve_grid.deepest_grab`, `config.DETECTED_GRAB_DIG`). The ToF sees only the pile's top, so the grab is sunk into it as deep as is **collision-free**. For each claw tilt, heights are tried from the deepest allowed upward: at least `wall_clearance_m` (1 cm; 2 cm until 2026-10-28) off the bucket wall and at most `max_sink_m` (15 cm) below the sensed top. The first height whose grab, approach and descent pass IK and MoveIt's collision checks wins. The approach starts 3 cm above the pile where it fits, so the digging is a straight descent. On the fake controller (36 spots) the claw went 9.5 cm into the pile on average, against 4.3 cm with the earlier rule (half the pile's height, at most 5 cm).
 
 **Carrying with the claw turned** (`grasp/carry.py`, `config.CARRY_J7_TURN_DEG` = 90): after closing, J7 turns +90° during the move to DROP and back before opening, so the claw hooks the item instead of relying on grip force alone (issue #21). The turn is superimposed on the baked move without stopping (S-curve ramps of 1.3–1.7 s, J7 within 0.9 × its limits). The turned states are collision-checked, and the claw is carried unturned if they collide.
 
