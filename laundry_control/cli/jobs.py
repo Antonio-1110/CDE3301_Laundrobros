@@ -72,6 +72,7 @@ def cmd_run(args):
             dry_run=args.dry_run,
             coarse_steps=coarse_steps,
             bottom_check=args.bottom_check,
+            search=args.search,
         )
 
     return 0 if ok else 1
@@ -103,6 +104,7 @@ def cmd_clear(args):
             time_scale=args.speed,
             coarse_steps=coarse_steps,
             bottom_check=args.bottom_check,
+            search=args.search,
         )
 
     return 0 if ok else 1

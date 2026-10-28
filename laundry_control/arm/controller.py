@@ -313,6 +313,26 @@ class XArm7Controller(MoveItQueries, Node):
 
         return self._loaded_pipelines
 
+    # Per-motion detail (joint targets, Cartesian path fractions, the J7
+    # twist, "completed") goes to the log at INFO, except while
+    # quiet_motion is set - a scan sets it for its own duration and
+    # prints its own progress instead (scan.pattern). DEBUG then.
+    quiet_motion = False
+
+    # The motion now (or last) executed: started (time.monotonic) and
+    # planned duration, s. Set by _execute_trajectory.
+    motion_started = 0.0
+    motion_duration = 0.0
+
+    def _detail(self, message, **kwargs):
+        """Log per-motion detail: INFO, or DEBUG while quiet_motion."""
+        logger = self.get_logger()
+        (logger.debug if self.quiet_motion else logger.info)(message, **kwargs)
+
+    def _detail_logger(self):
+        """Return a logger whose info() is _detail (warnings unchanged)."""
+        return _DetailLogger(self)
+
     def get_current_joints(self, timeout=2.0):
         """
         Return current joints in JOINT_NAMES order.
@@ -772,7 +792,7 @@ class XArm7Controller(MoveItQueries, Node):
             replan_attempts
         )
 
-        self.get_logger().info(
+        self._detail(
             f'Joint-space target ({pipeline_id}/{planner_id}):'
         )
 
@@ -781,7 +801,7 @@ class XArm7Controller(MoveItQueries, Node):
             joint_angles,
         ):
 
-            self.get_logger().info(
+            self._detail(
                 f'  {name}: '
                 f'{math.degrees(angle):+.2f} deg'
             )
@@ -833,7 +853,7 @@ class XArm7Controller(MoveItQueries, Node):
 
         if error_code == 1:
 
-            self.get_logger().info(
+            self._detail(
                 'Joint movement completed successfully.'
             )
 
@@ -883,21 +903,21 @@ class XArm7Controller(MoveItQueries, Node):
             delta_deg
         )
 
-        self.get_logger().info(
+        self._detail(
             f'{joint_name}-only relative movement:'
         )
 
-        self.get_logger().info(
+        self._detail(
             f'  current: '
             f'{math.degrees(old_angle):+.2f} deg'
         )
 
-        self.get_logger().info(
+        self._detail(
             f'  delta:   '
             f'{delta_deg:+.2f} deg'
         )
 
-        self.get_logger().info(
+        self._detail(
             f'  target:  '
             f'{math.degrees(target[joint_index]):+.2f} deg'
         )
@@ -1009,11 +1029,11 @@ class XArm7Controller(MoveItQueries, Node):
             acceleration
         )
 
-        self.get_logger().info(
+        self._detail(
             'Computing Cartesian path...'
         )
 
-        self.get_logger().info(
+        self._detail(
             f'  target: '
             f'({target_pose.position.x:.4f}, '
             f'{target_pose.position.y:.4f}, '
@@ -1036,7 +1056,7 @@ class XArm7Controller(MoveItQueries, Node):
 
             return None, 0.0
 
-        self.get_logger().info(
+        self._detail(
             f'Cartesian path fraction: '
             f'{response.fraction * 100.0:.1f}%'
         )
@@ -1154,6 +1174,14 @@ class XArm7Controller(MoveItQueries, Node):
         trajectory,
         while_running=None,
     ):
+        # For progress reports (scan.pattern): when the motion now
+        # being executed started, and how long it is planned to take.
+        points = trajectory.joint_trajectory.points
+        last = points[-1].time_from_start if points else None
+        self.motion_started = time.monotonic()
+        self.motion_duration = (
+            0.0 if last is None else last.sec + last.nanosec * 1e-9
+        )
 
         goal = ExecuteTrajectory.Goal()
 
@@ -1194,7 +1222,7 @@ class XArm7Controller(MoveItQueries, Node):
 
         if error_code == 1:
 
-            self.get_logger().info(
+            self._detail(
                 'Trajectory completed successfully.'
             )
 
@@ -1504,7 +1532,7 @@ class XArm7Controller(MoveItQueries, Node):
             return False
 
         success = add_joint7_twist(
-            trajectory, twist_deg, self.get_logger()
+            trajectory, twist_deg, self._detail_logger()
         )
 
         if not success:
@@ -1590,7 +1618,7 @@ class XArm7Controller(MoveItQueries, Node):
                 return False
 
             if not add_joint7_twist(
-                trajectory, twist_deg, self.get_logger()
+                trajectory, twist_deg, self._detail_logger()
             ):
                 return False
 
@@ -1603,3 +1631,16 @@ class XArm7Controller(MoveItQueries, Node):
         return self._execute_trajectory(
             join_trajectories(planned)
         )
+
+
+class _DetailLogger:
+    """A logger whose info() follows XArm7Controller.quiet_motion."""
+
+    def __init__(self, arm):
+        self._arm = arm
+
+    def info(self, message, **kwargs):
+        self._arm._detail(message, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._arm.get_logger(), name)
