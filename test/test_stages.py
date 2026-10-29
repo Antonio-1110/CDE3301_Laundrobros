@@ -364,6 +364,7 @@ def test_cli_detect_params_reach_detector_names():
     assert set(params) == {
         'k_sigma', 'abs_floor_m', 'cluster_radius_m', 'min_cluster_size',
         'min_extent_m', 'min_volume_m3', 'min_peak_sigma', 'large_volume_m3',
+        'min_max_intrusion_m',
     }
 
     # Every one of them is a keyword detect_on_points accepts.

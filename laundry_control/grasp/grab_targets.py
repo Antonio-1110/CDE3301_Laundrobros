@@ -95,6 +95,10 @@ def clean(target):
 
         result[field] = value
 
+    # The sweep layer a generated grab belongs to (grasp/pile_layers.py).
+    if target.get('layer') is not None:
+        result['layer'] = int(target['layer'])
+
     return result
 
 

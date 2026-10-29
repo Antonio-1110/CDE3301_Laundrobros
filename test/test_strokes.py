@@ -62,10 +62,15 @@ def test_coarse_steps_scale_the_stroke_speed():
     assert default['velocity'] == pytest.approx(pattern.DEFAULT_VELOCITY)
     assert default['acceleration'] == pytest.approx(pattern.DEFAULT_ACCELERATION)
     assert stroke_plan(0.42, 0.06, 0.12) == (3, pytest.approx(0.12))
-    assert coarse['velocity'] == pytest.approx(0.12)
-    assert coarse['acceleration'] == pytest.approx(0.12)
+    assert coarse['velocity'] == pytest.approx(4 * pattern.DEFAULT_VELOCITY)
+    assert coarse['acceleration'] == pytest.approx(
+        4 * pattern.DEFAULT_ACCELERATION
+    )
     assert given['velocity'] == pytest.approx(0.05)
-    assert given['acceleration'] == pytest.approx(0.12)
+    # Only the velocity was given: the acceleration still scales.
+    assert given['acceleration'] == pytest.approx(
+        4 * pattern.DEFAULT_ACCELERATION
+    )
 
 
 def test_baselines_are_never_coarse(capsys):

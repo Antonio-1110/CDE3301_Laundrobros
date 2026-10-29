@@ -30,8 +30,8 @@ approach is within WRIST_MARGIN_M of the wall (it probably will not
 fit), green reachable, red not.
 
 The bucket is drawn as a green wireframe, and the laundry's level top
-at --fill (default: config.PILE's top_height_m, so as full as the sweep
-is generated for) as a tan outline: what the sweep aims into. Both
+at --fill (default: ~5 cm over config.PILE's top layer, as full as the
+sweep reaches into) as a tan outline: what the sweep aims into. Both
 are lines, so they do not catch clicks; switch off RViz's solid
 Obstacles (planning scene) display while dragging, or the bucket mesh
 takes the clicks meant for the grabs.
@@ -753,7 +753,7 @@ def main(argv=None):
     parser.add_argument(
         '--fill', type=float, default=None,
         help='How full the drum is shown, as a fraction of its height '
-             "(default: config.PILE's top_height_m).",
+             "(default: ~5 cm over config.PILE's top layer).",
     )
     parser.add_argument(
         '--file', default=None,

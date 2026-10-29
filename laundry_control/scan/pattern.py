@@ -16,8 +16,10 @@ them.
 """
 
 import argparse
+import contextlib
 import math
 import os
+import time
 
 import numpy as np
 import rclpy
@@ -26,7 +28,12 @@ from scipy.spatial.transform import Rotation
 from . import segments
 from .strokes import MAX_STEP_M, stroke_plan
 from .. import config
+from ..arm.joint_path import MIN_JERK_PEAK
 from ..arm.transfers import entry_joints, go_to
+
+# A min-jerk move's peak acceleration, as a multiple of distance /
+# duration^2 (10 / sqrt(3)).
+MIN_JERK_PEAK_ACCELERATION = 10.0 / math.sqrt(3.0)
 
 # Defaults for every scan parameter, shared by scan() and the CLI so
 # the two can never drift apart. Baselines and detection scans must
@@ -70,8 +77,19 @@ DEFAULT_SWEEP_DEG = 150.0
 # scaling would just take longer per stroke and save no time. The CLI
 # therefore scales both with the step (scaled_stroke_speed): 12 cm at
 # 0.12 sweeps J7 as fast as 3 cm at 0.03, in a quarter of the strokes.
-DEFAULT_VELOCITY = 0.03
-DEFAULT_ACCELERATION = 0.03
+#
+# 2026-10-28: 0.045 (was 0.03), 1.5x faster, matched to the ESP32's
+# ToF rate: a reading every ~33 ms (TOF_TIMING_BUDGET_US 33000, ~30 Hz)
+# against the 20 Hz the 0.03 was chosen for, so each J7 sweep still
+# gets as many readings. Each reading now smears over a 1.5x wider arc
+# of its window, so the baselines must be RE-COLLECTED at this speed.
+# With the Pi's own I2C sensor (20 Hz, tof_source:=i2c) a sweep gets a
+# third fewer readings: pass --velocity 0.03 --acceleration 0.03.
+# 0.045 put the J7 twist just over J7's limits (127 deg/s against 123,
+# 10.4 rad/s^2 against 10), so every pass was slowed 1.04x anyway, with
+# a warning: 0.043 is that speed without it.
+DEFAULT_VELOCITY = 0.043
+DEFAULT_ACCELERATION = 0.043
 
 
 def scaled_stroke_speed(step, base=DEFAULT_VELOCITY):
@@ -87,9 +105,19 @@ def scaled_stroke_speed(step, base=DEFAULT_VELOCITY):
 
 DEFAULT_ROTATION_VELOCITY = 0.5
 DEFAULT_ROTATION_ACCELERATION = 0.5
+
+# The scan's own joint moves around the strokes - in with the J7
+# offset, the turnaround, back out to INTER - are mostly J7 turning,
+# so they run at this fraction of J7's limits (_ScanRun.
+# _quick_joint_move) instead of the 45 deg/s of a general straight
+# joint move (config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S): the
+# 150 deg turnaround took 7.3 s on the rig (2026-10-28), ~2.5 s now.
+QUICK_MOVE_J7_FRACTION = 0.9
 DEFAULT_CARTESIAN_STEP_M = 0.005
 DEFAULT_PAUSE_SEC = 0.0
 DEFAULT_SAVE_INTERVAL_SEC = 5.0
+# How often a scan logs its progress (_ScanRun.reporting), seconds.
+PROGRESS_PERIOD_SEC = 5.0
 
 # How the closed end is covered: 'precession' (the FULL scan, baked -
 # see scan/endcap.py), 'none' (the QUICK scan, the CLI default: no end
@@ -138,6 +166,40 @@ DEFAULT_END_SCAN = 'none'
 # the 3 cm pass still finds, for ~30 s more than scanning dense only.
 DEFAULT_COARSE_STEPS_M = (0.12,)
 
+# How `run` / `clear` search with quick scans (pipeline.scan_and_detect):
+#
+#   'in-out' (default since 2026-10-28): ONE trip into the bucket. The
+#       coarsest step's strokes on the way in, a detection at the
+#       bottom, then - nothing found - the end scan right there (the
+#       arm is already at its pivot) and the scan's own step on the
+#       way out; a CONFIDENT find (CONFIDENT_MIN_*) - out on the
+#       coarse strokes too, no end scan; a weaker find - out at the
+#       scan's own step to confirm and aim, no end scan. Empty bucket: ~105 s against
+#       ~175 s for the ladder (estimates from simulated stroke and
+#       end-scan times); the bucket is called empty after the dense
+#       outward strokes, the coarse inward ones and the end scan.
+#       Unlike the ladder's dense pass, the dense strokes run one way
+#       only: they cross nothing on the way in, so the wall between
+#       their helix turns is seen by the coarse strokes alone - check
+#       small-item recall with `laundry evaluate` before trusting an
+#       "empty" from it.
+#   'ladder' (2026-10-26): a whole coarse pass, then a whole pass at
+#       the scan's step, then the end scan alone (pipeline.scan_and_detect).
+SEARCHES = ('in-out', 'ladder')
+DEFAULT_SEARCH = 'in-out'
+
+# In-out search, at the bottom: a find this big AND this strong (and
+# in well-sampled cells, ClusterSummary.confident) is CONFIDENT, and
+# the arm comes out on the coarse strokes too - a coarse pass in and
+# out aims to ~1.2-1.6 cm (issue #10, offline), inside the claw's
+# ~3 cm. A weaker find comes out dense, to confirm and aim. Chosen
+# from: the rig's laundry (2026-10-21) 2400 cm^3 at 45 sigma; synthetic
+# towels a median ~1600 cm^3; socks a median ~120 cm^3; false clusters
+# at most 61 cm^3 and 5 sigma (issue #22). Tune them on real in-out
+# scans.
+CONFIDENT_MIN_VOLUME_M3 = 500.0e-6
+CONFIDENT_MIN_PEAK_SIGMA = 10.0
+
 
 def scan(
     arm,
@@ -159,6 +221,10 @@ def scan(
     start_inside=False,
     stay_inside=False,
     check=None,
+    outward_step=None,
+    outward_velocity=None,
+    outward_acceleration=None,
+    outward_when_found=False,
 ):
     """
     Perform the complete xArm7 scanning sequence.
@@ -270,6 +336,23 @@ def scan(
         stops: no end scan, no outward strokes, straight out to INTER
         (even with stay_inside). None never stops.
 
+    outward_step:
+        The outward strokes' largest spacing (default: step), so a
+        scan can go in coarse and come out dense (the pipeline's
+        in-out search). Spread evenly like the inward ones.
+
+    outward_velocity, outward_acceleration:
+        The outward strokes' speed scaling (default: velocity and
+        acceleration); scale it with outward_step as
+        scaled_stroke_speed does.
+
+    outward_when_found:
+        With check: when it finds laundry, skip the end scan but still
+        come out on the outward strokes (they sharpen the aim)
+        instead of straight out. check() may return a step (metres)
+        instead of True: come out at that step (with the speed
+        scaled to it) instead of outward_step.
+
 
     Notes
     -----
@@ -337,6 +420,9 @@ def scan(
 
     try:
         number_of_steps, step_used = stroke_plan(depth, entry_depth, step)
+        out_steps, out_step_used = stroke_plan(
+            depth, entry_depth, outward_step or step
+        )
     except ValueError as exc:
         arm.get_logger().error(str(exc))
         return False
@@ -357,42 +443,64 @@ def scan(
         save_interval=save_interval,
         start_inside=start_inside,
         stay_inside=stay_inside,
+        outward=(
+            out_steps, out_step_used,
+            velocity if outward_velocity is None else outward_velocity,
+            acceleration if outward_acceleration is None
+            else outward_acceleration,
+        ),
     )
 
-    run.log_configuration(depth, max_step=step)
+    run.log_configuration(depth, max_step=step, end_scan=end_scan)
 
-    # The sequence (see Notes above); each step logs its own failure.
-    if not (
-        run.enter()                                     # 1, 1b
-        and run.initial_offset()                        # 2
-        and run.strokes(inward=True)                    # 3
-    ):
-        return False
-
-    if check is not None:
-        stop = run.check_at_bottom(check)               # 3b
-
-        if stop is None:
+    def sequence(end_scan):
+        # The sequence (see Notes above); each step logs its own failure.
+        if not (
+            run.enter()                                     # 1, 1b
+            and run.initial_offset()                        # 2
+            and run.strokes(inward=True)                    # 3
+        ):
             return False
 
-        if stop:
-            return (
-                run.stop_and_save()
-                and run.leave(stay_inside=False)
-                and run.report()
-            )
+        if check is not None:
+            stop = run.check_at_bottom(check)               # 3b
 
-    phase_twist = run.end_scan(
-        end_scan, end_plan, depth, end_scan_time_scale
-    )                                                   # 4
+            if stop is None:
+                return False
 
-    return (
-        phase_twist is not None
-        and run.strokes(inward=False, after_phase_twist=phase_twist)  # 5
-        and run.stop_and_save()                         # 6
-        and run.leave()                                 # 7
-        and run.report()                                # 8
-    )
+            if stop and not outward_when_found:
+                return (
+                    run.stop_and_save()
+                    and run.leave(stay_inside=False)
+                    and run.report()
+                )
+
+            if stop:
+                # Found: no end scan (it only certifies an empty bucket);
+                # turn round and come out on the outward strokes, which
+                # sharpen the inward strokes' aim - at the step check()
+                # returned, if it returned one (a confident find needs no
+                # dense strokes to aim).
+                end_scan = 'none'
+
+                if not isinstance(stop, bool):
+                    if not run.set_outward_step(float(stop), depth):
+                        return False
+
+        phase_twist = run.end_scan(
+            end_scan, end_plan, depth, end_scan_time_scale
+        )                                                   # 4
+
+        return (
+            phase_twist is not None
+            and run.strokes(inward=False, after_phase_twist=phase_twist)  # 5
+            and run.stop_and_save()                         # 6
+            and run.leave()                                 # 7
+            and run.report()                                # 8
+        )
+
+    with run.reporting():
+        return sequence(end_scan)
 
 
 def at_entry_pose(arm, entry_depth):
@@ -475,7 +583,7 @@ class _ScanRun:
         self, arm, recorder, number_of_steps, step, sweep_deg, entry_depth,
         velocity, acceleration, rotation_velocity, rotation_acceleration,
         cartesian_step, pause, save_interval, start_inside=False,
-        stay_inside=False,
+        stay_inside=False, outward=None,
     ):
         self.arm = arm
         self.log = arm.get_logger()
@@ -496,16 +604,88 @@ class _ScanRun:
         self.save_interval = save_interval
         self.start_inside = start_inside
         self.stay_inside = stay_inside
+        # The outward strokes: (count, step, velocity, acceleration).
+        self.outward = outward or (
+            number_of_steps, step, velocity, acceleration
+        )
 
         # Nominal insertion depth, for the log only.
         self.current_depth = 0.0
         self.last_save_time = arm.get_clock().now()
 
+        # Progress (reporting()): the phase now, and when it started.
+        self.phase = 'starting'
+        self.started = self.phase_started = time.monotonic()
+        self.pass_info = None
+
+        # enter() turned J7 to the initial offset on its way in.
+        self.offset_done = False
+
+    def set_phase(self, phase):
+        """Log a new phase of the scan, and time it for the progress line."""
+        now = time.monotonic()
+        self.phase, self.phase_started = phase, now
+        self.pass_info = None
+        self.log.info(f'[scan {now - self.started:5.1f} s] {phase}')
+
+    def _progress(self):
+        now = time.monotonic()
+        line = (
+            f'[scan {now - self.started:5.1f} s] ... {self.phase} '
+            f'({now - self.phase_started:.0f} s)'
+        )
+
+        # During a pass of strokes (one trajectory): how far along it
+        # is, from the motion's planned duration.
+        started = getattr(self.arm, 'motion_started', 0.0)
+        duration = getattr(self.arm, 'motion_duration', 0.0)
+
+        if (
+            self.pass_info is not None and duration > 0.0
+            and started >= self.phase_started
+        ):
+            start, count, step, inward = self.pass_info
+            done = min(max((now - started) / duration, 0.0), 1.0)
+            depth = start + (1.0 if inward else -1.0) * done * count * step
+            line += (
+                f': stroke {min(int(done * count) + 1, count)}/{count}, '
+                f'~{depth:.2f} m, ~{max(duration - (now - started), 0.0):.0f} '
+                's left in the pass'
+            )
+
+        self.log.info(line)
+
+    @contextlib.contextmanager
+    def reporting(self, period_sec=PROGRESS_PERIOD_SEC):
+        """
+        Quiet the per-motion detail and log progress every period_sec.
+
+        The arm's per-stroke lines (joint targets, Cartesian path
+        fractions, the J7 twist) go to DEBUG for the scan's duration
+        (XArm7Controller.quiet_motion); a progress line replaces them.
+        The timer fires whenever the node spins - while it waits on
+        each motion.
+        """
+        quiet_before = getattr(self.arm, 'quiet_motion', False)
+        self.arm.quiet_motion = True
+        timer = (
+            self.arm.create_timer(period_sec, self._progress)
+            if period_sec > 0 else None
+        )
+
+        try:
+            yield
+        finally:
+            if timer is not None:
+                timer.cancel()
+                self.arm.destroy_timer(timer)
+            self.arm.quiet_motion = quiet_before
+
     # ---------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------
 
-    def log_configuration(self, depth, max_step):
+    def log_configuration(self, depth, max_step, end_scan='?'):
         """Log the scan's parameters before anything moves."""
         for line in (
             '========================================',
@@ -514,7 +694,12 @@ class _ScanRun:
             f'Entry depth      : {self.entry_depth:.3f} m',
             f'Linear step      : {self.step:.4f} m (at most {max_step:.3f})',
             f'Number of strokes: {self.number_of_steps}',
+            f'Outward          : {self.outward[0]} strokes of '
+            f'{self.outward[1]:.4f} m',
             f'Wrist sweep      : {self.sweep_deg:.1f} deg',
+            f'Stroke speed     : {self.velocity:.3f} in, '
+            f'{self.outward[2]:.3f} out (MoveIt scaling)',
+            f'End scan         : {end_scan}',
             f'Initial offset   : {-self.half_sweep:+.1f} deg',
             '========================================',
         ):
@@ -577,6 +762,39 @@ class _ScanRun:
             self.recorder.save_async()
             self.last_save_time = now
 
+    def _quick_joint_move(self, target):
+        """
+        Move on a straight joint line to target, as fast as J7 allows.
+
+        For the moves around the strokes, where J7 does most of the
+        turning: timed so the fastest joint peaks at QUICK_MOVE_J7_
+        FRACTION of J7's speed AND acceleration limits (min-jerk peaks
+        at 1.875 x the mean speed, 5.77 x distance / duration^2).
+        Collision-checked like any move_joints_linear; False if refused.
+        """
+        current = self.arm.get_current_joints()
+
+        if current is None:
+            return False
+
+        distance = float(np.abs(np.subtract(target, current)).max())
+
+        if distance < 1e-4:
+            return True
+
+        velocity = QUICK_MOVE_J7_FRACTION * config.JOINT7_MAX_VELOCITY_RAD_S
+        acceleration = (
+            QUICK_MOVE_J7_FRACTION * config.JOINT7_MAX_ACCELERATION_RAD_S2
+        )
+        duration = max(
+            MIN_JERK_PEAK * distance / velocity,
+            math.sqrt(MIN_JERK_PEAK_ACCELERATION * distance / acceleration),
+        )
+
+        return self.arm.move_joints_linear(
+            list(target), max_velocity_rad_s=MIN_JERK_PEAK * distance / duration,
+        )
+
     def _tool_z(self, distance):
         """Move straight along tool Z, unrecorded and without twist."""
         return self.arm.move_tool_z(
@@ -601,6 +819,11 @@ class _ScanRun:
 
     def enter(self):
         """Go to INTER, move straight in by entry_depth, start recording."""
+        self.set_phase(
+            'entering' if not self.start_inside
+            else 'starting at the entry pose'
+        )
+
         if not self.set_recording(False):
             return False
 
@@ -624,13 +847,26 @@ class _ScanRun:
 
             self.wait()
 
-        # 1b. Straight in along tool Z, J7 unchanged.
+        # 1b. In by entry_depth. Where it is clear, one move turning J7
+        # to the initial offset on the way (2. is then done): ~1.3 s
+        # against ~4.2 s straight in and then turning (rig,
+        # 2026-10-28). Else straight in along tool Z, J7 unchanged.
         if self.entry_depth > 0.0 and not self.start_inside:
             self.log.info(
                 f'========== ENTRY ({self.entry_depth:.3f} m) =========='
             )
+            target = entry_joints(self.arm, self.entry_depth)
 
-            if not self._tool_z(self.entry_depth):
+            if target is not None:
+                target = list(target)
+                target[6] -= math.radians(self.half_sweep)
+
+            if target is not None and self._quick_joint_move(target):
+                self.log.info(
+                    f'In with J7 turned to {-self.half_sweep:+.0f} deg.'
+                )
+                self.offset_done = True
+            elif not self._tool_z(self.entry_depth):
                 self.log.error('Straight entry into the bucket failed.')
                 return False
 
@@ -659,9 +895,24 @@ class _ScanRun:
     # ---------------------------------------------------------
 
     def initial_offset(self):
-        """Turn J7 to -half the sweep, on the spot."""
+        """Turn J7 to -half the sweep, on the spot (unless enter() did)."""
+        if self.offset_done:
+            return True
+
+        self.set_phase(f'turning J7 to {-self.half_sweep:+.0f} deg')
+
         self.log.info('========== INITIAL OFFSET ==========')
         self.log.info(f'Stationary J7 rotation: {-self.half_sweep:+.1f} deg')
+
+        current = self.arm.get_current_joints()
+
+        if current is not None:
+            turned = list(current)
+            turned[6] -= math.radians(self.half_sweep)
+
+            if self._quick_joint_move(turned):
+                self.wait()
+                return True
 
         if not self.arm.rotate_joint7(
             delta_deg=-self.half_sweep,
@@ -690,38 +941,63 @@ class _ScanRun:
 
     def strokes(self, inward, after_phase_twist=0.0):
         """Run the inward strokes, or the outward ones after the end scan."""
+        count, step = (
+            (self.number_of_steps, self.step) if inward else self.outward[:2]
+        )
+        end = (
+            self.current_depth + count * step if inward
+            else self.current_depth - count * step
+        )
+        self.set_phase(
+            f"{'inward' if inward else 'outward'} strokes: {count} x "
+            f'{step * 100:.1f} cm, {self.current_depth:.2f} -> '
+            f'{max(end, 0.0):.2f} m'
+        )
+        # For the progress line: where this pass starts, and its strokes.
+        self.pass_info = (self.current_depth, count, step, inward)
+
         if inward:
             label, name, sign = 'IN', 'Inward', 1.0
             self.log.info('========== INWARD SCAN ==========')
             direction = 1.0
+            count, step = self.number_of_steps, self.step
+            velocity, acceleration = self.velocity, self.acceleration
         else:
             label, name, sign = 'OUT', 'Outward', -1.0
             self.log.info('========== OUTWARD SCAN ==========')
-            direction = 1.0 if after_phase_twist < 0.0 else -1.0
+            # Toward the other side from where J7 stands now.
+            direction = (
+                1.0 if self._inward_end_angle() + after_phase_twist < 0.0
+                else -1.0
+            )
+            count, step, velocity, acceleration = self.outward
 
         if self.pause <= 0.0:
-            return self._strokes_in_one(label, name, sign, direction, inward)
+            return self._strokes_in_one(
+                label, name, sign, direction, inward,
+                count, step, velocity, acceleration,
+            )
 
-        for i in range(self.number_of_steps):
+        for i in range(count):
             twist = direction * self.sweep_deg
-            next_depth = self.current_depth + sign * self.step
+            next_depth = self.current_depth + sign * step
 
             # Avoid ugly floating-point logging near zero.
             if abs(next_depth) < 1e-9:
                 next_depth = 0.0
 
             self.log.info(
-                f'[{label} {i + 1}/{self.number_of_steps}] '
+                f'[{label} {i + 1}/{count}] '
                 f'{self.current_depth:.3f} -> {next_depth:.3f} m | '
                 f'J7 {twist:+.1f} deg'
             )
 
             if not self.arm.move_tool_z_with_twist(
-                distance=sign * self.step,
+                distance=sign * step,
                 twist_deg=twist,
                 max_step=self.cartesian_step,
-                velocity=self.velocity,
-                acceleration=self.acceleration,
+                velocity=velocity,
+                acceleration=acceleration,
             ):
                 self.log.error(f'{name} stroke {i + 1} failed.')
                 return False
@@ -739,7 +1015,10 @@ class _ScanRun:
 
         return True
 
-    def _strokes_in_one(self, label, name, sign, direction, inward):
+    def _strokes_in_one(
+        self, label, name, sign, direction, inward, count, step, velocity,
+        acceleration,
+    ):
         """
         Run the strokes() pass as one trajectory (no --pause).
 
@@ -751,28 +1030,30 @@ class _ScanRun:
         strokes = []
         depth = self.current_depth
 
-        for i in range(self.number_of_steps):
+        for i in range(count):
             twist = direction * self.sweep_deg
-            next_depth = depth + sign * self.step
+            next_depth = depth + sign * step
 
             # Avoid ugly floating-point logging near zero.
             if abs(next_depth) < 1e-9:
                 next_depth = 0.0
 
-            self.log.info(
-                f'[{label} {i + 1}/{self.number_of_steps}] '
+            # All planned at once: the progress line follows them as
+            # they run (reporting()).
+            self.log.debug(
+                f'[{label} {i + 1}/{count}] '
                 f'{depth:.3f} -> {next_depth:.3f} m | J7 {twist:+.1f} deg'
             )
 
-            strokes.append((sign * self.step, twist))
+            strokes.append((sign * step, twist))
             depth = next_depth
             direction *= -1.0
 
         if not self.arm.move_tool_z_strokes(
             strokes,
             max_step=self.cartesian_step,
-            velocity=self.velocity,
-            acceleration=self.acceleration,
+            velocity=velocity,
+            acceleration=acceleration,
         ):
             self.log.error(f'{name} strokes failed.')
             return False
@@ -798,13 +1079,44 @@ class _ScanRun:
 
     def check_at_bottom(self, check):
         """Save the readings so far and ask check(); None on failure."""
+        self.set_phase('checking for laundry at the bottom')
+
         self.log.info('========== CHECK AT THE BOTTOM ==========')
 
         if self.recorder is not None and not self.recorder.save_blocking():
             self.log.error('Could not save the inward pass to check it.')
             return None
 
-        return bool(check())
+        answer = check()
+
+        # A step (a number, not a bool) means found, come out at it.
+        return answer if not isinstance(answer, bool) and answer else bool(answer)
+
+    def set_outward_step(self, step, depth):
+        """
+        Come out at `step` instead; True, or False if it is invalid.
+
+        The speed scales from the outward strokes' own, as
+        scaled_stroke_speed does, so J7 sweeps as fast as on them.
+        """
+        count, old_step, velocity, acceleration = self.outward
+
+        try:
+            new_count, new_step = stroke_plan(depth, self.entry_depth, step)
+        except ValueError as exc:
+            self.log.error(str(exc))
+            return False
+
+        ratio = new_step / old_step
+        self.outward = (
+            new_count, new_step,
+            min(1.0, velocity * ratio), min(1.0, acceleration * ratio),
+        )
+        self.log.info(
+            f'Coming out at {new_step * 100:.1f} cm: {new_count} strokes.'
+        )
+
+        return True
 
     # ---------------------------------------------------------
     # 4. END SCAN (also performs the turnaround phase shift)
@@ -842,14 +1154,20 @@ class _ScanRun:
     # the outward scan can begin immediately.
     # ---------------------------------------------------------
 
-    def end_scan(self, end_scan, end_plan, depth, time_scale):
-        """Cover the closed end and turn around; the phase twist, or None."""
+    def _inward_end_angle(self):
+        """Return J7's nominal angle (deg) after the inward strokes."""
         # Started at -half_sweep: an odd number of strokes ends at
         # +half_sweep, an even number at -half_sweep.
-        if self.number_of_steps % 2 == 1:
-            nominal_end_angle = +self.half_sweep
-        else:
-            nominal_end_angle = -self.half_sweep
+        return self.half_sweep * (1.0 if self.number_of_steps % 2 else -1.0)
+
+    def end_scan(self, end_scan, end_plan, depth, time_scale):
+        """Cover the closed end and turn around; the phase twist, or None."""
+        self.set_phase(
+            'turning round at the bottom' if end_scan == 'none'
+            else f'end scan ({end_scan})'
+        )
+
+        nominal_end_angle = self._inward_end_angle()
 
         self.log.info(f'Nominal wrist orientation: {nominal_end_angle:+.1f} deg')
 
@@ -868,6 +1186,18 @@ class _ScanRun:
         # than executed as its own stationary move) because the end
         # scan's exit move performs it directly.
         phase_twist = -self.sweep_deg if nominal_end_angle > 0.0 else +self.sweep_deg
+
+        if end_scan == 'none' and abs(self.outward[1] - self.step) > 1e-6:
+            # The turnaround only staggers the outward strokes between
+            # the inward ones; at a different step they do not line up
+            # anyway, so come straight out from where J7 stands (7.3 s
+            # saved on the rig, 2026-10-28).
+            self.log.info(
+                'No turnaround: the outward strokes are '
+                f'{self.outward[1] * 100:.1f} cm, the inward '
+                f'{self.step * 100:.1f} cm.'
+            )
+            return 0.0
 
         self.log.info(
             f'Turnaround phase shift (folded into end-scan exit): '
@@ -892,7 +1222,7 @@ class _ScanRun:
             # so the outward strokes still interleave with the inward.
             turned = list(pre_end_joints)
             turned[6] += math.radians(phase_twist)
-            success = self.arm.move_joints_linear(turned)
+            success = self._quick_joint_move(turned)
         else:
             success = _precession_end_scan(
                 self.arm,
@@ -943,6 +1273,8 @@ class _ScanRun:
         outward pass, the full depth after a check at the bottom.
         stay_inside: override the scan's own (None keeps it).
         """
+        self.set_phase('leaving the bucket')
+
         if stay_inside is None:
             stay_inside = self.stay_inside
 
@@ -956,15 +1288,24 @@ class _ScanRun:
 
             target = entry_joints(self.arm, self.entry_depth)
 
-            if target is None or not self.arm.move_joints_linear(
-                list(target)
-            ):
+            if target is None or not self._quick_joint_move(list(target)):
                 self.log.error('Could not move back to the entry pose.')
                 return False
 
             return True
 
         self.log.info('========== RETURN TO INTER ==========')
+
+        # From the entry depth: one move back to INTER, J7 unwinding
+        # on the way, where it is clear (~1.3 s against 6.6 s for
+        # unwinding, straight out, then INTER; rig, 2026-10-28).
+        if (
+            0.0 < self.current_depth <= self.entry_depth + 1e-3
+            and self._quick_joint_move(config.get_named_pose('inter'))
+        ):
+            self.current_depth = 0.0
+            self.wait()
+            return True
 
         # (Not > 0: the strokes' sums leave ~1e-17 with no entry depth.)
         if self.current_depth > 1e-6:
@@ -1008,6 +1349,7 @@ class _ScanRun:
         for line in (
             '========================================',
             'SCAN COMPLETE',
+            f'Took {time.monotonic() - self.started:.1f} s',
             f'Final nominal depth: {self.current_depth:.4f} m',
             '========================================',
         ):
@@ -1308,8 +1650,21 @@ def _coarse_steps(text):
 
 
 def add_search_arguments(parser):
-    """Add --coarse and --no-bottom-check (`laundry run` / `clear`)."""
+    """Add --search, --coarse and --no-bottom-check (`laundry run` / `clear`)."""
     default = ','.join(f'{step:g}' for step in DEFAULT_COARSE_STEPS_M)
+
+    parser.add_argument(
+        '--search',
+        choices=SEARCHES,
+        default=DEFAULT_SEARCH,
+        help=(
+            "Quick scans: 'in-out' goes in once - the coarsest --coarse "
+            'step on the way in, a check at the bottom, the end scan there '
+            'if nothing was found, and --step on the way out; '
+            "'ladder' runs a whole coarse pass, then a whole --step pass, "
+            f'then the end scan alone (default: {DEFAULT_SEARCH}).'
+        ),
+    )
 
     parser.add_argument(
         '--coarse',

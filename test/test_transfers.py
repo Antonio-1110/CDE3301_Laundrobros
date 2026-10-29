@@ -233,6 +233,7 @@ class _StubArm:
 
     def execute_joint_path(self, waypoints, times, velocities, time_scale=1.0):
         self.calls.append(('baked', np.array(waypoints)))
+        self.times = np.asarray(times, dtype=float)
         self.duration = float(times[-1])
         return True
 
@@ -381,6 +382,33 @@ def test_a_turned_carry_turns_on_the_way_and_is_back_by_the_end():
         _replayed(plain)[:, 6],
     )
     assert np.max(np.abs(path[:, 6] - plain_j7)) == pytest.approx(TURN, abs=0.05)
+
+
+def test_a_carry_with_no_room_for_the_full_turn_turns_as_far_as_fits():
+    plain = _CheckedArm(INTER)
+    transfers.go_to(plain, 'drop', routes=LONG, max_velocity_rad_s=0.7)
+    # The claw so near its speed cap that the turn's own J7 rate leaves
+    # no time to turn 90 deg and back, but does for a smaller turn.
+    from laundry_control.arm import pass_through
+
+    radius = np.hypot(*pass_through.gripper_corners()[1, :2])
+    rate = TURN / (0.6 * plain.duration)
+    peak = config.TRANSFER_MAX_TIP_SPEED_M_S - rate * radius
+    arm = _CheckedArm(INTER)
+
+    assert transfers.go_to(
+        arm, 'drop', routes=LONG, max_velocity_rad_s=0.7, turn_rad=TURN,
+        claw_peaks={'drop': peak},
+    )
+
+    j7_plain = np.interp(arm.times, plain.times, _replayed(plain)[:, 6])
+    turned = np.degrees(np.max(np.abs(_replayed(arm)[:, 6] - j7_plain)))
+    assert config.CARRY_MIN_TURN_DEG <= turned < 90.0 - 1.0
+    # In whole steps.
+    assert turned == pytest.approx(
+        round(turned / config.CARRY_TURN_STEP_DEG) * config.CARRY_TURN_STEP_DEG,
+        abs=1.0,
+    )
 
 
 def test_a_carry_too_short_to_turn_is_made_unturned(monkeypatch):

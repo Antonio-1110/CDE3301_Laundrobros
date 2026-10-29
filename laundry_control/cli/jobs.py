@@ -19,66 +19,35 @@ from .common import (
 )
 
 
-# `laundry clear` sweeps the drum at this fill level unless told
-# otherwise (--fill, or LAUNDRY_FILL): it runs on what is left in the
-# drum, usually little (user, 2026-10-27).
-CLEAR_DEFAULT_FILL = 0.25
+# The sweep's starting layer (config.PILE['layer_heights_m'], 1 =
+# lowest) unless --fill says otherwise: `clear` runs on what is left in
+# the drum, usually little (user, 2026-10-27); `preplanned`, every layer.
+CLEAR_DEFAULT_FILL = 1
 
 
-def _fill_value(text):
-    """Parse --fill: a fraction (config.FILL_LEVELS), or 'none'."""
-    return 'none' if text.strip().lower() == 'none' else float(text)
-
-
-def _choose_fill(args):
-    """
-    Use the plan set --fill asks for (config.set_fill).
-
-    --fill wins, then LAUNDRY_FILL (already applied when config was
-    imported), then the command's own default (fill_default); 'none'
-    is the plans in scan_plans/ itself.
-    """
-    import os
-
+def add_fill_argument(parser, default):
+    """Add --fill: the sweep's starting layer, 1 (lowest) to the top one."""
     from .. import config
 
-    fill = args.fill
-
-    if fill is None:
-        if os.environ.get('LAUNDRY_FILL'):
-            return
-
-        fill = getattr(args, 'fill_default', None)
-
-    config.set_fill(None if fill in (None, 'none') else fill)
-
-
-def add_fill_argument(parser, default=None):
-    """Add --fill: which fill level's baked sweep plans to use."""
-    from .. import config
-
-    levels = ', '.join(f'{level:g}' for level in config.FILL_LEVELS)
-    default_text = (
-        f'{default:g}' if default is not None
-        else 'none, the plans in scan_plans/ itself'
+    heights = config.PILE['layer_heights_m']
+    levels = ', '.join(
+        f'{number} = {height * 100:.0f} cm'
+        for number, height in enumerate(heights, start=1)
     )
 
     parser.add_argument(
-        '--fill', type=_fill_value, default=None,
+        '--fill', type=int, choices=range(1, len(heights) + 1),
+        default=default, metavar='N',
         help=(
-            'How full the drum is, as a fraction of its height: use that '
-            f"fill level's baked grabs ({levels}; ./rebake_fills.sh "
-            "bakes them), or 'none' for the plans in scan_plans/ itself. "
-            f'Default: LAUNDRY_FILL if set, else {default_text}.'
+            'How full the drum is: start the sweep at layer N and sweep '
+            f'every layer under it, top down (layers above the floor: '
+            f'{levels}). Default: {default}.'
         ),
     )
-    parser.set_defaults(fill_default=default)
 
 
 def cmd_run(args):
     """Run `laundry run`: scan -> detect -> grasp -> drop."""
-    _choose_fill(args)
-
     from ..pipeline import run_full, timestamped_scan_path
     from ..scan.pattern import coarse_steps_from_args, scan_kwargs_from_args
 
@@ -103,6 +72,7 @@ def cmd_run(args):
             dry_run=args.dry_run,
             coarse_steps=coarse_steps,
             bottom_check=args.bottom_check,
+            search=args.search,
         )
 
     return 0 if ok else 1
@@ -110,8 +80,6 @@ def cmd_run(args):
 
 def cmd_clear(args):
     """Run `laundry clear`: grab sweep, then scan -> grasp until empty."""
-    _choose_fill(args)
-
     from ..pipeline import run_clear
     from ..scan.pattern import coarse_steps_from_args, scan_kwargs_from_args
 
@@ -130,11 +98,13 @@ def cmd_clear(args):
             detect_params=detect_params(args),
             sweep=not args.no_grabs,
             sweep_limit=args.grab_limit,
+            sweep_fill=args.fill,
             max_rounds=args.max_rounds,
             max_failed=args.max_failed,
             time_scale=args.speed,
             coarse_steps=coarse_steps,
             bottom_check=args.bottom_check,
+            search=args.search,
         )
 
     return 0 if ok else 1
@@ -142,8 +112,6 @@ def cmd_clear(args):
 
 def cmd_preplanned(args):
     """Run `laundry preplanned`."""
-    _choose_fill(args)
-
     from ..pipeline import run_preplanned
 
     with RosSession(args=args) as arm:
@@ -151,6 +119,7 @@ def cmd_preplanned(args):
             arm,
             make_gripper(arm, args.fake_hardware),
             limit=args.limit,
+            fill=args.fill,
             time_scale=args.speed,
         )
 
@@ -183,7 +152,6 @@ def add_run_parser(subparsers):
     add_scan_arguments(run, end_scan_default='none')
     add_search_arguments(run)
     add_detector_arguments(run)
-    add_fill_argument(run)
     add_fake_arguments(run, with_scan_from=True)
     run.set_defaults(func=cmd_run)
 
@@ -241,6 +209,8 @@ def add_clear_parser(subparsers):
 
 def add_preplanned_parser(subparsers):
     """Add `laundry preplanned`."""
+    from .. import config
+
     preplanned = subparsers.add_parser(
         'preplanned',
         help=(
@@ -256,6 +226,6 @@ def add_preplanned_parser(subparsers):
         '--speed', type=float, default=1.0,
         help='Fraction of the baked speed, (0, 1] (default: 1).',
     )
-    add_fill_argument(preplanned)
+    add_fill_argument(preplanned, default=len(config.PILE['layer_heights_m']))
     add_fake_arguments(preplanned)
     preplanned.set_defaults(func=cmd_preplanned)

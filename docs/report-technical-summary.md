@@ -116,7 +116,7 @@ data_files=[
 ],
 ```
 
-- **Environment variables the code reads:** `LAUNDRY_DATA_DIR` (where scans and plans live; default: the source checkout, `config.repo_root()`), `LAUNDRY_PILE_TOP_M` (pile height for generating the sweep, `config/grabs.py`). Simulation scripts use `ROS_DOMAIN_ID` 73/77 with `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` so they can never reach the real arm (`rebake.sh`, `benchmarks/sim_timing.sh`).
+- **Environment variables the code reads:** `LAUNDRY_DATA_DIR` (where scans and plans live; default: the source checkout, `config.repo_root()`). Simulation scripts use `ROS_DOMAIN_ID` 73/77 with `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` so they can never reach the real arm (`rebake.sh`, `benchmarks/sim_timing.sh`).
 
 ---
 
@@ -284,7 +284,7 @@ for index in range(1, max_rounds + 1):
 
 **Overlapping checks and claw commands** (`grasp/retrieve_grid.run`, `grasp/carry.py`): each move is collision-checked while the claw is still opening or closing, and the claw is commanded as the arm arrives (`move(before_end=...)`), so the arm doesn't stand still for either.
 
-**Fill levels** (`config.FILL_LEVELS` 0.5 / 0.6 / 0.75 / 0.9): the sweep is baked per level into `scan_plans/fill_<percent>/` (`./rebake_fills.sh`), and chosen at run time with `laundry preplanned --fill 0.75` or `LAUNDRY_FILL`.
+**Layers** (`config.PILE['layer_heights_m']` 4 / 9 / 14 / 19 cm above the floor): the sweep is baked once, every layer at rows 32 / 21 / 10 cm from the closed end and 0 / ±12 cm sideways (the claw down; side spots step toward the middle where they do not fit). `laundry preplanned --fill N` (default 4) or `laundry clear --fill N` (default 1) starts at layer N and sweeps every layer under it, top down. The 2026-10-28 bake: 29 grabs, 9 / 9 / 9 / 2 from the top layer down.
 
 If the report needs a state diagram, these are descriptive names (they do not exist in the code): `OPEN_GRIPPER -> SCAN_QUICK -> DETECT -> (EMPTY? END_SCAN -> DETECT_FULL) -> GO_INTER -> PLAN_GRASP -> APPROACH -> CLOSE -> RETRACT_INTER -> GO_DROP -> RELEASE -> GO_INTER`.
 
@@ -377,14 +377,14 @@ Other named poses (deg): HOME (90, 0, 0, 0, 0, 0, 0); DROP (5.8, 85.9, −177.2,
 
 ### 3.4 Grasp planning for detected items
 
-`grasp/execute.plan_grasp` walks the detected clusters best-first (`rank_clusters`: confident clusters nearest the mouth first, then the rest by volume) and takes the first one with a reachable grasp:
+`grasp/execute.plan_grasp` walks the detected clusters best-first (`rank_clusters`: largest integrated volume first, ties by point count; mouth-first until 2026-10-28, which let a 3-reading noise cluster at the mouth go first) and takes the first one with a reachable grasp:
 
 1. **Floor grab** (`retrieve_grid.plan_floor_grab`): IK over the item, a straight descent, approached from the nearest baked `grab_NN` pose. Used for items near the floor's lowest line.
 2. **Cartesian reach** (`grasp/plan.compute_grasp_target`): a straight tool-axis reach from INTER, checked with `/compute_cartesian_path`. Used for items away from the floor.
 
 The aim point is the mean of the cluster's top-quartile-intrusion points (`GRASP_POINT_QUANTILE = 75.0`, `perception/detect.py`), which is closer to the item's apex than the centroid (median 1.5 cm vs 2.6 cm in simulation).
 
-**How deep the claw digs** (`retrieve_grid.deepest_grab`, `config.DETECTED_GRAB_DIG`). The ToF sees only the pile's top, so the grab is sunk into it as deep as is **collision-free**. For each claw tilt, heights are tried from the deepest allowed upward: at least `wall_clearance_m` (2 cm) off the bucket wall and at most `max_sink_m` (15 cm) below the sensed top. The first height whose grab, approach and descent pass IK and MoveIt's collision checks wins. The approach starts 3 cm above the pile where it fits, so the digging is a straight descent. On the fake controller (36 spots) the claw went 9.5 cm into the pile on average, against 4.3 cm with the earlier rule (half the pile's height, at most 5 cm).
+**How deep the claw digs** (`retrieve_grid.deepest_grab`, `config.DETECTED_GRAB_DIG`). The ToF sees only the pile's top, so the grab is sunk into it as deep as is **collision-free**. For each claw tilt, heights are tried from the deepest allowed upward: at least `wall_clearance_m` (1 cm; 2 cm until 2026-10-28) off the bucket wall and at most `max_sink_m` (15 cm) below the sensed top. The first height whose grab, approach and descent pass IK and MoveIt's collision checks wins. The approach starts 3 cm above the pile where it fits, so the digging is a straight descent. On the fake controller (36 spots) the claw went 9.5 cm into the pile on average, against 4.3 cm with the earlier rule (half the pile's height, at most 5 cm).
 
 **Carrying with the claw turned** (`grasp/carry.py`, `config.CARRY_J7_TURN_DEG` = 90): after closing, J7 turns +90° during the move to DROP and back before opening, so the claw hooks the item instead of relying on grip force alone (issue #21). The turn is superimposed on the baked move without stopping (S-curve ramps of 1.3–1.7 s, J7 within 0.9 × its limits). The turned states are collision-checked, and the claw is carried unturned if they collide.
 
@@ -652,8 +652,8 @@ Fit: **M(v, a) ≈ 15.8 + 140.5 / v + 202.6 · v / a** s (v in rad/s, a in rad/s
 
 - **Grasp success is not sensed.** Nothing detects whether the claw closed on laundry; simulation counts a grasp as done when the motions finish.
 - **Mouth false positives (issue #20, resolved).** On the rig (2026-10-21), shallow anomalies at the bucket mouth (16–104 points, 6–7 mm intrusion) were ranked ahead of real laundry. Cause: the baselines predated the new ToF mount. Against the re-collected baselines, only the laundry cluster remains. Example scan in `validation_scans/mouth_false_positive_20261021/`.
-- **Most of the last week's work is untested on the rig:** the claw cap at 7.0 rad/s², the fast HOME route, one-trajectory scans, coarse-first `run`/`clear`, stay-inside baselines, deeper detected grabs, the claw turn, the fill levels and the new gripper mesh. The staged tests are in `HARDWARE_TESTS.md` section G.
+- **Most of the last week's work is untested on the rig:** the claw cap at 7.0 rad/s², the fast HOME route, one-trajectory scans, coarse-first `run`/`clear`, stay-inside baselines, deeper detected grabs and the new gripper mesh. The claw turn, the layered sweep and coarse-first `run`/`clear` have run on the rig (2026-10-27/28). The staged tests are in `HARDWARE_TESTS.md` section G.
 - **The detector gate was tuned on the 6 false clusters it now rejects,** with thin margins (5.0 vs 5.5 σ, 61 vs 70 cm³). New empty scans with the current mount are needed to test it independently.
 - **The detection figures are an upper bound:** synthetic items, a simple ToF model, and baselines from the old mount.
 - **The claw contact offset** (`GRIPPER_OFFSET_Z` = 0.15 m) is user-measured and marked unverified in the code.
-- **Fill levels** (issue #18) and **shorter scans** (issue #10) are built but not yet run on the rig; the scan times in §6.2 predate the one-trajectory and coarse-first changes and need re-measuring.
+- **The layered sweep** (issue #18) and **shorter scans** (issue #10) have run on the rig (2026-10-27/28); the scan times in §6.2 predate the one-trajectory and coarse-first changes and need re-measuring.

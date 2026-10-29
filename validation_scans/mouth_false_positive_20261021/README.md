@@ -49,7 +49,7 @@ Likely causes to check, in this order:
    offset was changed for a new mount on 2026-10-19 (74488d3). Re-collect
    them (`laundry baseline collect --archive`, empty bucket) and detect
    again before changing any code.
-2. **The ranking.** `rank_clusters` takes confident clusters mouth-first
+2. **The ranking (fixed 2026-10-28: clusters are now ranked by size alone).** `rank_clusters` took confident clusters mouth-first
    whatever their size. A minimum volume or intrusion before position
    counts would stop a 23 cm³, 6 mm cluster from jumping the queue.
 3. **The mouth itself.** The rim is where the wall model is thinnest, so

@@ -118,13 +118,8 @@ AT_POSE_TOLERANCE_RAD = np.deg2rad(2.0)
 
 
 def default_plan_path():
-    """
-    Return the plan set's transfers.yaml (config.plan_set_dir).
-
-    <repo>/scan_plans/transfers.yaml, or the chosen fill level's own:
-    its grab routes, direct routes and chains go with its grabs.
-    """
-    return os.path.join(config.plan_set_dir(), 'transfers.yaml')
+    """Return <repo>/scan_plans/transfers.yaml."""
+    return os.path.join(config.repo_root(), 'scan_plans', 'transfers.yaml')
 
 
 def weighted_travel_deg(path, weights=TRAVEL_WEIGHTS):
@@ -1007,7 +1002,9 @@ def prepare_go_to(
     is now - to prepare it during an earlier move or claw wait. The
     move refuses to run unless the arm is there by then.
 
-    The returned move(before_end=None) takes (seconds, callback):
+    The returned move(before_end=None, while_moving=None) takes, as
+    while_moving, work to do while the arm moves (checking the next
+    moves, from their own start), and as before_end (seconds, callback):
     callback() is called that long before the move's planned end
     (from a timer on the arm's node, which spins while the move
     runs) - the claw commands, so the claw moves as the arm arrives
@@ -1125,8 +1122,15 @@ def prepare_go_to(
     if turn_rad:
         claw_peak = _move_claw_peak(pieces, claw_peaks or {})
 
-        def turned(plan):
-            return _turn_overlay(arm, target_name, plan, turn_rad, claw_peak)
+        def turned(plan, straight_peak):
+            # The turn rides on the straight moves too: the claw's peak
+            # is the higher of theirs and the route's (theirs unknown:
+            # timed as before, slowly, and left out as before).
+            peak = (
+                claw_peak if claw_peak is None or straight_peak is None
+                else max(claw_peak, straight_peak)
+            )
+            return _turn_overlay(arm, target_name, plan, turn_rad, peak)
 
         turn = turned
 
@@ -1156,19 +1160,29 @@ def _timed_move(
     start=None,
 ):
     """
-    Return move(before_end=None): one timed trajectory, as prepare_go_to's.
+    Return move(before_end=None, while_moving=None): one timed trajectory.
+
+    As prepare_go_to returns it. while_moving: work to do while the arm
+    moves (controller._run_goal) - preparing the next moves, which must
+    then pass `start`, since the arm is not yet where they begin.
 
     start: refuse to move unless the arm is there (within
     AT_POSE_TOLERANCE_RAD).
     """
     duration = float(times[-1]) / time_scale
 
-    def execute():
-        return arm.execute_joint_path(
-            positions, times, velocities, time_scale=time_scale
-        )
+    def move(before_end=None, while_moving=None):
+        def execute():
+            if while_moving is None:
+                return arm.execute_joint_path(
+                    positions, times, velocities, time_scale=time_scale
+                )
 
-    def move(before_end=None):
+            return arm.execute_joint_path(
+                positions, times, velocities, time_scale=time_scale,
+                while_running=while_moving,
+            )
+
         if start is not None:
             now = arm.get_current_joints()
 
@@ -1190,12 +1204,19 @@ def _timed_move(
 
 
 def _calling_at_end(move_now):
-    """Wrap a move with no timing of its own: before_end's callback after it."""
-    def move(before_end=None):
+    """
+    Wrap a move with no timing of its own: its hooks after it.
+
+    before_end's callback, then while_moving, once the move is made.
+    """
+    def move(before_end=None, while_moving=None):
         ok = move_now()
 
         if ok and before_end is not None:
             before_end[1]()
+
+        if while_moving is not None:
+            while_moving()
 
         return ok
 
@@ -1261,7 +1282,9 @@ def _turn_overlay(arm, target_name, plan, turn_rad, claw_peak):
     its own J7 speed is capped where the claw's corners (pass_through.
     gripper_corners, any J7 angle) would pass TRANSFER_MAX_TIP_SPEED_M_S
     on top of the move's baked claw peak. Without a baked peak the
-    move is not turned. The caller checks it (_checked_plan).
+    move is not turned. A carry with no room for the full turn is
+    turned as far as fits, in CARRY_TURN_STEP_DEG steps, down to
+    CARRY_MIN_TURN_DEG. The caller checks it (_checked_plan).
     """
     from . import pass_through
     from .joint_path import add_j7_turn
@@ -1285,26 +1308,38 @@ def _turn_overlay(arm, target_name, plan, turn_rad, claw_peak):
         )
         return None
 
-    turned = add_j7_turn(
-        times, positions, velocities, turn_rad,
-        config.CARRY_TURN_MAX_VELOCITY_RAD_S,
-        config.CARRY_TURN_MAX_ACCELERATION_RAD_S2,
-        config.TRANSFER_MAX_JERK_RAD_S3,
-        max_added_rate_rad_s=added,
-    )
+    full = math.degrees(abs(turn_rad))
+    step = config.CARRY_TURN_STEP_DEG
+    turned = None
+    amount = full
+
+    while turned is None and amount >= config.CARRY_MIN_TURN_DEG - 1e-9:
+        turned = add_j7_turn(
+            times, positions, velocities,
+            math.copysign(math.radians(amount), turn_rad),
+            config.CARRY_TURN_MAX_VELOCITY_RAD_S,
+            config.CARRY_TURN_MAX_ACCELERATION_RAD_S2,
+            config.TRANSFER_MAX_JERK_RAD_S3,
+            max_added_rate_rad_s=added,
+        )
+
+        if turned is None:
+            amount -= step
 
     if turned is None:
         arm.get_logger().info(
             f'The move to {target_name.upper()} is too short to turn the '
-            "claw and back within J7's limits; carrying it unturned."
+            f'claw even {config.CARRY_MIN_TURN_DEG:.0f} deg and back within '
+            "J7's limits; carrying it unturned."
         )
         return None
 
     grid, turned_positions, turned_velocities, ramp = turned
+    partly = f' (of {full:.0f}: no room for more)' if amount < full else ''
 
     return (
-        message + f', claw turned {math.degrees(turn_rad):+.0f} deg on the '
-        f'way ({ramp:.1f} s each way)',
+        message + f', claw turned {math.copysign(amount, turn_rad):+.0f} deg'
+        f'{partly} on the way ({ramp:.1f} s each way)',
         grid, turned_positions, turned_velocities,
     )
 
@@ -1356,9 +1391,9 @@ def _prepare_unbaked(
     origin = before[-1] if before else current
 
     if (before or after) and _at(origin, target):
-        legs = _straight_legs([current] + list(before) + list(after))
+        legs = _straight_legs([current] + list(before) + list(after), arm)
 
-        for start, leg in legs:
+        for start, leg, _peak in legs:
             limits = task_limits(start=start)
             bad = arm.first_invalid_state(leg[1], limits=limits)
 
@@ -1373,12 +1408,16 @@ def _prepare_unbaked(
             return _calling_at_end(lambda: True)
 
         times, positions, velocities = _join(
-            [leg for _start, leg in legs], current
+            [leg for _start, leg, _peak in legs], current
         )
+
+        peak = _legs_claw_peak(legs)
 
         return _timed_move(
             arm, target_name,
-            f'{len(legs)} straight move(s) at {target_name.upper()}.',
+            f'{len(legs)} straight move(s) at {target_name.upper()} '
+            f'({times[-1] / time_scale:.1f} s'
+            + (f', claw <= {peak * 1000:.0f} mm/s' if peak else '') + ').',
             times, positions, velocities, time_scale,
         )
 
@@ -1434,7 +1473,9 @@ def _checked_plan(
     moves before and after it. None if the straight moves, or every
     timing, collide.
 
-    turn(plan): the plan turned for the carry (_turn_overlay), or None.
+    turn(plan, straight_peak): the plan turned for the carry
+    (_turn_overlay), or None; straight_peak is the straight moves'
+    claw peak (_legs_claw_peak).
     Each timing is then tried turned first, the whole turned move
     checked as it will run (joint_path.resample_by_step), and checked
     unturned only if that is refused - the turned move is what runs,
@@ -1453,10 +1494,11 @@ def _checked_plan(
         if stale:
             arm.get_logger().warning(stale, throttle_duration_sec=60.0)
 
-    straight_before = _straight_legs([current] + before)
-    straight_after = _straight_legs([route[-1]] + after)
+    straight_before = _straight_legs([current] + before, arm)
+    straight_after = _straight_legs([route[-1]] + after, arm)
+    straight_peak = _legs_claw_peak(straight_before + straight_after)
 
-    for start, leg in straight_before + straight_after:
+    for start, leg, _peak in straight_before + straight_after:
         limits = task_limits(start=start)
         bad = arm.first_invalid_state(leg[1], limits=limits)
 
@@ -1482,9 +1524,9 @@ def _checked_plan(
         log=arm.get_logger(),
     ):
         joined = _join(
-            [leg for _start, leg in straight_before]
+            [leg for _start, leg, _peak in straight_before]
             + legs
-            + [leg for _start, leg in straight_after],
+            + [leg for _start, leg, _peak in straight_after],
             current,
         )
         plan = (
@@ -1492,7 +1534,7 @@ def _checked_plan(
             + how,
         ) + tuple(joined)
 
-        turned = turn(plan) if turn is not None else None
+        turned = turn(plan, straight_peak) if turn is not None else None
 
         if turned is not None:
             if arm.first_invalid_state(resample_by_step(turned[2])) is None:
@@ -1531,12 +1573,106 @@ def _checked_plan(
 _BRIDGE_TOLERANCE_RAD = 1e-3
 
 
-def _straight_legs(poses):
-    """
-    Return [(start, (times, states, velocities))] between consecutive poses.
+# Points along a straight leg where the claw's speed is found
+# (claw_speed_per_rad), and the margin on it: between them the speed
+# is taken from chords, not tangents.
+CLAW_CHECK_SAMPLES = 12
+CLAW_CHECK_MARGIN = 1.15
 
-    Each a straight joint move timed as move_joints_linear times it;
-    the states are its 1 deg checks. Moves of nothing are left out.
+_CORNERS = []
+
+
+def claw_speed_per_rad(arm, states):
+    """
+    Return the claw's top speed (m/s) per rad/s of the fastest joint, or None.
+
+    Along one straight joint line (states, as densify gives them), by
+    forward kinematics (arm.compute_fk, MoveIt's /compute_fk) at
+    CLAW_CHECK_SAMPLES points: the fastest of pass_through.
+    gripper_corners - the claw at any J7 angle - between neighbours.
+    None if the arm cannot tell (no compute_fk, or MoveIt refused).
+    """
+    from . import pass_through
+
+    compute = getattr(arm, 'compute_fk', None)
+
+    if compute is None:
+        return None
+
+    if not _CORNERS:
+        _CORNERS.append(pass_through.gripper_corners())
+
+    states = np.asarray(states, dtype=np.float64)
+    picked = np.unique(
+        np.linspace(0, len(states) - 1, CLAW_CHECK_SAMPLES).round().astype(int)
+    )
+    points = []
+
+    for index in picked:
+        fk = compute(states[index])
+
+        if fk is None:
+            return None
+
+        position, quaternion = fk
+        rotation = Rotation.from_quat(quaternion).as_matrix()
+        points.append(_CORNERS[0] @ rotation.T + position)
+
+    points = np.array(points)                  # (sample, corner, xyz)
+    moved = np.linalg.norm(np.diff(points, axis=0), axis=2).max(axis=1)
+    progress = np.abs(np.diff(states[picked], axis=0)).max(axis=1)
+    ok = progress > 1e-9
+
+    if not ok.any():
+        return None
+
+    return float((moved[ok] / progress[ok]).max()) * CLAW_CHECK_MARGIN
+
+
+def _time_straight(arm, states):
+    """
+    Return (times, velocities, claw peak m/s or None) for one straight leg.
+
+    Where the arm can tell the claw's speed (claw_speed_per_rad), like
+    a baked transfer stopping at its vias: an S-curve under the
+    transfer limits (config.TRANSFER_MAX_*), slowed if the claw would
+    pass config.TRANSFER_MAX_TIP_SPEED_M_S. Otherwise as
+    move_joints_linear times it (min-jerk, 45 deg/s peak, averaging
+    half that): INTER -> over a detected item -> down took 4.4 s that
+    way on the rig (2026-10-28).
+    """
+    per_rad = None if arm is None else claw_speed_per_rad(arm, states)
+
+    if per_rad is None:
+        times, velocities = time_path(
+            states, config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S
+        )
+        return times, velocities, None
+
+    _dense, times, velocities = time_stop_at_each(
+        [states[0], states[-1]],
+        config.TRANSFER_MAX_VELOCITY_RAD_S,
+        max_acceleration=config.TRANSFER_MAX_ACCELERATION_RAD_S2,
+        max_jerk=config.TRANSFER_MAX_JERK_RAD_S3,
+    )
+    peak = per_rad * float(np.abs(velocities).max())
+
+    if peak > config.TRANSFER_MAX_TIP_SPEED_M_S:
+        scale = config.TRANSFER_MAX_TIP_SPEED_M_S / peak
+        times = np.asarray(times) / scale
+        velocities = np.asarray(velocities) * scale
+        peak = config.TRANSFER_MAX_TIP_SPEED_M_S
+
+    return times, velocities, peak
+
+
+def _straight_legs(poses, arm=None):
+    """
+    Return [(start, (times, states, velocities), claw peak)] between poses.
+
+    Each a straight joint move, timed by _time_straight (the claw peak
+    is None where the arm could not tell it); the states are its 1 deg
+    checks. Moves of nothing are left out.
     """
     legs = []
 
@@ -1546,12 +1682,20 @@ def _straight_legs(poses):
         if np.abs(states[-1] - states[0]).max() < 1e-4:
             continue
 
-        times, velocities = time_path(
-            states, config.LINEAR_JOINT_MOVE_MAX_VELOCITY_RAD_S
-        )
-        legs.append((np.asarray(start), (times, states, velocities)))
+        times, velocities, peak = _time_straight(arm, states)
+        legs.append((np.asarray(start), (times, states, velocities), peak))
 
     return legs
+
+
+def _legs_claw_peak(legs):
+    """Return the highest claw peak of straight legs: None if one is unknown, 0 if none."""
+    peaks = [peak for _start, _leg, peak in legs]
+
+    if any(peak is None for peak in peaks):
+        return None
+
+    return max(peaks, default=0.0)
 
 
 def chain_name(pieces):

@@ -38,8 +38,12 @@ def reach(monkeypatch):
         return None, 'out of reach'
 
     monkeypatch.setattr(retrieve_grid, '_try_pose', try_pose)
-    # The tests' own lowest sweep height, so they do not follow the default.
-    monkeypatch.setitem(config.PILE, 'min_height_m', 0.06)
+    # The tests' own layers, so they do not follow the default.
+    monkeypatch.setitem(
+        config.PILE, 'layer_heights_m', (0.04, 0.09, 0.14, 0.19)
+    )
+    monkeypatch.setitem(config.PILE, 'depths_m', (0.32, 0.21, 0.10))
+    monkeypatch.setitem(config.PILE, 'lateral_m', (0.0, -0.12, 0.12))
     monkeypatch.setattr(
         retrieve_grid, 'gripper_padding',
         lambda *a, **k: contextlib.nullcontext(),
@@ -64,82 +68,62 @@ def test_height_at_the_floor_line_is_the_same_both_ways():
     assert pile_layers.vertical_height(0.3, 0.0, 0.11) == pytest.approx(0.11)
 
 
-def test_the_editor_draws_the_pile_at_its_fraction_of_the_drum(monkeypatch):
+def test_the_editor_draws_the_pile_at_its_fraction_of_the_drum():
     cone = seed_cone()
-    top = 0.5 * 2.0 * cone.radius_at(0.5 * cone.s_max)
+    drum = 2.0 * cone.radius_at(0.5 * cone.s_max)
 
-    assert pile_layers.fill_fraction(top, cone) == pytest.approx(0.5)
-
-    monkeypatch.setitem(config.PILE, 'top_height_m', top)
-    assert pile_layers.fill_fraction() == pytest.approx(0.5)
+    assert pile_layers.fill_fraction(0.5 * drum, cone) == pytest.approx(0.5)
+    # By default, as full as the top layer reaches into.
+    top = max(config.PILE['layer_heights_m']) + 0.05
+    assert pile_layers.fill_fraction() == pytest.approx(top / drum)
 
 
 def test_a_spot_takes_the_highest_height_some_tilt_reaches(reach):
-    target, reason = pile_layers.find_grab(None, 0.30, 0.0, 0.19)
+    target, reason = pile_layers.find_grab(None, 0.30, 0.0, 0.19, 0.10)
 
     assert reason is None
     # 60 deg reaches 16 cm; nothing reaches 17-19 cm.
     assert target['tilt_deg'] == 60.0
-    assert pile_layers.vertical_height(
-        0.30, 0.0, target['height_m']
-    ) == pytest.approx(0.16, abs=2e-3)
+    assert pile_layers.target_vertical(target) == pytest.approx(0.16, abs=2e-3)
 
 
 def test_a_spot_takes_the_least_tilt_that_reaches_the_height(reach):
-    target, _ = pile_layers.find_grab(None, 0.30, 0.0, 0.10)
+    target, _ = pile_layers.find_grab(None, 0.30, 0.0, 0.10, 0.08)
 
     # Vertical reaches 7 cm, 15 deg 9.25, 30 deg 11.5 cm.
     assert target['tilt_deg'] == 30.0
-    assert pile_layers.vertical_height(
-        0.30, 0.0, target['height_m']
-    ) == pytest.approx(0.10, abs=2e-3)
+    assert pile_layers.target_vertical(target) == pytest.approx(0.10, abs=2e-3)
 
 
-def test_a_spot_below_the_lowest_sweep_height_is_not_tried(reach):
-    target, reason = pile_layers.find_grab(None, 0.30, 0.0, 0.04)
+def test_a_spot_is_not_tried_below_its_layers_window(reach):
+    target, reason = pile_layers.find_grab(None, 0.30, 0.0, 0.19, 0.17)
 
-    assert target is None and 'lowest' in reason
-    assert reach == []
+    # Reachable only up to 16 cm: nothing in 17-19 cm.
+    assert target is None and reason
+    assert all(height >= 0.17 - 1e-6 for height, _tilt in reach)
 
 
-def test_layers_step_down_from_what_was_reached(reach, monkeypatch):
-    monkeypatch.setitem(config.PILE, 'top_height_m', 0.25)
-
+def test_every_layer_is_generated_top_first_each_grab_tagged(reach):
     targets, misses, layers = pile_layers.generate(None, log=_quiet)
 
     spots = len(config.PILE['depths_m']) * len(config.PILE['lateral_m'])
 
-    # Layer 1 reaches ~16 cm, layer 2 a step (6 cm) lower, ~10 cm; layer 3
-    # would be ~4 cm, under the minimum.
-    assert len(layers) == 2 and misses == []
-    assert len(targets) == 2 * spots
-    # (Heights are tried 1 cm apart and a grab is stored to the
-    # millimetre, so a spot may land one step under the cutoff.)
-    assert all(0.15 - 3e-3 <= v <= 0.16 + 3e-3 for v in layers[0])
-    assert all(0.09 - 3e-3 <= v <= 0.10 + 3e-3 for v in layers[1])
-    # Every spot's second layer is 6 cm under its own first.
-    assert all(
-        first - second == pytest.approx(0.06, abs=0.011)
-        for first, second in zip(layers[0], layers[1])
-    )
+    # Layer 4 (19 cm, down to 17) is out of the stand-in's reach.
+    assert {m[0] for m in misses} == {4} and len(misses) == spots
+    assert [t['layer'] for t in targets] == [3] * spots + [2] * spots + [1] * spots
+    # Each layer at its own height, within its 2 cm window.
+    assert all(0.14 - 0.02 - 1e-3 <= v <= 0.14 + 1e-3 for v in layers[1])
+    assert all(0.09 - 0.02 - 1e-3 <= v <= 0.09 + 1e-3 for v in layers[2])
+    assert all(0.04 - 0.01 - 1e-3 <= v <= 0.04 + 1e-3 for v in layers[3])
+    assert layers[0] == []
 
 
-def test_the_sweep_runs_each_layer_over_all_spots_mouth_first(reach):
+def test_within_a_layer_the_mouth_row_goes_first_middle_then_sides(reach):
     targets, _, _ = pile_layers.generate(None, log=_quiet)
 
-    spots = len(config.PILE['depths_m']) * len(config.PILE['lateral_m'])
-    first = targets[:spots]
-
-    assert [t['depth_m'] for t in first[::3]] == sorted(
-        {t['depth_m'] for t in first}, reverse=True
-    )
-    # Spread across the pile, the claw down.
+    first = targets[:9]
+    assert [t['depth_m'] for t in first[::3]] == [0.32, 0.21, 0.10]
     assert [t['lateral_m'] for t in first[:3]] == [0.0, -0.12, 0.12]
-    # Layer 2 starts over at the mouth, lower.
-    assert targets[spots]['depth_m'] == first[0]['depth_m']
-    assert pile_layers.target_vertical(targets[spots]) < (
-        pile_layers.target_vertical(first[0])
-    )
 
 
 def test_a_side_spot_that_does_not_fit_moves_toward_the_middle(
@@ -161,37 +145,14 @@ def test_a_side_spot_that_does_not_fit_moves_toward_the_middle(
 
     targets, misses, _ = pile_layers.generate(None, log=_quiet)
 
-    assert misses == []
+    assert {m[0] for m in misses} == {4}
     assert sorted({t['lateral_m'] for t in targets}) == [-0.09, 0.0, 0.09]
 
 
-def test_a_fuller_drum_aims_higher_and_a_lower_one_has_fewer_layers(
-    reach, monkeypatch
-):
-    monkeypatch.setitem(config.PILE, 'top_height_m', 0.17)
-    _, _, low_layers = pile_layers.generate(None, log=_quiet)
-
-    monkeypatch.setitem(config.PILE, 'top_height_m', 0.30)
-    _, _, full_layers = pile_layers.generate(None, log=_quiet)
-
-    # 17 cm: aim 11 cm, then 5 cm, under the minimum: one layer.
-    assert len(low_layers) == 1
-    assert max(full_layers[0]) > max(low_layers[0])
-
-
-def test_a_pile_too_low_for_the_sweep_gets_no_grabs(reach, monkeypatch):
-    monkeypatch.setitem(config.PILE, 'top_height_m', 0.10)
-
-    targets, _, layers = pile_layers.generate(None, log=_quiet)
-
-    assert targets == [] and layers == []
-
-
-def test_an_unreachable_spot_is_reported_and_dropped_from_later_layers(
+def test_a_spot_out_of_reach_is_left_out_of_each_layer_alone(
     reach, monkeypatch
 ):
     real = retrieve_grid._try_pose
-
     side = axis_basis(seed_cone().axis_dir)[1]
     side = side if side[0] >= 0 else -side
 
@@ -207,14 +168,29 @@ def test_an_unreachable_spot_is_reported_and_dropped_from_later_layers(
 
     monkeypatch.setattr(retrieve_grid, '_try_pose', try_pose)
 
-    targets, misses, layers = pile_layers.generate(None, log=_quiet)
+    targets, misses, _ = pile_layers.generate(None, log=_quiet)
 
     spots = len(config.PILE['depths_m']) * len(config.PILE['lateral_m'])
+    # Layers 1-3 each miss that one spot; every other spot is there.
+    assert sorted(
+        (m[0], m[1], m[2]) for m in misses if m[0] != 4
+    ) == [(1, 0.10, -0.12), (2, 0.10, -0.12), (3, 0.10, -0.12)]
+    assert 'collides' in misses[-1][3]
+    assert len(targets) == 3 * (spots - 1)
 
-    assert [(m[0], m[1], m[2]) for m in misses] == [(1, 0.10, -0.12)]
-    assert 'collides' in misses[0][3]
-    assert len(layers[0]) == spots - 1 and len(layers[1]) == spots - 1
-    assert len(targets) == 2 * (spots - 1)
+
+def test_fill_sweeps_its_layer_and_every_one_under_it_in_order():
+    grabs = [{'name': f'g{n}', 'layer': layer}
+             for n, layer in enumerate([4, 4, 3, 2, 2, 1])]
+
+    assert [g['layer'] for g in pile_layers.select_layers(grabs, 2)] == [
+        2, 2, 1
+    ]
+    assert pile_layers.select_layers(grabs, 4) == grabs
+    assert pile_layers.select_layers(grabs, None) == grabs
+    # A hand-placed list has no layers: swept whole.
+    placed = [{'name': 'g0'}, {'name': 'g1'}]
+    assert pile_layers.select_layers(placed, 1) == placed
 
 
 def test_generated_targets_keep_what_they_were_generated_from(tmp_path):
@@ -251,7 +227,7 @@ def test_a_changed_pile_is_reported_as_a_stale_plan(tmp_path, monkeypatch):
         path, targets=targets, generated=generated
     ) is None
 
-    monkeypatch.setitem(config.PILE, 'top_height_m', 0.20)
+    monkeypatch.setitem(config.PILE, 'layer_window_m', 0.03)
 
     assert 'config.PILE' in retrieve_grid.grid_mismatch(
         path, targets=targets, generated=generated

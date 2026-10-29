@@ -492,10 +492,11 @@ def cmd_plan(args):
                 or not placed
                 or pile_layers.pile_changed(generated)
             ):
+                heights = config.PILE['layer_heights_m']
                 print(
-                    'Generating the sweep from config.PILE '
-                    f'(pile top {config.PILE["top_height_m"] * 100:.0f} cm '
-                    'above the floor)...'
+                    'Generating the sweep from config.PILE (layers '
+                    + ', '.join(f'{h * 100:.0f}' for h in heights)
+                    + ' cm above the floor)...'
                 )
                 placed, gen_misses, layers = pile_layers.generate(
                     arm, log=print
@@ -503,11 +504,8 @@ def cmd_plan(args):
 
                 if not placed:
                     print(
-                        'No sweep grabs for this pile: its top is too low '
-                        f'for the {config.PILE["min_height_m"] * 100:.0f} cm '
-                        'lowest sweep height, or nothing was reachable. '
-                        'Laundry that low is for the scan-then-grasp stage '
-                        '(`laundry clear --no-grabs`).',
+                        "No sweep grabs: nothing in config.PILE's layers "
+                        'was reachable.',
                         file=sys.stderr,
                     )
                     return 1
@@ -761,8 +759,8 @@ def add_plan_parser(subparsers):
             'With retrieve/all: generate the sweep from config.PILE even '
             'when a grab list exists (a hand-placed one is otherwise '
             'kept; a generated one regenerates by itself when PILE '
-            'changes). The pile level: config.PILE, or '
-            'LAUNDRY_PILE_TOP_M=0.20 for one run.'
+            'changes). Every layer is generated; `--fill` picks the '
+            'starting one at run time.'
         ),
     )
     add_observed_state_argument(bake)

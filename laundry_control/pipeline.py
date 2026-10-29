@@ -37,7 +37,10 @@ from .perception.bucket_model import build_baseline_surface
 from .perception.detect import detect_on_points, load_baseline_scans
 from .perception.detect import load_points_xyz
 from .perception.report import print_model_report, print_report
-from .scan.pattern import DEFAULT_COARSE_STEPS_M, DEFAULT_STEP_M, scan
+from .scan.pattern import (
+    CONFIDENT_MIN_PEAK_SIGMA, CONFIDENT_MIN_VOLUME_M3, DEFAULT_COARSE_STEPS_M,
+    DEFAULT_SEARCH, DEFAULT_STEP_M, scan, SEARCHES,
+)
 from .scan.segments import STROKES
 
 
@@ -266,9 +269,111 @@ def _out_of_bucket(arm, result):
     return result
 
 
+def confident_find(cluster):
+    """
+    Return True if a cluster is a confident find (in-out search).
+
+    Big, strong and in well-sampled cells: scan.pattern.
+    CONFIDENT_MIN_VOLUME_M3 / CONFIDENT_MIN_PEAK_SIGMA.
+    """
+    return bool(
+        getattr(cluster, 'confident', False)
+        and cluster.volume_m3 >= CONFIDENT_MIN_VOLUME_M3
+        and cluster.peak_sigma >= CONFIDENT_MIN_PEAK_SIGMA
+    )
+
+
+def _search_in_out(
+    arm, recorder, csv_path, baseline, scan_kwargs, detect_params, model,
+    coarse_steps, bottom_check,
+):
+    """
+    Search in one trip in and out (scan.pattern.SEARCHES); result or None.
+
+    The result is (clusters, surface, scan CSV).
+
+    The arm is back at INTER when this returns a result.
+    """
+    fine = scan_kwargs.get('step', DEFAULT_STEP_M)
+    coarse = coarse_steps[0] if coarse_steps else fine
+    end_plan = scan_kwargs.get('end_plan')
+
+    kwargs = dict(
+        coarse_pass_kwargs(scan_kwargs, coarse),
+        end_scan='precession' if end_plan is not None else 'none',
+        outward_step=fine,
+        outward_velocity=scan_kwargs.get('velocity'),
+        outward_acceleration=scan_kwargs.get('acceleration'),
+        outward_when_found=True,
+        start_inside=False,
+        stay_inside=False,
+    )
+
+    found = []
+    strokes_model = model('strokes')
+
+    def check():
+        print('========== DETECT (coarse inward strokes, at the bottom) '
+              '==========')
+
+        clusters, _ = detect_scan(
+            csv_path, baseline, detect_params, surface=strokes_model,
+            segments=(STROKES,),
+        )
+        found.extend(clusters)
+
+        if not clusters:
+            print('Nothing yet: end scan here, then the '
+                  f'{fine * 100:g} cm strokes out.')
+            return False
+
+        if any(confident_find(cluster) for cluster in clusters):
+            print('Confident find: no end scan; coming out on the '
+                  f'{coarse * 100:g} cm strokes.')
+            return coarse
+
+        print('Weak find: no end scan; coming out on the '
+              f'{fine * 100:g} cm strokes to confirm and aim.')
+        return True
+
+    print(f'========== SCAN IN AT {coarse * 100:g} CM, OUT AT '
+          f'{fine * 100:g} CM ==========')
+
+    started = time.monotonic()
+
+    if not run_scan(
+        arm, recorder, csv_path, kwargs,
+        check=check if bottom_check else None,
+    ):
+        print('Scan failed.')
+        return None
+
+    print(f'Searching took {time.monotonic() - started:.1f} s.')
+
+    # The end scan ran only when nothing was found at the bottom.
+    full = end_plan is not None and not found
+    surface = model('full') if full else strokes_model
+
+    print('========== DETECT (' + (
+        'inward and outward strokes, and the end scan' if full
+        else 'inward and outward strokes'
+    ) + ') ==========')
+
+    clusters, _ = detect_scan(
+        csv_path, baseline, detect_params, surface=surface,
+        segments=None if full else (STROKES,),
+    )
+
+    if not clusters and not full and end_plan is None:
+        print('No baked end scan: the closed end was not checked.')
+
+    return clusters, surface, csv_path
+
+
 def scan_and_detect(
     arm, recorder, csv_path, baseline, scan_kwargs, detect_params, model,
     coarse_steps=DEFAULT_COARSE_STEPS_M, bottom_check=True,
+    search=DEFAULT_SEARCH,
 ):
     """
     Scan and detect; returns (clusters, surface, scan CSV), or None.
@@ -277,8 +382,9 @@ def scan_and_detect(
     a motion failed.
 
     A full scan (end_scan 'precession') is one pass, detected against
-    the full model. QUICK scans (end_scan 'none') search coarse first,
-    each pass detected against the strokes-only model:
+    the full model. QUICK scans (end_scan 'none') search as `search`
+    says (SEARCHES): 'in-out' in one trip (_search_in_out), or 'ladder',
+    coarse first, each pass detected against the strokes-only model:
 
         1. a pass at each of coarse_steps, coarsest first (saved to
            <csv_path>_<step>cm.csv), then one at the scan's own step
@@ -311,6 +417,15 @@ def scan_and_detect(
         )
 
         return clusters, surface, csv_path
+
+    if search == 'in-out':
+        return _search_in_out(
+            arm, recorder, csv_path, baseline, scan_kwargs, detect_params,
+            model, coarse_steps, bottom_check,
+        )
+
+    if search != 'ladder':
+        raise ValueError(f'Unknown search {search!r}; one of {SEARCHES}.')
 
     surface = model('strokes')
     started = time.monotonic()
@@ -413,6 +528,7 @@ def run_full(
     dry_run=False,
     coarse_steps=DEFAULT_COARSE_STEPS_M,
     bottom_check=True,
+    search=DEFAULT_SEARCH,
 ):
     """
     Run scan -> detect -> grasp -> drop; True on success.
@@ -428,7 +544,7 @@ def run_full(
 
     result = scan_and_detect(
         arm, recorder, csv_path, baseline, scan_kwargs, detect_params,
-        bucket_models(baseline), coarse_steps, bottom_check,
+        bucket_models(baseline), coarse_steps, bottom_check, search,
     )
 
     if result is None:
@@ -455,15 +571,17 @@ def run_full(
     )
 
 
-def run_preplanned(arm, gripper, limit=None, time_scale=1.0):
+def run_preplanned(arm, gripper, limit=None, time_scale=1.0, fill=None):
     """
     Sensorless "clear the bucket" sweep over the generated grab grid.
 
     No sensor data and no detection: visits each baked grab
     (grasp/retrieve_grid.py, scan_plans/retrieve.yaml), closing the
     gripper there as if grabbing something, and opens it at DROP;
-    limit keeps only the first N grabs. Refuses, without moving, if
-    the grid has not been baked.
+    fill: start at that layer and sweep every one under it (grasp/
+    pile_layers.select_layers); None, every layer. limit keeps only the
+    first N grabs of those. Refuses, without moving, if the grid has
+    not been baked.
 
     Returns True if every motion succeeded.
     """
@@ -489,9 +607,18 @@ def run_preplanned(arm, gripper, limit=None, time_scale=1.0):
     if changed:
         print(f'WARNING: {changed}')
 
+    from .grasp import pile_layers
+
+    grabs = pile_layers.select_layers(grabs, fill)
+
+    if fill is not None and not any('layer' in grab for grab in grabs):
+        print('WARNING: the grab list has no layers (placed by hand); '
+              '--fill is ignored and every grab is swept.')
+
     grabs = grabs[:limit] if limit else grabs
 
-    print(f'Sensorless sweep over {len(grabs)} generated grab(s).')
+    layers = f' (layers {fill} down to 1)' if fill is not None else ''
+    print(f'Sensorless sweep over {len(grabs)} generated grab(s){layers}.')
 
     if not go_to(arm, 'inter', time_scale=time_scale):
         print('Failed to reach INTER; aborting.')
@@ -519,18 +646,21 @@ def run_clear(
     detect_params,
     sweep=True,
     sweep_limit=None,
+    sweep_fill=None,
     max_rounds=DEFAULT_CLEAR_MAX_ROUNDS,
     max_failed=DEFAULT_CLEAR_MAX_FAILED,
     scan_path=None,
     time_scale=1.0,
     coarse_steps=DEFAULT_COARSE_STEPS_M,
     bottom_check=True,
+    search=DEFAULT_SEARCH,
 ):
     """
     Empty the bucket: the sensorless grab sweep, then scan until clear.
 
-        1. the grab-grid sweep (run_preplanned; sweep=False skips it) -
-           laundry is expected at the start, so no scan is needed yet;
+        1. the grab-grid sweep (run_preplanned, from layer sweep_fill
+           down; sweep=False skips it) - laundry is expected at the
+           start, so no scan is needed yet;
         2. open -> scan -> detect -> grasp the best reachable item ->
            DROP, repeated until a scan finds nothing.
 
@@ -563,7 +693,8 @@ def run_clear(
         print('========== GRAB SWEEP ==========')
 
         if not run_preplanned(
-            arm, gripper, limit=sweep_limit, time_scale=time_scale
+            arm, gripper, limit=sweep_limit, time_scale=time_scale,
+            fill=sweep_fill,
         ):
             print('The grab sweep failed; stopping before any scan.')
             return False
@@ -581,7 +712,7 @@ def run_clear(
 
         result = scan_and_detect(
             arm, recorder, csv_path, baseline, scan_kwargs, detect_params,
-            model, coarse_steps, bottom_check,
+            model, coarse_steps, bottom_check, search,
         )
 
         if result is None:

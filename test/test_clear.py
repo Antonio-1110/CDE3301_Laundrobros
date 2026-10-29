@@ -21,7 +21,7 @@ def stages(monkeypatch):
         ) or ('S' if segments is None else 'Q'),
     )
 
-    def preplanned(arm, gripper, limit=None, time_scale=1.0):
+    def preplanned(arm, gripper, limit=None, time_scale=1.0, fill=None):
         log.append('sweep')
         return state['sweep_ok']
 
@@ -182,6 +182,8 @@ def test_fake_recorder_saves_of_one_scan_use_one_file(tmp_path):
 
 
 def _quick_clear(**kwargs):
+    # These test the ladder (2026-10-26); the in-out search has its own.
+    kwargs.setdefault('search', 'ladder')
     return pipeline.run_clear(
         None, None, None, 'baselines', {'end_scan': 'none', 'end_plan': 'P'},
         {}, scan_path=lambda i: f'clear_{i}.csv', **kwargs
@@ -289,7 +291,116 @@ def test_without_a_baked_end_scan_a_quick_miss_is_final(stages):
     assert pipeline.run_clear(
         None, None, None, 'baselines', {'end_scan': 'none', 'end_plan': None},
         {}, sweep=False, scan_path=lambda i: f'clear_{i}.csv',
+        search='ladder',
     )
     assert 'end scan' not in log
     # Still out of the bucket.
     assert log[-1] == 'go_to inter'
+
+
+# ---------------------------------------------------------------
+# The in-out search (default since 2026-10-28)
+# ---------------------------------------------------------------
+
+def _in_out_clear(end_plan='P', **kwargs):
+    return pipeline.run_clear(
+        None, None, None, 'baselines',
+        {'end_scan': 'none', 'end_plan': end_plan, 'step': 0.03,
+         'velocity': 0.045, 'acceleration': 0.045},
+        {}, scan_path=lambda i: f'clear_{i}.csv', sweep=False, **kwargs
+    )
+
+
+def test_in_out_goes_in_coarse_and_out_dense_in_one_trip(stages):
+    log, state = stages
+    # At the bottom: nothing. After the end scan and the way out: nothing.
+    state['detections'] = [[], []]
+
+    assert _in_out_clear()
+
+    (scan,) = state['scans']
+    assert scan['step'] == 0.12 and scan['outward_step'] == 0.03
+    # The dense strokes keep the scan's speed; the coarse ones scale.
+    assert scan['outward_velocity'] == 0.045
+    assert scan['velocity'] == pytest.approx(0.18)
+    # The end scan runs inside that one trip, at the bottom.
+    assert scan['end_scan'] == 'precession' and scan['outward_when_found']
+    assert not scan['stay_inside'] and not scan['start_inside']
+    assert 'end scan' not in ' '.join(log)          # no separate pass
+    assert log.count('detect Q') == 1 and log.count('detect S') == 1
+
+
+def test_in_out_found_at_the_bottom_judges_the_strokes_and_grabs(stages):
+    log, state = stages
+    # At the bottom: a. After the outward strokes (no end scan): a.
+    state['detections'] = [['a'], ['a']]
+
+    assert not _in_out_clear(max_rounds=1)
+    assert log.count('detect Q') == 2 and 'detect S' not in log
+    assert 'grasp' in log
+
+
+def test_in_out_without_a_baked_end_scan_turns_round_on_the_spot(stages):
+    log, state = stages
+    state['detections'] = [[], []]
+
+    assert _in_out_clear(end_plan=None)
+    assert state['scans'][0]['end_scan'] == 'none'
+    assert log.count('detect Q') == 2
+
+
+def test_in_out_without_coarse_steps_goes_both_ways_dense(stages):
+    _log, state = stages
+    state['detections'] = [[], []]
+
+    assert _in_out_clear(coarse_steps=())
+    assert state['scans'][0]['step'] == 0.03
+    assert state['scans'][0]['outward_step'] == 0.03
+
+
+class _Cluster:
+    def __init__(self, volume_cm3, peak_sigma, confident=True):
+        self.volume_m3 = volume_cm3 * 1e-6
+        self.peak_sigma = peak_sigma
+        self.confident = confident
+
+
+def test_a_confident_find_is_big_strong_and_well_sampled():
+    assert pipeline.confident_find(_Cluster(2400, 45))      # rig laundry
+    assert not pipeline.confident_find(_Cluster(120, 9))    # a sock
+    assert not pipeline.confident_find(_Cluster(61, 5))     # noise
+    assert not pipeline.confident_find(_Cluster(2400, 45, confident=False))
+
+
+def _bottom_answer(stages, monkeypatch, at_bottom):
+    """Run an in-out clear round; return what the check at the bottom said."""
+    _log, state = stages
+    answers = []
+
+    def scan(arm, recorder, csv_path, scan_kwargs, check=None):
+        state['scans'].append(dict(scan_kwargs, csv_path=csv_path))
+        answers.append(check())
+        return True
+
+    monkeypatch.setattr(pipeline, 'run_scan', scan)
+    state['detections'] = [at_bottom, at_bottom]
+    _in_out_clear(max_rounds=1)
+    return answers[0]
+
+
+def test_a_confident_find_comes_out_coarse(stages, monkeypatch):
+    answer = _bottom_answer(stages, monkeypatch, [_Cluster(2400, 45)])
+
+    assert answer == pytest.approx(0.12)
+
+
+def test_a_weak_find_comes_out_dense(stages, monkeypatch):
+    answer = _bottom_answer(stages, monkeypatch, [_Cluster(120, 9)])
+
+    assert answer is True
+
+
+def test_nothing_at_the_bottom_goes_on_to_the_end_scan(stages, monkeypatch):
+    answer = _bottom_answer(stages, monkeypatch, [])
+
+    assert answer is False

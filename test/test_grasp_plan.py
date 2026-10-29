@@ -462,7 +462,7 @@ def test_compute_grasp_target_tilts_when_arm_offset_laterally(surface):
     )
 
 
-def test_confident_clusters_go_front_first_then_the_rest_by_size():
+def test_clusters_are_ranked_by_size_alone():
     import numpy as np
 
     from laundry_control.grasp.execute import rank_clusters
@@ -487,8 +487,10 @@ def test_confident_clusters_go_front_first_then_the_rest_by_size():
         _Cluster('weak, small', 0.20, 0.0001, confident=False),
     ]
 
+    # Largest first, wherever it lies and however well sampled: a
+    # small cluster at the mouth no longer jumps the queue.
     assert [c.name for c in rank_clusters(clusters)] == [
-        'front, small', 'middle', 'deep, big',
-        'weak, at the mouth', 'weak, small',
+        'deep, big', 'weak, at the mouth', 'middle', 'front, small',
+        'weak, small',
     ]
     assert np.isfinite(clusters[0].target_point).all()

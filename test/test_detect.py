@@ -670,3 +670,25 @@ def test_the_gate_can_be_switched_off():
         mean_deviation_m=0.01, volume_m3=12e-6, peak_sigma=4.0,
     )
     assert strong_or_large(summary, min_peak_sigma=0.0)
+
+
+def test_a_wide_thin_film_is_not_laundry(surface):
+    """
+    Under DEFAULT_MIN_MAX_INTRUSION_M it is dropped, however large.
+
+    The rig's empty-drum films (2026-10-28) stood 6 mm proud on
+    average, 9-12 at most, over 22-30 cm; planted 6 mm deep here, the
+    2 mm noise takes the highest point to ~13 mm.
+    """
+    from laundry_control.perception.detect import detect_on_points
+
+    def found(depth_m, **gate):
+        scan, _ = plant_on_wall(
+            empty_scan(n=20000, seed=7), s0=0.25, theta0=np.pi,
+            depth_m=depth_m, ds=0.12, dtheta=0.5,
+        )
+        return detect_on_points(scan, surface, **gate)[0]
+
+    assert found(0.006, min_max_intrusion_m=0.0)
+    assert not found(0.006)
+    assert found(0.025)
